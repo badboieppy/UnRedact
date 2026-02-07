@@ -2,10 +2,13 @@ use clap::{Parser, ValueEnum};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use unredact::{
-    build_report, find_redactions_in_pdf_bytes_vector_only,
-    find_redactions_in_pdf_bytes_with_renderer, HayroRenderer, RedactionFinderConfig,
-    RedactionMode,
+use unredact::redaction_finder::dependency::hayro_renderer::HayroRenderer;
+use unredact::redaction_finder::logic::redaction_finder_component::build_report;
+use unredact::redaction_finder::service::redaction_finder_entry::{
+    find_redactions_in_pdf_bytes_vector_only, find_redactions_in_pdf_bytes_with_renderer,
+};
+use unredact::redaction_finder::types::{
+    RedactionFinderConfig, RedactionMode,
 };
 
 #[derive(Debug, Parser)]
@@ -72,12 +75,13 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<(), String> {
     let args = Args::parse();
 
-    let mut cfg = RedactionFinderConfig::default();
-    cfg.include_details = args.details;
-    cfg.mode = args.mode.into();
-    cfg.include_full_page_rects = args.include_full_page_rects;
-    cfg.enable_image_analysis = !args.no_image_analysis;
-    cfg.raster_dpi = args.raster_dpi;
+    let cfg = RedactionFinderConfig {
+        include_details: args.details,
+        mode: args.mode.into(),
+        include_full_page_rects: args.include_full_page_rects,
+        enable_image_analysis: !args.no_image_analysis,
+        raster_dpi: args.raster_dpi,
+    };
 
     if !cfg.raster_dpi.is_finite() || cfg.raster_dpi <= 0.0 {
         return Err(format!("invalid --raster-dpi value: {}", cfg.raster_dpi));

@@ -104,11 +104,13 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[inline]
     pub fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         Self { x0, y0, x1, y1 }
     }
 }
 
+#[inline]
 pub fn distinct_fonts_from_counts(counts: &[FontCount]) -> Vec<FontId> {
     counts
         .iter()
@@ -118,6 +120,7 @@ pub fn distinct_fonts_from_counts(counts: &[FontCount]) -> Vec<FontId> {
         .collect::<Vec<_>>()
 }
 
+#[inline]
 pub fn aggregate_counts(occurrences: &[FontOccurrence]) -> Vec<FontCount> {
     let m = occurrences
         .iter()
@@ -138,7 +141,7 @@ mod tests {
     #[test]
     fn output_format_serializes_json() {
         let fmt = OutputFormat::Json;
-        let s = serde_json::to_string(&fmt).unwrap();
+        let s = serde_json::to_string(&fmt).expect("expected value in test");
         assert_eq!(s, "\"json\"");
     }
 
@@ -152,12 +155,12 @@ mod tests {
     #[test]
     fn font_id_ordering_is_deterministic() {
         let a = FontId {
-            family: "Arial".to_string(),
+            family: "Arial".to_owned(),
             variant: None,
         };
         let b = FontId {
-            family: "Calibri".to_string(),
-            variant: Some("Bold".to_string()),
+            family: "Calibri".to_owned(),
+            variant: Some("Bold".to_owned()),
         };
         let mut v = vec![b.clone(), a.clone()];
         v.sort();
@@ -167,11 +170,11 @@ mod tests {
     #[test]
     fn distinct_fonts_from_counts_deduplicates_and_sorts() {
         let arial = FontId {
-            family: "Arial".to_string(),
+            family: "Arial".to_owned(),
             variant: None,
         };
         let calibri = FontId {
-            family: "Calibri".to_string(),
+            family: "Calibri".to_owned(),
             variant: None,
         };
         let counts = vec![
@@ -200,12 +203,12 @@ mod tests {
     #[test]
     fn counts_as_map_builds_expected_map() {
         let arial = FontId {
-            family: "Arial".to_string(),
+            family: "Arial".to_owned(),
             variant: None,
         };
         let calibri = FontId {
-            family: "Calibri".to_string(),
-            variant: Some("Bold".to_string()),
+            family: "Calibri".to_owned(),
+            variant: Some("Bold".to_owned()),
         };
         let counts = vec![
             FontCount {
@@ -226,11 +229,11 @@ mod tests {
     #[test]
     fn aggregate_counts_counts_occurrences() {
         let arial = FontId {
-            family: "Arial".to_string(),
+            family: "Arial".to_owned(),
             variant: None,
         };
         let calibri = FontId {
-            family: "Calibri".to_string(),
+            family: "Calibri".to_owned(),
             variant: None,
         };
 
@@ -243,7 +246,7 @@ mod tests {
                         bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
                     },
                 },
-                text: Some("a".to_string()),
+                text: Some("a".to_owned()),
                 confidence: Some(0.9),
             },
             FontOccurrence {
@@ -254,7 +257,7 @@ mod tests {
                         bbox: Rect::new(1.0, 0.0, 2.0, 1.0),
                     },
                 },
-                text: Some("b".to_string()),
+                text: Some("b".to_owned()),
                 confidence: Some(0.8),
             },
             FontOccurrence {
@@ -303,13 +306,13 @@ mod tests {
     #[test]
     fn report_roundtrips_json() {
         let arial = FontId {
-            family: "Arial".to_string(),
+            family: "Arial".to_owned(),
             variant: None,
         };
 
         let report = FontDetectionReport {
             inputs: vec![FileFontReport {
-                path: "x.pdf".to_string(),
+                path: "x.pdf".to_owned(),
                 kind: InputFileKind::Pdf,
                 text_source: TextSourceKind::EmbeddedText,
                 fonts: FontsFound {
@@ -328,15 +331,16 @@ mod tests {
                                 bbox: Rect::new(1.0, 2.0, 3.0, 4.0),
                             },
                         },
-                        text: Some("Hi".to_string()),
+                        text: Some("Hi".to_owned()),
                         confidence: None,
                     }],
                 }),
             }],
         };
 
-        let s = serde_json::to_string(&report).unwrap();
-        let decoded: FontDetectionReport = serde_json::from_str(&s).unwrap();
+        let s = serde_json::to_string(&report).expect("expected value in test");
+        let decoded: FontDetectionReport = serde_json::from_str(&s).expect("expected value in test");
         assert_eq!(decoded, report);
     }
 }
+

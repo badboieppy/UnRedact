@@ -2,6 +2,10 @@
 name = "unredact"
 version = "0.1.0"
 edition = "2021"
+description = "Utilities for font detection and redaction discovery in documents."
+repository = "https://example.com/your-org/unredact"
+keywords = ["pdf", "redaction", "forensics", "fonts", "cli"]
+categories = ["command-line-utilities", "text-processing"]
 license-file = "LICENSE"
 
 [dependencies]
@@ -13,3 +17,17 @@ hayro = "0.5.0"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"

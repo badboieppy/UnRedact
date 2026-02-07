@@ -1,10 +1,23 @@
+#![deny(clippy::all)]
+#![warn(clippy::perf)]
+#![warn(clippy::complexity)]
+#![warn(clippy::style)]
+#![warn(clippy::suspicious)]
+#![warn(clippy::correctness)]
+#![deny(clippy::self_named_module_files)]
+#![deny(clippy::unseparated_literal_suffix)]
+#![deny(clippy::default_numeric_fallback)]
+#![deny(clippy::if_then_some_else_none)]
+#![deny(clippy::integer_division)]
+#![deny(clippy::integer_division_remainder_used)]
+#![deny(clippy::let_underscore_untyped)]
+#![deny(clippy::missing_inline_in_public_items)]
+#![deny(clippy::pub_without_shorthand)]
+#![deny(clippy::str_to_string)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::assertions_on_result_states)]
+#![deny(clippy::let_underscore_must_use)]
+#![deny(clippy::unused_trait_names)]
+
 pub mod font_detection;
 pub mod redaction_finder;
-
-pub use redaction_finder::{
-    build_report, find_redactions_in_pdf_bytes_vector_only,
-    find_redactions_in_pdf_bytes_with_renderer, find_redactions_in_pdf_path_with_renderer,
-    HayroRenderer, PdfRenderer, Rect, RedactionError, RedactionFinderConfig, RedactionFinderOutput,
-    RedactionKind, RedactionMode, RedactionOccurrence, RedactionReport, RenderedPage,
-    UnderlyingTextHit,
-};

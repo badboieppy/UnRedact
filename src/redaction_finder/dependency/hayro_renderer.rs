@@ -15,11 +15,16 @@ pub struct HayroRenderer {
 }
 
 impl HayroRenderer {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, RedactionError> {
+    #[inline]
+    pub fn new<PathLike>(path: PathLike) -> Result<Self, RedactionError>
+    where
+        PathLike: AsRef<Path>,
+    {
         let bytes = std::fs::read(path)?;
         Self::new_from_bytes(&bytes)
     }
 
+    #[inline]
     pub fn new_from_bytes(bytes: &[u8]) -> Result<Self, RedactionError> {
         let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(bytes.to_vec());
         let pdf = Pdf::new(data)
@@ -27,22 +32,25 @@ impl HayroRenderer {
         let page_count = pdf.pages().len();
         if page_count == 0 {
             return Err(RedactionError::Internal(
-                "pdf contains zero pages".to_string(),
+                "pdf contains zero pages".to_owned(),
             ));
         }
         Ok(Self { pdf, page_count })
     }
 
+    #[inline]
     pub fn is_available() -> bool {
         true
     }
 }
 
 impl PdfRenderer for HayroRenderer {
+    #[inline]
     fn page_count(&self) -> usize {
         self.page_count
     }
 
+    #[inline]
     fn render_page_to_rgba(
         &self,
         page_index: usize,

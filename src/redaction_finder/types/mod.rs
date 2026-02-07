@@ -10,6 +10,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[inline]
     pub fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         let (min_x, max_x) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
         let (min_y, max_y) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
@@ -21,14 +22,17 @@ impl Rect {
         }
     }
 
+    #[inline]
     pub fn width(&self) -> f32 {
         self.x1 - self.x0
     }
 
+    #[inline]
     pub fn height(&self) -> f32 {
         self.y1 - self.y0
     }
 
+    #[inline]
     pub fn area(&self) -> f32 {
         self.width().max(0.0) * self.height().max(0.0)
     }
@@ -87,6 +91,7 @@ pub struct RedactionFinderConfig {
 }
 
 impl Default for RedactionFinderConfig {
+    #[inline]
     fn default() -> Self {
         Self {
             include_details: false,

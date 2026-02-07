@@ -90,7 +90,7 @@ mod tests {
                 .files
                 .get(&key)
                 .cloned()
-                .ok_or_else(|| "not found".to_string())?;
+                .ok_or_else(|| "not found".to_owned())?;
             Ok(FileReadResponse { bytes })
         }
     }
@@ -105,9 +105,9 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap_err();
+        .expect_err("expected error in test");
 
-        assert_eq!(err, "no inputs provided".to_string());
+        assert_eq!(err, "no inputs provided".to_owned());
     }
 
     #[test]
@@ -122,14 +122,14 @@ mod tests {
             },
             OutputFormat::Json,
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(out.format, OutputFormat::Json);
         assert_eq!(out.path, None);
 
-        let s = String::from_utf8(out.bytes).unwrap();
-        assert_eq!(s.ends_with('\n'), true);
-        assert_eq!(s.contains("\"inputs\""), true);
+        let s = String::from_utf8(out.bytes).expect("expected value in test");
+        assert!(s.ends_with('\n'));
+        assert!(s.contains("\"inputs\""));
     }
 
     #[test]
@@ -145,7 +145,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(out.path, Some(PathBuf::from("out.json")));
         assert_eq!(out.format, OutputFormat::Json);
@@ -162,10 +162,10 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(report.inputs.len(), 1);
-        assert_eq!(report.inputs[0].path, "x.bin".to_string());
+        assert_eq!(report.inputs[0].path, "x.bin".to_owned());
     }
 
     #[test]
@@ -179,12 +179,13 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
-        let _ = (accessor, report);
+        assert_eq!(report.inputs.len(), 1);
         assert_eq!(
             Path::new("x.bin").to_string_lossy().to_string(),
-            "x.bin".to_string()
+            "x.bin".to_owned()
         );
     }
 }
+

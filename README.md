@@ -1,6 +1,10 @@
 # UnRedact
 Un-redact files
 
+## Build/Lint Policy
+- Builds run through `clippy` and fail on any warning.
+- Ensure clippy is installed: `rustup component add clippy`
+
 ## Available CLIs
 
 ### Font Detection CLI

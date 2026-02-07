@@ -2,6 +2,7 @@ use crate::font_detection::dependency::file_accessor::OsFileAccessor;
 use crate::font_detection::logic::types::file_types::{FontProcessInput, OutputFormat};
 use crate::font_detection::service::entry::run_font_detection;
 use clap::{Parser, ValueEnum};
+use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -38,16 +39,21 @@ pub enum CliOutputFormat {
     Json,
 }
 
+#[inline]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let result = dispatch(cli);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("{message}");
+            write_error_line(&message);
             ExitCode::from(2)
         }
     }
+}
+
+fn write_error_line(message: &str) {
+    let _write_result = writeln!(io::stderr().lock(), "{message}");
 }
 
 fn dispatch(cli: Cli) -> Result<(), String> {
@@ -60,7 +66,7 @@ fn handle_detect(args: DetectArgs) -> Result<(), String> {
     let input = map_args(args)?;
     let accessor = OsFileAccessor::new();
     let encoded = run_font_detection(&accessor, input)?;
-    write_output(&encoded.path, encoded.bytes, encoded.format)
+    write_output(&encoded.path, encoded.bytes)
 }
 
 fn map_args(args: DetectArgs) -> Result<FontProcessInput, String> {
@@ -79,33 +85,28 @@ fn map_format(fmt: CliOutputFormat) -> OutputFormat {
     }
 }
 
-fn write_output(
-    path: &Option<PathBuf>,
-    bytes: Vec<u8>,
-    format: OutputFormat,
-) -> Result<(), String> {
-    let _ = format;
+fn write_output(path: &Option<PathBuf>, bytes: Vec<u8>) -> Result<(), String> {
     match path.as_ref() {
         None => write_to_stdout(bytes),
-        Some(p) => write_to_file(p, bytes),
+        Some(path_buf) => write_to_file(path_buf, bytes),
     }
 }
 
 fn write_to_stdout(bytes: Vec<u8>) -> Result<(), String> {
-    use std::io::Write;
+    use std::io::Write as _;
 
     let mut out = std::io::stdout().lock();
-    out.write_all(&bytes).map_err(|e| e.to_string())?;
-    out.flush().map_err(|e| e.to_string())?;
+    out.write_all(&bytes).map_err(|error| error.to_string())?;
+    out.flush().map_err(|error| error.to_string())?;
     Ok(())
 }
 
 fn write_to_file(path: &PathBuf, bytes: Vec<u8>) -> Result<(), String> {
-    use std::io::Write;
+    use std::io::Write as _;
 
-    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
-    file.flush().map_err(|e| e.to_string())?;
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.flush().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -136,7 +137,7 @@ mod tests {
             output: Some(PathBuf::from("out.json")),
         };
 
-        let out = map_args(args).unwrap();
+        let out = map_args(args).expect("expected value in test");
 
         assert_eq!(
             out.inputs,
@@ -144,31 +145,30 @@ mod tests {
         );
         assert_eq!(out.output, Some(PathBuf::from("out.json")));
         assert_eq!(out.format, OutputFormat::Json);
-        assert_eq!(out.include_details, true);
+        assert!(out.include_details);
     }
 
     #[test]
     fn write_output_stdout_branch() {
-        let out = write_output(&None, b"{}\n".to_vec(), OutputFormat::Json);
-        assert_eq!(out.is_ok(), true);
+        let out = write_output(&None, b"{}\n".to_vec());
+        out.expect("expected value in test");
     }
 
     #[test]
     fn write_output_file_branch_creates_file() {
         let dir = std::env::temp_dir();
         let path = dir.join("unredact_font_detection_cli_entry_test_out.json");
-        let _ = std::fs::remove_file(&path);
+        let _ignored_remove_result = std::fs::remove_file(&path);
 
         let out = write_output(
             &Some(path.clone()),
             b"{\"ok\":true}\n".to_vec(),
-            OutputFormat::Json,
         );
-        assert_eq!(out.is_ok(), true);
+        out.expect("expected value in test");
 
-        let bytes = std::fs::read(&path).unwrap();
+        let bytes = std::fs::read(&path).expect("expected value in test");
         assert_eq!(bytes, b"{\"ok\":true}\n".to_vec());
 
-        let _ = std::fs::remove_file(&path);
+        let _ignored_remove_result = std::fs::remove_file(&path);
     }
 }

@@ -26,22 +26,24 @@ pub trait RedactionDataRetriever {
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String>;
 }
 
-pub struct PdfFileRetriever<'a> {
+pub struct PdfFileRetriever<'renderer> {
     doc: Document,
     page_map: BTreeMap<u32, ObjectId>,
-    renderer: Option<&'a dyn PdfRenderer>,
+    renderer: Option<&'renderer dyn PdfRenderer>,
 }
 
-impl<'a> PdfFileRetriever<'a> {
+impl<'renderer> PdfFileRetriever<'renderer> {
+    #[inline]
     pub fn new_from_bytes(
         bytes: &[u8],
-        renderer: Option<&'a dyn PdfRenderer>,
+        renderer: Option<&'renderer dyn PdfRenderer>,
     ) -> Result<Self, String> {
         let doc = Document::load_mem(bytes).map_err(|e| e.to_string())?;
         Ok(Self::new(doc, renderer))
     }
 
-    pub fn new(doc: Document, renderer: Option<&'a dyn PdfRenderer>) -> Self {
+    #[inline]
+    pub fn new(doc: Document, renderer: Option<&'renderer dyn PdfRenderer>) -> Self {
         let page_map = doc
             .get_pages()
             .into_iter()
@@ -59,11 +61,13 @@ impl<'a> PdfFileRetriever<'a> {
     }
 }
 
-impl<'a> RedactionDataRetriever for PdfFileRetriever<'a> {
+impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
+    #[inline]
     fn page_indices(&self) -> Vec<u32> {
         self.page_map.keys().copied().collect::<Vec<u32>>()
     }
 
+    #[inline]
     fn annotation_redactions(
         &self,
         page_index: u32,
@@ -75,6 +79,7 @@ impl<'a> RedactionDataRetriever for PdfFileRetriever<'a> {
         extract_annotation_redactions(&self.doc, page_id, page_index, include_details)
     }
 
+    #[inline]
     fn drawn_redactions(
         &self,
         page_index: u32,
@@ -93,6 +98,7 @@ impl<'a> RedactionDataRetriever for PdfFileRetriever<'a> {
         )
     }
 
+    #[inline]
     fn raster_redactions(
         &self,
         page_index: u32,
@@ -106,25 +112,19 @@ impl<'a> RedactionDataRetriever for PdfFileRetriever<'a> {
         let page_id = self
             .page_id(page_index)
             .ok_or_else(|| format!("page_missing:index={page_index}"))?;
-        let (page_width_pt, page_height_pt) =
-            page_size_from_page(&self.doc, page_id).unwrap_or((612.0, 792.0));
+        let page_box = page_render_box_from_page(&self.doc, page_id)
+            .unwrap_or(Rect::new(0.0, 0.0, 612.0, 792.0));
 
-        extract_raster_page_redactions(renderer, page_index, page_width_pt, page_height_pt, cfg)
+        extract_raster_page_redactions(renderer, page_index, page_box, cfg)
     }
 
+    #[inline]
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String> {
         let page_id = self
             .page_id(page_index)
             .ok_or_else(|| format!("page_missing:index={page_index}"))?;
 
-        let content = self
-            .doc
-            .get_page_content(page_id)
-            .map_err(|e| format!("page_content_error={e}"))?;
-        let decoded = lopdf::content::Content::decode(&content)
-            .map_err(|e| format!("page_decode_error={e}"))?;
-
-        Ok(extract_text_runs(page_index, &decoded.operations))
+        extract_page_text_runs(&self.doc, page_id, page_index)
     }
 }
 fn extract_annotation_redactions(
@@ -202,8 +202,8 @@ fn extract_annotation_redactions(
             continue;
         }
 
-        let rect = dict.get(b"Rect").ok().and_then(object_to_rect);
-        let rect = match rect {
+        let rect_opt = dict.get(b"Rect").ok().and_then(object_to_rect);
+        let rect = match rect_opt {
             None => continue,
             Some(r) => r,
         };
@@ -211,22 +211,22 @@ fn extract_annotation_redactions(
         let mut meta: BTreeMap<String, String> = BTreeMap::new();
         if include_details {
             if !subtype.is_empty() {
-                meta.insert("Subtype".to_string(), subtype);
+                meta.insert("Subtype".to_owned(), subtype);
             }
             if !rt.is_empty() {
-                meta.insert("RT".to_string(), rt);
+                meta.insert("RT".to_owned(), rt);
             }
             if !it.is_empty() {
-                meta.insert("IT".to_string(), it);
+                meta.insert("IT".to_owned(), it);
             }
             if !ft.is_empty() {
-                meta.insert("FT".to_string(), ft);
+                meta.insert("FT".to_owned(), ft);
             }
             if !nm.is_empty() {
-                meta.insert("NM".to_string(), nm);
+                meta.insert("NM".to_owned(), nm);
             }
             if !contents.is_empty() {
-                meta.insert("Contents".to_string(), contents);
+                meta.insert("Contents".to_owned(), contents);
             }
         }
 
@@ -310,6 +310,10 @@ fn extract_page_drawn_redactions(
     Ok(out)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF content graph traversal requires this contextual parameter set."
+)]
 fn extract_from_xobjects(
     doc: &Document,
     page_index: u32,
@@ -328,8 +332,7 @@ fn extract_from_xobjects(
         }
 
         let name = op
-            .operands
-            .get(0)
+            .operands.first()
             .and_then(object_to_name_string)
             .unwrap_or_default();
         if name.is_empty() {
@@ -400,6 +403,10 @@ fn extract_from_xobjects(
     out
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Operation scanning needs page/state/options to avoid global mutable state."
+)]
 fn extract_drawn_from_ops(
     _doc: &Document,
     page_index: u32,
@@ -408,13 +415,12 @@ fn extract_drawn_from_ops(
     is_page_level: bool,
     ops: &[lopdf::content::Operation],
     _xobject_dict: &Dictionary,
-    diagnostics: &mut Vec<String>,
+    _diagnostics: &mut Vec<String>,
     _visited: &mut BTreeSet<String>,
 ) -> Vec<RedactionOccurrence> {
     let mut out = Vec::new();
     let mut state = DrawState::default();
     let mut path = PathState::default();
-    let mut pending_fill_rgb = None::<(f32, f32, f32)>;
 
     for op in ops {
         let name = op.operator.as_str();
@@ -430,8 +436,6 @@ fn extract_drawn_from_ops(
             "h" => path = path.close(),
             "n" => path = path.clear(),
             "f" | "f*" => {
-                pending_fill_rgb = Some((state.fill_r, state.fill_g, state.fill_b));
-
                 if let Some(rect) = rect_from_path_if_axis_aligned_rect(&path) {
                     let is_black = state.fill_is_black();
                     let score = if is_black {
@@ -449,13 +453,13 @@ fn extract_drawn_from_ops(
                         let mut meta: BTreeMap<String, String> = BTreeMap::new();
                         if include_details {
                             meta.insert(
-                                "fill_rgb".to_string(),
+                                "fill_rgb".to_owned(),
                                 format!(
                                     "{:.3},{:.3},{:.3}",
                                     state.fill_r, state.fill_g, state.fill_b
                                 ),
                             );
-                            meta.insert("path_kind".to_string(), op.operator.clone());
+                            meta.insert("path_kind".to_owned(), op.operator.clone());
                         }
                         out.push(RedactionOccurrence {
                             page_index,
@@ -489,7 +493,7 @@ fn extract_drawn_from_ops(
                         let mut meta: BTreeMap<String, String> = BTreeMap::new();
                         if include_details {
                             meta.insert(
-                                "fill_rgb".to_string(),
+                                "fill_rgb".to_owned(),
                                 format!(
                                     "{:.3},{:.3},{:.3}",
                                     state.fill_r, state.fill_g, state.fill_b
@@ -510,9 +514,6 @@ fn extract_drawn_from_ops(
             _ => {}
         }
     }
-
-    let _ = pending_fill_rgb;
-    let _ = diagnostics;
     out
 }
 
@@ -587,8 +588,7 @@ impl DrawState {
     }
 
     fn set_fill_rgb(mut self, operands: &[Object]) -> Self {
-        let r = operands
-            .get(0)
+        let r = operands.first()
             .and_then(object_to_f32)
             .unwrap_or(self.fill_r);
         let g = operands
@@ -606,8 +606,7 @@ impl DrawState {
     }
 
     fn set_fill_gray(mut self, operands: &[Object]) -> Self {
-        let g = operands
-            .get(0)
+        let g = operands.first()
             .and_then(object_to_f32)
             .unwrap_or(self.fill_gray);
         self.fill_gray = g;
@@ -618,8 +617,7 @@ impl DrawState {
     }
 
     fn set_fill_cmyk(mut self, operands: &[Object]) -> Self {
-        let c = operands
-            .get(0)
+        let c = operands.first()
             .and_then(object_to_f32)
             .unwrap_or(self.fill_c);
         let m = operands
@@ -666,7 +664,7 @@ impl DrawState {
 }
 
 fn rect_from_re(operands: &[Object]) -> Option<Rect> {
-    let x = operands.get(0).and_then(object_to_f32)?;
+    let x = operands.first().and_then(object_to_f32)?;
     let y = operands.get(1).and_then(object_to_f32)?;
     let w = operands.get(2).and_then(object_to_f32)?;
     let h = operands.get(3).and_then(object_to_f32)?;
@@ -753,14 +751,14 @@ impl PathState {
     }
 
     fn move_to(mut self, operands: &[Object]) -> Self {
-        let x = operands.get(0).and_then(object_to_f32);
-        let y = operands.get(1).and_then(object_to_f32);
-        match (x, y) {
-            (Some(x), Some(y)) => {
-                self.current = Some((x, y));
-                self.start = Some((x, y));
+        let x_opt = operands.first().and_then(object_to_f32);
+        let y_opt = operands.get(1).and_then(object_to_f32);
+        match (x_opt, y_opt) {
+            (Some(x_value), Some(y_value)) => {
+                self.current = Some((x_value, y_value));
+                self.start = Some((x_value, y_value));
                 self.points.clear();
-                self.points.push((x, y));
+                self.points.push((x_value, y_value));
                 self.closed = false;
                 self
             }
@@ -769,12 +767,12 @@ impl PathState {
     }
 
     fn line_to(mut self, operands: &[Object]) -> Self {
-        let x = operands.get(0).and_then(object_to_f32);
-        let y = operands.get(1).and_then(object_to_f32);
-        match (x, y) {
-            (Some(x), Some(y)) => {
-                self.current = Some((x, y));
-                self.points.push((x, y));
+        let x_opt = operands.first().and_then(object_to_f32);
+        let y_opt = operands.get(1).and_then(object_to_f32);
+        match (x_opt, y_opt) {
+            (Some(x_value), Some(y_value)) => {
+                self.current = Some((x_value, y_value));
+                self.points.push((x_value, y_value));
                 self
             }
             _ => self,
@@ -861,15 +859,10 @@ fn round2(v: f32) -> i32 {
 
 fn normalized_rect_from_pixels(
     x0: usize,
-
     y0: usize,
-
     x1: usize,
-
     y1: usize,
-
     width: usize,
-
     height: usize,
 ) -> Rect {
     if width == 0 || height == 0 {
@@ -877,12 +870,11 @@ fn normalized_rect_from_pixels(
     }
 
     let fx0 = x0 as f32 / width as f32;
-
     let fx1 = x1 as f32 / width as f32;
-
-    let fy0 = (height.saturating_sub(y1) as f32) / height as f32;
-
-    let fy1 = (height.saturating_sub(y0) as f32) / height as f32;
+    // Keep image-space Y in top-origin coordinates here. The conversion to
+    // bottom-origin PDF coordinates is handled once in `rect_pixels_to_pdf`.
+    let fy0 = y0 as f32 / height as f32;
+    let fy1 = y1 as f32 / height as f32;
 
     Rect::new(fx0, fy0, fx1, fy1)
 }
@@ -894,8 +886,7 @@ fn rect_pixels_to_pdf(
     y0_px: u32,
     x1_px: u32,
     y1_px: u32,
-    page_width_pt: f32,
-    page_height_pt: f32,
+    page_box: Rect,
     dpi: f32,
 ) -> Rect {
     // Convert pixel positions to inches.
@@ -905,13 +896,12 @@ fn rect_pixels_to_pdf(
     let y1_in_from_top = y1_px as f32 / dpi;
 
     // Convert inches to points.
-    let x0_pt = (x0_in * 72.0).clamp(0.0, page_width_pt);
-    let x1_pt = (x1_in * 72.0).clamp(0.0, page_width_pt);
+    let x0_pt = (page_box.x0 + (x0_in * 72.0)).clamp(page_box.x0, page_box.x1);
+    let x1_pt = (page_box.x0 + (x1_in * 72.0)).clamp(page_box.x0, page_box.x1);
 
-    // Flip Y from top-origin image to bottom-origin PDF.
-    let page_height_in = page_height_pt / 72.0;
-    let y1_pt = ((page_height_in - y0_in_from_top) * 72.0).clamp(0.0, page_height_pt);
-    let y0_pt = ((page_height_in - y1_in_from_top) * 72.0).clamp(0.0, page_height_pt);
+    // Flip Y from top-origin image to bottom-origin PDF and retain page-box origin.
+    let y1_pt = (page_box.y1 - (y0_in_from_top * 72.0)).clamp(page_box.y0, page_box.y1);
+    let y0_pt = (page_box.y1 - (y1_in_from_top * 72.0)).clamp(page_box.y0, page_box.y1);
 
     Rect::new(x0_pt, y0_pt, x1_pt, y1_pt)
 }
@@ -953,6 +943,10 @@ struct DarkRegionDetections {
     regions: Vec<DarkRegion>,
 }
 
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "Raster region detection is a single-pass algorithm with connected-component expansion."
+)]
 fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> ImageDetectionResult {
     if width == 0 || height == 0 {
         return ImageDetectionResult {
@@ -973,8 +967,8 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
         };
     }
 
-    let mut sum = 0u64;
-    let mut min_v = 255u8;
+    let mut sum = 0_u64;
+    let mut min_v = 255_u8;
     for &px in gray.iter().take(total_pixels) {
         sum += px as u64;
         if px < min_v {
@@ -990,8 +984,8 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
     let cols = col_bins.len();
     let rows = row_bins.len();
 
-    let mut cell_sums = vec![0u64; rows * cols];
-    let mut cell_area = vec![1u32; rows * cols];
+    let mut cell_sums = vec![0_u64; rows * cols];
+    let mut cell_area = vec![1_u32; rows * cols];
 
     for (row_idx, (y0, y1)) in row_bins.iter().enumerate() {
         let y_span = y1.saturating_sub(*y0).max(1);
@@ -1004,7 +998,7 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
             let row_offset = y * width;
             for (col_idx, (x0, x1)) in col_bins.iter().enumerate() {
                 let idx = row_idx * cols + col_idx;
-                let mut acc = 0u64;
+                let mut acc = 0_u64;
                 for x in *x0..*x1 {
                     acc += gray[row_offset + x] as u64;
                 }
@@ -1013,7 +1007,7 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
         }
     }
 
-    let mut cell_avg = vec![0f32; rows * cols];
+    let mut cell_avg = vec![0_f32; rows * cols];
     for idx in 0..cell_sums.len() {
         let area = cell_area[idx].max(1) as f32;
         cell_avg[idx] = cell_sums[idx] as f32 / area;
@@ -1028,121 +1022,116 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
     let mut detections = Vec::new();
     let mut queue = VecDeque::new();
 
-    for idx in 0..cell_avg.len() {
-        if visited[idx] || cell_avg[idx] > threshold {
-            continue;
-        }
-        visited[idx] = true;
-        queue.clear();
-        queue.push_back(idx);
+    for row_index in 0..rows {
+        for col_index in 0..cols {
+            let idx = row_index * cols + col_index;
+            if visited[idx] || cell_avg[idx] > threshold {
+                continue;
+            }
+            visited[idx] = true;
+            queue.clear();
+            queue.push_back((row_index, col_index));
 
-        let mut sum_lum = 0f32;
-        let mut pixel_area = 0u64;
-        let mut min_col = cols;
-        let mut max_col = 0;
-        let mut min_row = rows;
-        let mut max_row = 0;
+            let mut sum_lum = 0_f32;
+            let mut pixel_area = 0_u64;
+            let mut min_col = cols;
+            let mut max_col = 0;
+            let mut min_row = rows;
+            let mut max_row = 0;
 
-        while let Some(current) = queue.pop_front() {
-            let row = current / cols;
-            let col = current % cols;
-            let area = cell_area[current] as u64;
-            sum_lum += cell_avg[current] * area as f32;
-            pixel_area += area;
-            if row < min_row {
-                min_row = row;
-            }
-            if row > max_row {
-                max_row = row;
-            }
-            if col < min_col {
-                min_col = col;
-            }
-            if col > max_col {
-                max_col = col;
-            }
-
-            let neighbors = [
-                row.checked_sub(1).map(|r| r * cols + col),
-                if row + 1 < rows {
-                    Some((row + 1) * cols + col)
-                } else {
-                    None
-                },
-                col.checked_sub(1).map(|c| row * cols + c),
-                if col + 1 < cols {
-                    Some(row * cols + (col + 1))
-                } else {
-                    None
-                },
-            ];
-            for n in neighbors.into_iter().flatten() {
-                if visited[n] {
-                    continue;
+            while let Some((row, col)) = queue.pop_front() {
+                let current = row * cols + col;
+                let area = cell_area[current] as u64;
+                sum_lum += cell_avg[current] * area as f32;
+                pixel_area += area;
+                if row < min_row {
+                    min_row = row;
                 }
-                if cell_avg[n] > threshold {
-                    continue;
+                if row > max_row {
+                    max_row = row;
                 }
-                visited[n] = true;
-                queue.push_back(n);
+                if col < min_col {
+                    min_col = col;
+                }
+                if col > max_col {
+                    max_col = col;
+                }
+
+                let neighbors = [
+                    row.checked_sub(1).map(|prev_row| (prev_row, col)),
+                    (row + 1 < rows).then(|| (row + 1, col)),
+                    col.checked_sub(1).map(|prev_col| (row, prev_col)),
+                    (col + 1 < cols).then(|| (row, col + 1)),
+                ];
+                for (next_row, next_col) in neighbors.into_iter().flatten() {
+                    let neighbor_index = next_row * cols + next_col;
+                    if visited[neighbor_index] {
+                        continue;
+                    }
+                    if cell_avg[neighbor_index] > threshold {
+                        continue;
+                    }
+                    visited[neighbor_index] = true;
+                    queue.push_back((next_row, next_col));
+                }
             }
-        }
 
-        if pixel_area == 0 {
-            continue;
-        }
-        let area_fraction = pixel_area as f32 / total_pixels as f32;
-        if area_fraction < 0.0005 || area_fraction > 0.9 {
-            continue;
-        }
-        if min_col >= cols || min_row >= rows {
-            continue;
-        }
-        let x0 = col_bins[min_col].0;
-        let x1 = col_bins[max_col].1;
-        let y0 = row_bins[min_row].0;
-        let y1 = row_bins[max_row].1;
-        if x1 <= x0 || y1 <= y0 {
-            continue;
-        }
-
-        let avg_lum = (sum_lum / pixel_area as f32).clamp(0.0, 255.0);
-
-        let normalized = normalized_rect_from_pixels(x0, y0, x1, y1, width, height);
-
-        let short_edge = ((x1 - x0) as f32).min((y1 - y0) as f32);
-
-        if short_edge < 4.0 {
-            continue;
-        }
-
-        let darkness = (1.0 - avg_lum / 255.0).clamp(0.0, 1.0);
-
-        let coverage = (area_fraction / 0.12).min(1.0);
-
-        let aspect = {
-            let w = (x1 - x0) as f32;
-
-            let h = (y1 - y0) as f32;
-
-            if h > 0.0 && w > 0.0 {
-                (w.max(h) / w.min(h)).min(12.0)
-            } else {
-                1.0
+            if pixel_area == 0 {
+                continue;
             }
-        };
+            let area_fraction = pixel_area as f32 / total_pixels as f32;
+            if !(0.0005..=0.9).contains(&area_fraction) {
+                continue;
+            }
+            if min_col >= cols || min_row >= rows {
+                continue;
+            }
+            let x0 = col_bins[min_col].0;
+            let x1 = col_bins[max_col].1;
+            let y0 = row_bins[min_row].0;
+            let y1 = row_bins[max_row].1;
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
 
-        let score = (0.55 * darkness) + (0.35 * coverage) + (0.10 * (aspect / 4.0).min(1.0));
+            let avg_lum = (sum_lum / pixel_area as f32).clamp(0.0, 255.0);
 
-        detections.push(ImageRegionDetection {
-            normalized_rect: normalized,
+            let normalized = normalized_rect_from_pixels(x0, y0, x1, y1, width, height);
 
-            avg_luminance: avg_lum,
+            let short_edge = ((x1 - x0) as f32).min((y1 - y0) as f32);
 
-            area_fraction,
+            if short_edge < 4.0 {
+                continue;
+            }
 
-            score,
-        });
+            let darkness = (1.0 - avg_lum / 255.0).clamp(0.0, 1.0);
+
+            let coverage = (area_fraction / 0.12).min(1.0);
+
+            let aspect = {
+                let w = (x1 - x0) as f32;
+
+                let h = (y1 - y0) as f32;
+
+                if h > 0.0 && w > 0.0 {
+                    (w.max(h) / w.min(h)).min(12.0)
+                } else {
+                    1.0
+                }
+            };
+
+            let score = (0.55 * darkness) + (0.35 * coverage) + (0.10 * (aspect / 4.0).min(1.0));
+
+            detections.push(ImageRegionDetection {
+                normalized_rect: normalized,
+
+                avg_luminance: avg_lum,
+
+                area_fraction,
+
+                score,
+            });
+        }
     }
 
     ImageDetectionResult { detections }
@@ -1205,14 +1194,14 @@ fn build_bins(size: usize, target: usize) -> Vec<(usize, usize)> {
 
     let mut result = Vec::with_capacity(bins);
 
-    let mut start = 0usize;
+    let mut start = 0_usize;
 
     let mut remaining_bins = bins;
 
     let mut remaining = size;
 
     while remaining_bins > 0 {
-        let chunk = (remaining + remaining_bins - 1) / remaining_bins;
+        let chunk = remaining.div_ceil(remaining_bins);
 
         let end = (start + chunk).min(size);
 
@@ -1234,15 +1223,46 @@ fn build_bins(size: usize, target: usize) -> Vec<(usize, usize)> {
     result
 }
 
-fn page_size_from_page(doc: &Document, page_id: ObjectId) -> Option<(f32, f32)> {
-    let page_obj = doc.get_object(page_id).ok()?;
-    let dict = match page_obj {
-        Object::Dictionary(d) => d,
-        _ => return None,
-    };
-    let media_box = dict.get(b"MediaBox").ok()?;
-    let rect = object_to_rect(media_box)?;
-    Some((rect.width().abs(), rect.height().abs()))
+fn page_render_box_from_page(doc: &Document, page_id: ObjectId) -> Option<Rect> {
+    inherited_page_rect(doc, page_id, b"CropBox")
+        .or_else(|| inherited_page_rect(doc, page_id, b"MediaBox"))
+}
+
+fn inherited_page_rect(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Rect> {
+    let mut current_id = page_id;
+    let mut depth = 0_usize;
+
+    loop {
+        if depth > 32 {
+            return None;
+        }
+        depth += 1;
+
+        let current_obj = doc.get_object(current_id).ok()?;
+        let current_dict = match current_obj {
+            Object::Dictionary(d) => d,
+            _ => return None,
+        };
+
+        if let Ok(obj) = current_dict.get(key) {
+            if let Some(rect) = object_to_rect_resolved(doc, obj) {
+                return Some(rect);
+            }
+        }
+
+        let parent_ref = match current_dict.get(b"Parent").ok()? {
+            Object::Reference(id) => *id,
+            _ => return None,
+        };
+        current_id = parent_ref;
+    }
+}
+
+fn object_to_rect_resolved(doc: &Document, obj: &Object) -> Option<Rect> {
+    match obj {
+        Object::Reference(oid) => doc.get_object(*oid).ok().and_then(object_to_rect),
+        _ => object_to_rect(obj),
+    }
 }
 
 /// Perform raster-based dark region detection on a fully rendered page bitmap
@@ -1251,8 +1271,7 @@ fn page_size_from_page(doc: &Document, page_id: ObjectId) -> Option<(f32, f32)> 
 fn extract_raster_page_redactions(
     renderer: &dyn PdfRenderer,
     page_index: u32,
-    page_width_pt: f32,
-    page_height_pt: f32,
+    page_box: Rect,
     cfg: &RedactionFinderConfig,
 ) -> Result<Vec<RedactionOccurrence>, String> {
     let rendered = renderer
@@ -1286,12 +1305,15 @@ fn extract_raster_page_redactions(
             det.y0_px,
             det.x1_px,
             det.y1_px,
-            page_width_pt,
-            page_height_pt,
+            page_box,
             rendered.dpi,
         );
 
-        if rect_is_near_full_page_with_size(&page_rect, page_width_pt, page_height_pt) {
+        if rect_is_near_full_page_with_size(
+            &page_rect,
+            page_box.width().abs(),
+            page_box.height().abs(),
+        ) {
             continue;
         }
         if page_rect.width().abs() < 2.0 || page_rect.height().abs() < 2.0 {
@@ -1304,17 +1326,17 @@ fn extract_raster_page_redactions(
 
         let mut meta: BTreeMap<String, String> = BTreeMap::new();
         if cfg.include_details {
-            meta.insert("raster_dpi".to_string(), format!("{:.1}", rendered.dpi));
+            meta.insert("raster_dpi".to_owned(), format!("{:.1}", rendered.dpi));
             meta.insert(
-                "image_dims_px".to_string(),
+                "image_dims_px".to_owned(),
                 format!("{}x{}", rendered.width_px, rendered.height_px),
             );
             meta.insert(
-                "region_area_fraction".to_string(),
+                "region_area_fraction".to_owned(),
                 format!("{:.4}", det.area_fraction),
             );
             meta.insert(
-                "region_avg_luminance".to_string(),
+                "region_avg_luminance".to_owned(),
                 format!("{:.1}", det.avg_luminance),
             );
         }
@@ -1344,9 +1366,13 @@ fn rgba_to_grayscale(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 
     let mut gray = Vec::with_capacity((width * height) as usize);
     for px in rgba.chunks_exact(4) {
-        let r = px[0] as f32;
-        let g = px[1] as f32;
-        let b = px[2] as f32;
+        let (r_u8, g_u8, b_u8) = match px {
+            [r_u8, g_u8, b_u8, _alpha_u8] => (*r_u8, *g_u8, *b_u8),
+            _ => continue,
+        };
+        let r = r_u8 as f32;
+        let g = g_u8 as f32;
+        let b = b_u8 as f32;
         let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
         gray.push(y.clamp(0.0, 255.0) as u8);
     }
@@ -1362,7 +1388,7 @@ mod tests {
     fn detects_dark_bar_in_synthetic_image() {
         let width = 60;
         let height = 32;
-        let mut buf = vec![235u8; width * height];
+        let mut buf = vec![235_u8; width * height];
         for y in 10..22 {
             for x in 5..55 {
                 buf[y * width + x] = 5;
@@ -1379,7 +1405,7 @@ mod tests {
     fn ignores_sparse_noise() {
         let width = 64;
         let height = 64;
-        let mut buf = vec![210u8; width * height];
+        let mut buf = vec![210_u8; width * height];
         for i in (0..width * height).step_by(1500) {
             buf[i] = 20;
         }
@@ -1389,12 +1415,136 @@ mod tests {
 
     #[test]
     fn rect_pixels_to_pdf_maps_coords() {
-        let mapped = rect_pixels_to_pdf(72, 72, 648, 648, 720.0, 720.0, 72.0);
+        let mapped = rect_pixels_to_pdf(72, 72, 648, 648, Rect::new(0.0, 0.0, 720.0, 720.0), 72.0);
         assert!((mapped.x0 - 72.0).abs() < 0.01);
         assert!((mapped.x1 - 648.0).abs() < 0.01);
         assert!((mapped.y0 - 72.0).abs() < 0.01);
         assert!((mapped.y1 - 648.0).abs() < 0.01);
     }
+
+    #[test]
+    fn rect_pixels_to_pdf_respects_page_box_origin() {
+        let mapped =
+            rect_pixels_to_pdf(0, 0, 100, 100, Rect::new(0.0, -18.0, 612.0, 804.75), 200.0);
+        assert!((mapped.x0 - 0.0).abs() < 0.01);
+        assert!((mapped.y1 - 804.75).abs() < 0.01);
+        assert!((mapped.y0 - 768.75).abs() < 0.01);
+    }
+}
+
+fn extract_page_text_runs(
+    doc: &Document,
+    page_id: ObjectId,
+    page_index: u32,
+) -> Result<Vec<UnderlyingTextHit>, String> {
+    let page_obj = doc.get_object(page_id).map_err(|e| e.to_string())?;
+    let page_dict = match page_obj {
+        Object::Dictionary(d) => d.clone(),
+        _ => return Ok(Vec::new()),
+    };
+
+    let resources_obj = page_dict.get(b"Resources").ok();
+    let resources = resources_obj
+        .and_then(|o| deref_to_dict(doc, o))
+        .cloned()
+        .unwrap_or_else(Dictionary::new);
+
+    let xobject = resources
+        .get(b"XObject")
+        .ok()
+        .and_then(|o| deref_to_dict(doc, o))
+        .cloned()
+        .unwrap_or_else(Dictionary::new);
+
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|e| format!("page_content_error={e}"))?;
+    let decoded =
+        lopdf::content::Content::decode(&content).map_err(|e| format!("page_decode_error={e}"))?;
+
+    let mut out = extract_text_runs(page_index, &decoded.operations);
+    let mut visited = BTreeSet::<String>::new();
+    let mut nested = extract_text_runs_from_xobjects(
+        doc,
+        page_index,
+        &decoded.operations,
+        &xobject,
+        &mut visited,
+    );
+    out.append(&mut nested);
+    Ok(out)
+}
+
+fn extract_text_runs_from_xobjects(
+    doc: &Document,
+    page_index: u32,
+    ops: &[lopdf::content::Operation],
+    xobject_dict: &Dictionary,
+    visited: &mut BTreeSet<String>,
+) -> Vec<UnderlyingTextHit> {
+    let mut out = Vec::new();
+
+    for op in ops {
+        if op.operator.as_str() != "Do" {
+            continue;
+        }
+
+        let name = op
+            .operands.first()
+            .and_then(object_to_name_string)
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+
+        let key = format!("page_index={page_index}:text_xobject={name}");
+        if !visited.insert(key) {
+            continue;
+        }
+
+        let xo_obj = match xobject_dict.get(name.as_bytes()) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+
+        let stream = match deref_to_stream(doc, xo_obj) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let content = match stream.decompressed_content() {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let decoded = match lopdf::content::Content::decode(&content) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        out.extend(extract_text_runs(page_index, &decoded.operations));
+
+        let nested_xobject = stream
+            .dict
+            .get(b"Resources")
+            .ok()
+            .and_then(|o| deref_to_dict(doc, o))
+            .and_then(|res| res.get(b"XObject").ok())
+            .and_then(|o| deref_to_dict(doc, o))
+            .cloned()
+            .unwrap_or_else(|| xobject_dict.clone());
+
+        let mut nested = extract_text_runs_from_xobjects(
+            doc,
+            page_index,
+            &decoded.operations,
+            &nested_xobject,
+            visited,
+        );
+        out.append(&mut nested);
+    }
+
+    out
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1433,7 +1583,7 @@ fn extract_text_runs(page_index: u32, ops: &[lopdf::content::Operation]) -> Vec<
                     .unwrap_or(st.tm_f);
             }
             "Td" | "TD" => {
-                let dx = op.operands.get(0).and_then(object_to_f32).unwrap_or(0.0);
+                let dx = op.operands.first().and_then(object_to_f32).unwrap_or(0.0);
                 let dy = op.operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
                 st.tm_e += dx;
                 st.tm_f += dy;
@@ -1442,8 +1592,8 @@ fn extract_text_runs(page_index: u32, ops: &[lopdf::content::Operation]) -> Vec<
                 if !st.in_text {
                     continue;
                 }
-                let text = text_from_show_op(op);
-                let text = text.trim().to_string();
+                let raw_text = text_from_show_op(op);
+                let text = raw_text.trim().to_owned();
                 if text.is_empty() {
                     continue;
                 }
@@ -1470,23 +1620,45 @@ fn extract_text_runs(page_index: u32, ops: &[lopdf::content::Operation]) -> Vec<
 
 fn text_from_show_op(op: &lopdf::content::Operation) -> String {
     if op.operator.as_str() == "TJ" {
-        if let Some(Object::Array(a)) = op.operands.get(0) {
+        if let Some(Object::Array(a)) = op.operands.first() {
             return a
                 .iter()
-                .filter_map(|o| match o {
-                    Object::String(s, _) => Some(String::from_utf8_lossy(s).to_string()),
-                    _ => None,
-                })
+                .filter_map(decode_pdf_text)
                 .collect::<Vec<_>>()
                 .join("");
         }
     }
 
-    if let Some(Object::String(s, _)) = op.operands.last() {
-        return String::from_utf8_lossy(s).to_string();
+    if let Some(text) = op.operands.last().and_then(decode_pdf_text) {
+        return text;
     }
 
     String::new()
+}
+
+fn decode_pdf_text(obj: &Object) -> Option<String> {
+    match obj {
+        Object::String(raw_bytes, _) => {
+            let decoded = lopdf::decode_text_string(obj)
+                .ok()
+                .filter(|text| !text.contains('\u{FFFD}'));
+            match decoded {
+                Some(text) => Some(normalize_decoded_text(&text)),
+                None => Some(normalize_decoded_text(&String::from_utf8_lossy(raw_bytes))),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_decoded_text(text: &str) -> String {
+    text.chars()
+        .map(|char_value| match char_value {
+            '‰' | '‹' | '«' => '<',
+            '›' | '»' => '>',
+            _ => char_value,
+        })
+        .collect::<String>()
 }
 
 fn deref_to_array(doc: &Document, obj: &Object) -> Option<Vec<Object>> {
@@ -1500,7 +1672,7 @@ fn deref_to_array(doc: &Document, obj: &Object) -> Option<Vec<Object>> {
     }
 }
 
-fn deref_to_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Dictionary> {
+fn deref_to_dict<'doc>(doc: &'doc Document, obj: &'doc Object) -> Option<&'doc Dictionary> {
     match obj {
         Object::Reference(oid) => match doc.get_object(*oid).ok()? {
             Object::Dictionary(d) => Some(d),
@@ -1511,7 +1683,7 @@ fn deref_to_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Dictionar
     }
 }
 
-fn deref_to_stream<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Stream> {
+fn deref_to_stream<'doc>(doc: &'doc Document, obj: &'doc Object) -> Option<&'doc Stream> {
     match obj {
         Object::Reference(oid) => match doc.get_object(*oid).ok()? {
             Object::Stream(s) => Some(s),
@@ -1527,7 +1699,7 @@ fn deref_to_stream<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Stream>
 
 fn object_to_f32(o: &Object) -> Option<f32> {
     match o {
-        Object::Real(r) => Some(*r as f32),
+        Object::Real(r) => Some(*r),
         Object::Integer(i) => Some(*i as f32),
         _ => None,
     }
@@ -1558,7 +1730,7 @@ fn object_to_rect(o: &Object) -> Option<Rect> {
         return None;
     }
 
-    let x0 = a.get(0).and_then(object_to_f32)?;
+    let x0 = a.first().and_then(object_to_f32)?;
 
     let y0 = a.get(1).and_then(object_to_f32)?;
 

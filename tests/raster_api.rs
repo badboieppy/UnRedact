@@ -1,10 +1,13 @@
 use std::path::Path;
 
 use lopdf::Document;
-use unredact::{
+use unredact::redaction_finder::dependency::hayro_renderer::HayroRenderer;
+use unredact::redaction_finder::service::redaction_finder_entry::{
     find_redactions_in_pdf_bytes_vector_only, find_redactions_in_pdf_bytes_with_renderer,
-    find_redactions_in_pdf_path_with_renderer, HayroRenderer, PdfRenderer, RedactionFinderConfig,
-    RedactionKind, RenderedPage,
+    find_redactions_in_pdf_path_with_renderer,
+};
+use unredact::redaction_finder::types::{
+    PdfRenderer, RedactionFinderConfig, RedactionKind, RenderedPage,
 };
 
 #[derive(Clone)]

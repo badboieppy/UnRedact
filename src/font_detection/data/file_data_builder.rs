@@ -15,16 +15,18 @@ pub struct DataBuildConfig {
     pub include_details: bool,
 }
 
-pub struct FileDataBuilder<'a> {
-    accessor: &'a dyn FileAccessor,
+pub struct FileDataBuilder<'accessor> {
+    accessor: &'accessor dyn FileAccessor,
 }
 
-impl<'a> FileDataBuilder<'a> {
-    pub fn new(accessor: &'a dyn FileAccessor) -> Self {
+impl<'accessor> FileDataBuilder<'accessor> {
+    #[inline]
+    pub fn new(accessor: &'accessor dyn FileAccessor) -> Self {
         Self { accessor }
     }
 }
 
+#[inline]
 pub fn build_file_font_report(
     builder: &FileDataBuilder<'_>,
     path: &Path,
@@ -69,7 +71,7 @@ fn extract_pdf_occurrences(
         })?
         .bytes;
 
-    let doc = Document::load_mem(&bytes).map_err(|e| e.to_string())?;
+    let doc = Document::load_mem(&bytes).map_err(|error| error.to_string())?;
     let pages = doc.get_pages();
 
     let items = pages
@@ -89,8 +91,11 @@ fn extract_pdf_page_occurrences(
     page_id: lopdf::ObjectId,
 ) -> Result<Vec<FontOccurrence>, String> {
     let fonts = extract_pdf_page_fonts(doc, page_id)?;
-    let content = doc.get_page_content(page_id).map_err(|e| e.to_string())?;
-    let decoded = lopdf::content::Content::decode(&content).map_err(|e| e.to_string())?;
+    let content = doc
+        .get_page_content(page_id)
+        .map_err(|error| error.to_string())?;
+    let decoded =
+        lopdf::content::Content::decode(&content).map_err(|error| error.to_string())?;
     Ok(occurrences_from_ops(
         page_no.saturating_sub(1),
         &decoded.operations,
@@ -102,29 +107,31 @@ fn extract_pdf_page_fonts(
     doc: &Document,
     page_id: lopdf::ObjectId,
 ) -> Result<BTreeMap<String, String>, String> {
-    let (resources, _) = doc.get_page_resources(page_id).map_err(|e| e.to_string())?;
-    let resources = match resources {
+    let (page_resources_opt, _unused_pages) = doc
+        .get_page_resources(page_id)
+        .map_err(|error| error.to_string())?;
+    let resources = match page_resources_opt {
         None => return Ok(BTreeMap::new()),
-        Some(d) => d,
+        Some(resources_dict) => resources_dict,
     };
 
-    let font_obj = resources.get(b"Font").ok();
-    let font_obj = match font_obj {
+    let font_obj_opt = resources.get(b"Font").ok();
+    let font_obj = match font_obj_opt {
         None => return Ok(BTreeMap::new()),
-        Some(o) => o,
+        Some(font_object) => font_object,
     };
 
-    let font_dict = deref_to_dict(doc, font_obj).or_else(|| object_to_dict(font_obj));
-    let font_dict = match font_dict {
+    let font_dict_opt = deref_to_dict(doc, font_obj).or_else(|| object_to_dict(font_obj));
+    let font_dict = match font_dict_opt {
         None => return Ok(BTreeMap::new()),
-        Some(d) => d,
+        Some(font_dictionary) => font_dictionary,
     };
 
     let map = font_dict
         .iter()
-        .map(|(k, v)| {
-            let key = String::from_utf8_lossy(k).to_string();
-            let name = resolve_pdf_font_name(doc, v).unwrap_or_else(|| key.clone());
+        .map(|(key_bytes, value_object)| {
+            let key = String::from_utf8_lossy(key_bytes).to_string();
+            let name = resolve_pdf_font_name(doc, value_object).unwrap_or_else(|| key.clone());
             (key, name)
         })
         .collect::<BTreeMap<_, _>>();
@@ -135,13 +142,13 @@ fn extract_pdf_page_fonts(
 fn resolve_pdf_font_name(doc: &Document, font_obj: &Object) -> Option<String> {
     let dict = deref_to_dict(doc, font_obj)?;
     let base = dict.get(b"BaseFont").ok().and_then(object_to_name_string);
-    if let Some(b) = base {
-        return Some(normalize_subset_font_name(&b));
+    if let Some(base_font_name) = base {
+        return Some(normalize_subset_font_name(&base_font_name));
     }
 
     let desc_obj = dict.get(b"FontDescriptor").ok();
-    let desc_dict = desc_obj.and_then(|o| deref_to_dict(doc, o));
-    let desc_dict = desc_dict?;
+    let desc_dict_opt = desc_obj.and_then(|descriptor_object| deref_to_dict(doc, descriptor_object));
+    let desc_dict = desc_dict_opt?;
     let name = desc_dict
         .get(b"FontName")
         .ok()
@@ -221,8 +228,8 @@ fn reduce_op(
 
     let out = match occ {
         None => acc,
-        Some(o) => {
-            acc.push(o);
+        Some(occurrence) => {
+            acc.push(occurrence);
             acc
         }
     };
@@ -232,7 +239,7 @@ fn reduce_op(
 
 fn apply_tf(state: TextState, operands: &[Object], fonts: &BTreeMap<String, String>) -> TextState {
     let font_key = operands
-        .get(0)
+        .first()
         .and_then(object_to_name_string)
         .unwrap_or_else(|| state.font_key.clone());
     let size = operands
@@ -263,7 +270,7 @@ fn apply_tm(state: TextState, operands: &[Object]) -> TextState {
 }
 
 fn apply_td(state: TextState, operands: &[Object]) -> TextState {
-    let dx = operands.get(0).and_then(object_to_f32).unwrap_or(0.0);
+    let dx = operands.first().and_then(object_to_f32).unwrap_or(0.0);
     let dy = operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
     let tm = state.text_matrix.translate(dx, dy);
     TextState {
@@ -283,7 +290,7 @@ fn occ_from_tj(
     }
 
     let text = text_from_tj_operands(operands)?;
-    let trimmed = text.trim().to_string();
+    let trimmed = text.trim().to_owned();
     if trimmed.is_empty() {
         return None;
     }
@@ -308,64 +315,118 @@ fn occ_from_double_quote(
     let last = operands
         .last()
         .cloned()
-        .map(|o| vec![o])
+        .map(|operand| vec![operand])
         .unwrap_or_else(Vec::new);
     occ_from_tj(page_index, state, &last)
 }
 
 fn estimate_bbox(state: &TextState) -> Rect {
-    let x = state.text_matrix.e;
-    let y = state.text_matrix.f;
-    let h = state.font_size_pt.abs();
-    let w = (state.font_size_pt.abs() * 3.0).max(1.0);
-    Rect::new(x, y - h, x + w, y)
+    let text_x = state.text_matrix.tx;
+    let text_y = state.text_matrix.ty;
+    let height = state.font_size_pt.abs();
+    let width = (state.font_size_pt.abs() * 3.0).max(1.0);
+    Rect::new(text_x, text_y - height, text_x + width, text_y)
 }
 
 fn text_from_tj_operands(operands: &[Object]) -> Option<String> {
     let first = operands.first()?;
     match first {
-        Object::String(s, _) => Some(String::from_utf8_lossy(s).to_string()),
-        Object::Array(a) => Some(
-            a.iter()
-                .filter_map(|o| match o {
-                    Object::String(s, _) => Some(String::from_utf8_lossy(s).to_string()),
-                    _ => None,
-                })
+        Object::String(text_bytes, _) => Some(String::from_utf8_lossy(text_bytes).to_string()),
+        Object::Array(array_items) => Some(
+            array_items
+                .iter()
+                .filter_map(object_string_to_string)
                 .collect::<Vec<_>>()
                 .join(""),
         ),
-        _ => None,
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Integer(_)
+        | &Object::Real(_)
+        | &Object::Name(_)
+        | &Object::Dictionary(_)
+        | &Object::Stream(_)
+        | &Object::Reference(_) => None,
     }
 }
 
-fn object_to_f32(o: &Object) -> Option<f32> {
-    match o {
-        Object::Real(r) => Some(*r as f32),
-        Object::Integer(i) => Some(*i as f32),
-        _ => None,
+fn object_string_to_string(object: &Object) -> Option<String> {
+    match object {
+        Object::String(text_bytes, _) => Some(String::from_utf8_lossy(text_bytes).to_string()),
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Integer(_)
+        | &Object::Real(_)
+        | &Object::Name(_)
+        | &Object::Array(_)
+        | &Object::Dictionary(_)
+        | &Object::Stream(_)
+        | &Object::Reference(_) => None,
     }
 }
 
-fn object_to_name_string(o: &Object) -> Option<String> {
-    match o {
-        Object::Name(n) => Some(String::from_utf8_lossy(n).to_string()),
-        _ => None,
+fn object_to_f32(object: &Object) -> Option<f32> {
+    match object {
+        &Object::Real(real_value) => Some(real_value),
+        &Object::Integer(integer_value) => integer_value.to_string().parse::<f32>().ok(),
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Name(_)
+        | &Object::String(..)
+        | &Object::Array(_)
+        | &Object::Dictionary(_)
+        | &Object::Stream(_)
+        | &Object::Reference(_) => None,
     }
 }
 
-fn object_to_dict(o: &Object) -> Option<&lopdf::Dictionary> {
-    match o {
-        Object::Dictionary(d) => Some(d),
-        _ => None,
+fn object_to_name_string(object: &Object) -> Option<String> {
+    match object {
+        Object::Name(name_bytes) => Some(String::from_utf8_lossy(name_bytes).to_string()),
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Integer(_)
+        | &Object::Real(_)
+        | &Object::String(..)
+        | &Object::Array(_)
+        | &Object::Dictionary(_)
+        | &Object::Stream(_)
+        | &Object::Reference(_) => None,
     }
 }
 
-fn deref_to_dict<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a lopdf::Dictionary> {
-    let d = match o {
-        Object::Reference(id) => doc.get_object(*id).ok()?,
-        _ => o,
+fn object_to_dict(object: &Object) -> Option<&lopdf::Dictionary> {
+    match object {
+        Object::Dictionary(dictionary) => Some(dictionary),
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Integer(_)
+        | &Object::Real(_)
+        | &Object::Name(_)
+        | &Object::String(..)
+        | &Object::Array(_)
+        | &Object::Stream(_)
+        | &Object::Reference(_) => None,
+    }
+}
+
+fn deref_to_dict<'doc>(
+    doc: &'doc Document,
+    object: &'doc Object,
+) -> Option<&'doc lopdf::Dictionary> {
+    let dereferenced = match object {
+        &Object::Reference(object_id) => doc.get_object(object_id).ok()?,
+        &Object::Null
+        | &Object::Boolean(_)
+        | &Object::Integer(_)
+        | &Object::Real(_)
+        | &Object::Name(_)
+        | &Object::String(..)
+        | &Object::Array(_)
+        | &Object::Dictionary(_)
+        | &Object::Stream(_) => object,
     };
-    object_to_dict(d)
+    object_to_dict(dereferenced)
 }
 
 #[derive(Debug, Clone)]
@@ -391,47 +452,54 @@ impl Default for TextState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Matrix {
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
-    e: f32,
-    f: f32,
+    m11: f32,
+    m12: f32,
+    m21: f32,
+    m22: f32,
+    tx: f32,
+    ty: f32,
 }
 
 impl Matrix {
     fn identity() -> Self {
         Self {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            tx: 0.0,
+            ty: 0.0,
         }
     }
 
     fn from_operands(operands: &[Object]) -> Option<Self> {
         let nums = operands.iter().map(object_to_f32).collect::<Vec<_>>();
-        let a = nums.get(0).copied().flatten()?;
-        let b = nums.get(1).copied().flatten()?;
-        let c = nums.get(2).copied().flatten()?;
-        let d = nums.get(3).copied().flatten()?;
-        let e = nums.get(4).copied().flatten()?;
-        let f = nums.get(5).copied().flatten()?;
-        Some(Self { a, b, c, d, e, f })
+        let m11 = nums.first().copied().flatten()?;
+        let m12 = nums.get(1).copied().flatten()?;
+        let m21 = nums.get(2).copied().flatten()?;
+        let m22 = nums.get(3).copied().flatten()?;
+        let tx = nums.get(4).copied().flatten()?;
+        let ty = nums.get(5).copied().flatten()?;
+        Some(Self {
+            m11,
+            m12,
+            m21,
+            m22,
+            tx,
+            ty,
+        })
     }
 
     fn translate(&self, dx: f32, dy: f32) -> Self {
         Self {
-            e: self.e + dx,
-            f: self.f + dy,
+            tx: self.tx + dx,
+            ty: self.ty + dy,
             ..*self
         }
     }
 
     fn next_line(&self) -> Self {
-        self.translate(0.0, -self.d.abs().max(1.0) * 1.2)
+        self.translate(0.0, -self.m22.abs().max(1.0) * 1.2)
     }
 }
 
@@ -451,7 +519,7 @@ mod tests {
     fn minimal_pdf_bytes() -> Vec<u8> {
         let mut doc = Document::with_version("1.5");
         let mut buf = Vec::<u8>::new();
-        doc.save_to(&mut buf).unwrap();
+        doc.save_to(&mut buf).expect("expected value in test");
         buf
     }
 
@@ -468,7 +536,7 @@ mod tests {
         fn fail(message: &str) -> Self {
             Self {
                 files: BTreeMap::new(),
-                err: Some(message.to_string()),
+                err: Some(message.to_owned()),
             }
         }
     }
@@ -483,7 +551,7 @@ mod tests {
             let key = req.path.to_string_lossy().to_string();
             let bytes = self.files.get(&key).cloned();
             match bytes {
-                None => Err("not found".to_string()),
+                None => Err("not found".to_owned()),
                 Some(b) => Ok(FileReadResponse { bytes: b }),
             }
         }
@@ -501,43 +569,43 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(report.kind, InputFileKind::Unknown);
         assert_eq!(report.text_source, TextSourceKind::Unknown);
-        assert_eq!(report.occurrences.unwrap().items, vec![]);
+        assert_eq!(report.occurrences.expect("expected value in test").items, vec![]);
     }
 
     #[test]
     fn extract_pdf_occurrences_propagates_accessor_error() {
         let accessor = FakeAccessor::fail("io");
         let builder = FileDataBuilder::new(&accessor);
-        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf")).unwrap_err();
-        assert_eq!(err, "io".to_string());
+        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf")).expect_err("expected error in test");
+        assert_eq!(err, "io".to_owned());
     }
 
     #[test]
     fn extract_pdf_occurrences_rejects_invalid_pdf_bytes() {
         let mut files = BTreeMap::new();
-        files.insert("x.pdf".to_string(), b"not a pdf".to_vec());
+        files.insert("x.pdf".to_owned(), b"not a pdf".to_vec());
 
         let accessor = FakeAccessor::ok(files);
         let builder = FileDataBuilder::new(&accessor);
-        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf")).unwrap_err();
-        assert_eq!(err.is_empty(), false);
+        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf")).expect_err("expected error in test");
+        assert!(!err.is_empty());
     }
 
     #[test]
     fn text_from_tj_operands_handles_string_array_and_other() {
         let s = Object::String(b"Hi".to_vec(), lopdf::StringFormat::Literal);
-        assert_eq!(text_from_tj_operands(&[s]), Some("Hi".to_string()));
+        assert_eq!(text_from_tj_operands(&[s]), Some("Hi".to_owned()));
 
         let a = Object::Array(vec![
             Object::String(b"A".to_vec(), lopdf::StringFormat::Literal),
             Object::Integer(-120),
             Object::String(b"B".to_vec(), lopdf::StringFormat::Literal),
         ]);
-        assert_eq!(text_from_tj_operands(&[a]), Some("AB".to_string()));
+        assert_eq!(text_from_tj_operands(&[a]), Some("AB".to_owned()));
 
         assert_eq!(text_from_tj_operands(&[Object::Null]), None);
         assert_eq!(text_from_tj_operands(&[]), None);
@@ -554,7 +622,7 @@ mod tests {
     fn object_to_name_string_handles_name_and_other() {
         assert_eq!(
             object_to_name_string(&Object::Name(b"F1".to_vec())),
-            Some("F1".to_string())
+            Some("F1".to_owned())
         );
         assert_eq!(object_to_name_string(&Object::Null), None);
     }
@@ -569,10 +637,10 @@ mod tests {
             Object::Integer(10),
             Object::Integer(20),
         ];
-        let m = Matrix::from_operands(&ops).unwrap();
-        assert_eq!(m.a, 1.0);
-        assert_eq!(m.e, 10.0);
-        assert_eq!(m.f, 20.0);
+        let m = Matrix::from_operands(&ops).expect("expected value in test");
+        assert_eq!(m.m11, 1.0);
+        assert_eq!(m.tx, 10.0);
+        assert_eq!(m.ty, 20.0);
 
         let ops2 = vec![Object::Integer(1)];
         assert_eq!(Matrix::from_operands(&ops2), None);
@@ -581,7 +649,7 @@ mod tests {
     #[test]
     fn apply_tf_uses_font_map_and_normalizes_name() {
         let mut fonts = BTreeMap::new();
-        fonts.insert("F1".to_string(), "ABCDEE+Calibri".to_string());
+        fonts.insert("F1".to_owned(), "ABCDEE+Calibri".to_owned());
 
         let state = TextState::default();
         let next = apply_tf(
@@ -590,8 +658,8 @@ mod tests {
             &fonts,
         );
 
-        assert_eq!(next.font_key, "F1".to_string());
-        assert_eq!(next.font_name, "Calibri".to_string());
+        assert_eq!(next.font_key, "F1".to_owned());
+        assert_eq!(next.font_name, "Calibri".to_owned());
         assert_eq!(next.font_size_pt, 12.0);
     }
 
@@ -599,16 +667,16 @@ mod tests {
     fn estimate_bbox_uses_font_size_and_matrix() {
         let state = TextState {
             in_text: true,
-            font_key: "F1".to_string(),
-            font_name: "F1".to_string(),
+            font_key: "F1".to_owned(),
+            font_name: "F1".to_owned(),
             font_size_pt: 10.0,
             text_matrix: Matrix {
-                a: 1.0,
-                b: 0.0,
-                c: 0.0,
-                d: 1.0,
-                e: 7.0,
-                f: 9.0,
+                m11: 1.0,
+                m12: 0.0,
+                m21: 0.0,
+                m22: 1.0,
+                tx: 7.0,
+                ty: 9.0,
             },
         };
         let rect = estimate_bbox(&state);
@@ -647,7 +715,7 @@ mod tests {
         let occs = occurrences_from_ops(0, &ops, &fonts);
         assert_eq!(occs.len(), 1);
         assert_eq!(occs[0].location.page_index, Some(0));
-        assert_eq!(occs[0].font.family, "F1".to_string());
+        assert_eq!(occs[0].font.family, "F1".to_owned());
     }
 
     #[test]
@@ -662,11 +730,11 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(report.kind, InputFileKind::Image);
         assert_eq!(report.text_source, TextSourceKind::Ocr);
-        assert_eq!(report.occurrences.unwrap().items, vec![]);
+        assert_eq!(report.occurrences.expect("expected value in test").items, vec![]);
     }
 
     #[test]
@@ -677,14 +745,14 @@ mod tests {
                     font_id_from_name("Arial"),
                     Some(0),
                     Rect::new(0.0, 0.0, 1.0, 1.0),
-                    Some("a".to_string()),
+                    Some("a".to_owned()),
                     None,
                 ),
                 build_occurrence(
                     font_id_from_name("Arial"),
                     Some(0),
                     Rect::new(1.0, 0.0, 2.0, 1.0),
-                    Some("b".to_string()),
+                    Some("b".to_owned()),
                     None,
                 ),
                 build_occurrence(
@@ -713,7 +781,7 @@ mod tests {
     #[test]
     fn build_file_font_report_sets_text_source_based_on_kind() {
         let mut files = BTreeMap::new();
-        files.insert("a.pdf".to_string(), minimal_pdf_bytes());
+        files.insert("a.pdf".to_owned(), minimal_pdf_bytes());
 
         let accessor = FakeAccessor::ok(files);
         let builder = FileDataBuilder::new(&accessor);
@@ -725,7 +793,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         let img = build_file_font_report(
             &builder,
             Path::new("a.jpg"),
@@ -733,7 +801,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         let unk = build_file_font_report(
             &builder,
             Path::new("a.bin"),
@@ -741,7 +809,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(pdf.text_source, TextSourceKind::EmbeddedText);
         assert_eq!(img.text_source, TextSourceKind::Ocr);
@@ -760,7 +828,7 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         let r2 = build_file_font_report(
             &builder,
             Path::new("x.bin"),
@@ -768,7 +836,7 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(r1, r2);
     }
@@ -778,8 +846,8 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let a = extract_occurrences(&builder, Path::new("x.png"), InputFileKind::Image).unwrap();
-        let b = extract_occurrences(&builder, Path::new("x.bin"), InputFileKind::Unknown).unwrap();
+        let a = extract_occurrences(&builder, Path::new("x.png"), InputFileKind::Image).expect("expected value in test");
+        let b = extract_occurrences(&builder, Path::new("x.bin"), InputFileKind::Unknown).expect("expected value in test");
 
         assert_eq!(a.items, vec![]);
         assert_eq!(b.items, vec![]);
@@ -789,8 +857,8 @@ mod tests {
     fn occ_from_double_quote_uses_last_operand() {
         let state = TextState {
             in_text: true,
-            font_key: "F1".to_string(),
-            font_name: "F1".to_string(),
+            font_key: "F1".to_owned(),
+            font_name: "F1".to_owned(),
             font_size_pt: 12.0,
             text_matrix: Matrix::identity(),
         };
@@ -801,20 +869,20 @@ mod tests {
             Object::String(b"X".to_vec(), lopdf::StringFormat::Literal),
         ];
 
-        let out = occ_from_double_quote(0, &state, &operands).unwrap();
-        assert_eq!(out.text, Some("X".to_string()));
+        let out = occ_from_double_quote(0, &state, &operands).expect("expected value in test");
+        assert_eq!(out.text, Some("X".to_owned()));
     }
 
     #[test]
     fn occ_from_tj_requires_in_text_and_nonempty_text() {
         let state = TextState::default();
         let s = Object::String(b"Hi".to_vec(), lopdf::StringFormat::Literal);
-        assert_eq!(occ_from_tj(0, &state, &[s.clone()]), None);
+        assert_eq!(occ_from_tj(0, &state, std::slice::from_ref(&s)), None);
 
         let state2 = TextState {
             in_text: true,
-            font_key: "F1".to_string(),
-            font_name: "F1".to_string(),
+            font_key: "F1".to_owned(),
+            font_name: "F1".to_owned(),
             font_size_pt: 12.0,
             text_matrix: Matrix::identity(),
         };
@@ -822,17 +890,17 @@ mod tests {
         let empty = Object::String(b"   ".to_vec(), lopdf::StringFormat::Literal);
         assert_eq!(occ_from_tj(0, &state2, &[empty]), None);
 
-        let out = occ_from_tj(2, &state2, &[s]).unwrap();
+        let out = occ_from_tj(2, &state2, &[s]).expect("expected value in test");
         assert_eq!(out.location.page_index, Some(2));
-        assert_eq!(out.text, Some("Hi".to_string()));
+        assert_eq!(out.text, Some("Hi".to_owned()));
     }
 
     #[test]
     fn apply_tm_and_apply_td_change_matrix() {
         let state = TextState {
             in_text: true,
-            font_key: "F1".to_string(),
-            font_name: "F1".to_string(),
+            font_key: "F1".to_owned(),
+            font_name: "F1".to_owned(),
             font_size_pt: 10.0,
             text_matrix: Matrix::identity(),
         };
@@ -846,13 +914,13 @@ mod tests {
             Object::Integer(20),
         ];
         let s2 = apply_tm(state.clone(), &tm_ops);
-        assert_eq!(s2.text_matrix.e, 10.0);
-        assert_eq!(s2.text_matrix.f, 20.0);
+        assert_eq!(s2.text_matrix.tx, 10.0);
+        assert_eq!(s2.text_matrix.ty, 20.0);
 
         let td_ops = vec![Object::Integer(5), Object::Integer(-3)];
         let s3 = apply_td(s2, &td_ops);
-        assert_eq!(s3.text_matrix.e, 15.0);
-        assert_eq!(s3.text_matrix.f, 17.0);
+        assert_eq!(s3.text_matrix.tx, 15.0);
+        assert_eq!(s3.text_matrix.ty, 17.0);
     }
 
     #[test]
@@ -867,9 +935,9 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         assert_eq!(image.kind, InputFileKind::Image);
-        assert_eq!(image.occurrences.unwrap().items.len(), 0);
+        assert_eq!(image.occurrences.expect("expected value in test").items.len(), 0);
     }
 
     #[test]
@@ -884,9 +952,9 @@ mod tests {
                 include_details: true,
             },
         )
-        .unwrap_err();
+        .expect_err("expected error in test");
 
-        assert_eq!(err, "not found".to_string());
+        assert_eq!(err, "not found".to_owned());
     }
 
     #[test]
@@ -894,14 +962,14 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let err = extract_pdf_occurrences(&builder, Path::new("dir/y.pdf")).unwrap_err();
-        assert_eq!(err, "not found".to_string());
+        let err = extract_pdf_occurrences(&builder, Path::new("dir/y.pdf")).expect_err("expected error in test");
+        assert_eq!(err, "not found".to_owned());
     }
 
     #[test]
     fn kind_and_source_in_report_match_extension_case_insensitively() {
         let mut files = BTreeMap::new();
-        files.insert("X.PdF".to_string(), minimal_pdf_bytes());
+        files.insert("X.PdF".to_owned(), minimal_pdf_bytes());
 
         let accessor = FakeAccessor::ok(files);
         let builder = FileDataBuilder::new(&accessor);
@@ -913,7 +981,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
 
         assert_eq!(report.kind, InputFileKind::Pdf);
         assert_eq!(report.text_source, TextSourceKind::EmbeddedText);
@@ -929,22 +997,22 @@ mod tests {
 
     #[test]
     fn object_to_dict_none_when_not_dictionary() {
-        assert_eq!(object_to_dict(&Object::Null).is_none(), true);
+        assert!(object_to_dict(&Object::Null).is_none());
     }
 
     #[test]
     fn matrix_next_line_moves_down() {
         let m = Matrix::identity();
         let out = m.next_line();
-        assert_eq!(out.f < m.f, true);
+        assert!(out.ty < m.ty);
     }
 
     #[test]
     fn estimate_bbox_width_minimum() {
         let state = TextState {
             in_text: true,
-            font_key: "F1".to_string(),
-            font_name: "F1".to_string(),
+            font_key: "F1".to_owned(),
+            font_name: "F1".to_owned(),
             font_size_pt: 0.0,
             text_matrix: Matrix::identity(),
         };
@@ -958,8 +1026,8 @@ mod tests {
         let builder = FileDataBuilder::new(&accessor);
 
         let err = extract_occurrences(&builder, Path::new("missing.pdf"), InputFileKind::Pdf)
-            .unwrap_err();
-        assert_eq!(err, "not found".to_string());
+            .expect_err("expected error in test");
+        assert_eq!(err, "not found".to_owned());
     }
 
     #[test]
@@ -974,7 +1042,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
         assert_eq!(report.kind, InputFileKind::Unknown);
         assert_eq!(report.text_source, TextSourceKind::Unknown);
@@ -992,7 +1060,7 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
+        .expect("expected value in test");
         assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
         assert_eq!(report.kind, InputFileKind::Image);
         assert_eq!(report.text_source, TextSourceKind::Ocr);
@@ -1003,7 +1071,7 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let a = extract_occurrences(&builder, Path::new("x.pdf"), InputFileKind::Unknown).unwrap();
+        let a = extract_occurrences(&builder, Path::new("x.pdf"), InputFileKind::Unknown).expect("expected value in test");
         assert_eq!(a.items, vec![]);
     }
 
@@ -1019,14 +1087,14 @@ mod tests {
                 include_details: false,
             },
         )
-        .unwrap();
-        assert_eq!(report.path, "x.bin".to_string());
+        .expect("expected value in test");
+        assert_eq!(report.path, "x.bin".to_owned());
     }
 
     #[test]
     fn occurrences_items_are_public_and_aggregatable() {
         let report = FileFontReport {
-            path: "x".to_string(),
+            path: "x".to_owned(),
             kind: InputFileKind::Unknown,
             text_source: TextSourceKind::Unknown,
             fonts: FontsFound {
@@ -1036,7 +1104,7 @@ mod tests {
             occurrences: Some(FontOccurrences { items: vec![] }),
         };
 
-        let occs = report.occurrences.unwrap();
+        let occs = report.occurrences.expect("expected value in test");
         let counts = crate::font_detection::logic::types::file_types::aggregate_counts(&occs.items);
         assert_eq!(counts, vec![]);
     }
@@ -1044,7 +1112,7 @@ mod tests {
     #[test]
     fn normalize_subset_font_name_in_data_resolver() {
         let out = normalize_subset_font_name("ABCDEF+Arial");
-        assert_eq!(out, "Arial".to_string());
+        assert_eq!(out, "Arial".to_owned());
     }
 
     #[test]
@@ -1055,3 +1123,4 @@ mod tests {
         assert_eq!(req.path, PathBuf::from("x.pdf"));
     }
 }
+

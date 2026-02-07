@@ -13,6 +13,7 @@ pub enum RedactionError {
 }
 
 impl Display for RedactionError {
+    #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "io_error: {e}"),
@@ -24,6 +25,7 @@ impl Display for RedactionError {
 }
 
 impl std::error::Error for RedactionError {
+    #[inline]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
@@ -34,17 +36,20 @@ impl std::error::Error for RedactionError {
 }
 
 impl From<std::io::Error> for RedactionError {
+    #[inline]
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
 }
 
 impl From<lopdf::Error> for RedactionError {
+    #[inline]
     fn from(value: lopdf::Error) -> Self {
         Self::Pdf(value)
     }
 }
 
+#[inline]
 pub fn find_redactions_in_pdf_bytes_with_renderer(
     bytes: &[u8],
     renderer: &dyn PdfRenderer,
@@ -53,6 +58,7 @@ pub fn find_redactions_in_pdf_bytes_with_renderer(
     run_redaction_finder_from_bytes(bytes, Some(renderer), cfg).map_err(RedactionError::Internal)
 }
 
+#[inline]
 pub fn find_redactions_in_pdf_path_with_renderer(
     path: &Path,
     renderer: &dyn PdfRenderer,
@@ -62,6 +68,7 @@ pub fn find_redactions_in_pdf_path_with_renderer(
     find_redactions_in_pdf_bytes_with_renderer(&bytes, renderer, cfg)
 }
 
+#[inline]
 pub fn find_redactions_in_pdf_bytes_vector_only(
     bytes: &[u8],
     cfg: RedactionFinderConfig,
@@ -71,6 +78,7 @@ pub fn find_redactions_in_pdf_bytes_vector_only(
     run_redaction_finder_from_bytes(bytes, None, effective_cfg).map_err(RedactionError::Internal)
 }
 
+#[inline]
 pub fn find_redactions_in_pdf_bytes(
     bytes: &[u8],
     cfg: RedactionFinderConfig,

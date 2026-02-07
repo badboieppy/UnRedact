@@ -1,0 +1,3 @@
+[build]
+rustc-wrapper = "clippy-driver"
+rustflags = ["-Dwarnings", "-Ctarget-cpu=native"]
