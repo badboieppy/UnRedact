@@ -68,8 +68,7 @@ fn map_args(args: DetectArgs) -> Result<FontProcessInput, String> {
     Ok(FontProcessInput {
         inputs: args.inputs,
         output: args.output,
-        format
-,
+        format,
         include_details: args.details,
     })
 }
@@ -80,7 +79,11 @@ fn map_format(fmt: CliOutputFormat) -> OutputFormat {
     }
 }
 
-fn write_output(path: &Option<PathBuf>, bytes: Vec<u8>, format: OutputFormat) -> Result<(), String> {
+fn write_output(
+    path: &Option<PathBuf>,
+    bytes: Vec<u8>,
+    format: OutputFormat,
+) -> Result<(), String> {
     let _ = format;
     match path.as_ref() {
         None => write_to_stdout(bytes),
@@ -135,7 +138,10 @@ mod tests {
 
         let out = map_args(args).unwrap();
 
-        assert_eq!(out.inputs, vec![PathBuf::from("a.pdf"), PathBuf::from("b.png")]);
+        assert_eq!(
+            out.inputs,
+            vec![PathBuf::from("a.pdf"), PathBuf::from("b.png")]
+        );
         assert_eq!(out.output, Some(PathBuf::from("out.json")));
         assert_eq!(out.format, OutputFormat::Json);
         assert_eq!(out.include_details, true);
@@ -153,7 +159,11 @@ mod tests {
         let path = dir.join("unredact_font_detection_cli_entry_test_out.json");
         let _ = std::fs::remove_file(&path);
 
-        let out = write_output(&Some(path.clone()), b"{\"ok\":true}\n".to_vec(), OutputFormat::Json);
+        let out = write_output(
+            &Some(path.clone()),
+            b"{\"ok\":true}\n".to_vec(),
+            OutputFormat::Json,
+        );
         assert_eq!(out.is_ok(), true);
 
         let bytes = std::fs::read(&path).unwrap();

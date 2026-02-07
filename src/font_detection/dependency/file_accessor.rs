@@ -60,7 +60,9 @@ mod tests {
 
     #[test]
     fn file_read_response_is_eq() {
-        let a = FileReadResponse { bytes: vec![1, 2, 3] };
+        let a = FileReadResponse {
+            bytes: vec![1, 2, 3],
+        };
         let b = a.clone();
         assert_eq!(a, b);
     }

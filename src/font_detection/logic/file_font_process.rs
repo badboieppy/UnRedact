@@ -1,7 +1,10 @@
-use crate::font_detection::data::file_data_builder::{build_file_font_report, DataBuildConfig, FileDataBuilder};
+use crate::font_detection::data::file_data_builder::{
+    build_file_font_report, DataBuildConfig, FileDataBuilder,
+};
 use crate::font_detection::logic::types::file_types::{
-    aggregate_counts, distinct_fonts_from_counts, FileFontReport, FontDetectionReport, FontId, FontOccurrence,
-    FontOccurrences, FontsFound, InputFileKind, OutputFormat, Rect, Region, TextSourceKind,
+    aggregate_counts, distinct_fonts_from_counts, FileFontReport, FontDetectionReport, FontId,
+    FontOccurrence, FontOccurrences, FontsFound, InputFileKind, OutputFormat, Rect, Region,
+    TextSourceKind,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -10,8 +13,6 @@ use std::path::{Path, PathBuf};
 pub struct FontProcessConfig {
     pub include_details: bool,
 }
-
-
 
 pub fn process_many(
     builder: &FileDataBuilder<'_>,
@@ -68,7 +69,10 @@ pub fn occurrences_for_output(
     occurrences
 }
 
-pub fn encode_report(report: &FontDetectionReport, format: OutputFormat) -> Result<Vec<u8>, String> {
+pub fn encode_report(
+    report: &FontDetectionReport,
+    format: OutputFormat,
+) -> Result<Vec<u8>, String> {
     match format {
         OutputFormat::Json => encode_json(report),
     }
@@ -79,8 +83,6 @@ fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     bytes.push(b'\n');
     Ok(bytes)
 }
-
-
 
 pub fn validate_inputs(inputs: &[PathBuf]) -> Result<(), String> {
     let empty = inputs.is_empty();
@@ -145,7 +147,11 @@ pub fn split_font_family_variant(name: &str) -> (String, Option<String>) {
     let family = parts[0].trim().to_string();
     let variant = parts[1].trim().to_string();
 
-    let variant = if variant.is_empty() { None } else { Some(variant) };
+    let variant = if variant.is_empty() {
+        None
+    } else {
+        Some(variant)
+    };
     (family, variant)
 }
 
@@ -157,7 +163,10 @@ pub fn classify_kind_from_path(path: &Path) -> InputFileKind {
         return InputFileKind::Pdf;
     }
 
-    let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "webp");
+    let is_image = matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "tif" | "tiff" | "bmp" | "webp"
+    );
     if is_image {
         return InputFileKind::Image;
     }
@@ -194,7 +203,9 @@ pub fn build_occurrence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::font_detection::dependency::file_accessor::{FileAccessor, FileReadRequest, FileReadResponse};
+    use crate::font_detection::dependency::file_accessor::{
+        FileAccessor, FileReadRequest, FileReadResponse,
+    };
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
 
@@ -247,14 +258,24 @@ mod tests {
     #[test]
     fn occurrences_for_output_none_when_disabled() {
         let occ = Some(FontOccurrences { items: vec![] });
-        let out = occurrences_for_output(occ, FontProcessConfig { include_details: false });
+        let out = occurrences_for_output(
+            occ,
+            FontProcessConfig {
+                include_details: false,
+            },
+        );
         assert_eq!(out, None);
     }
 
     #[test]
     fn occurrences_for_output_some_when_enabled() {
         let occ = Some(FontOccurrences { items: vec![] });
-        let out = occurrences_for_output(occ.clone(), FontProcessConfig { include_details: true });
+        let out = occurrences_for_output(
+            occ.clone(),
+            FontProcessConfig {
+                include_details: true,
+            },
+        );
         assert_eq!(out, occ);
     }
 
@@ -378,7 +399,13 @@ mod tests {
             variant: None,
         };
         let bbox = Rect::new(1.0, 2.0, 3.0, 4.0);
-        let occ = build_occurrence(font.clone(), Some(2), bbox, Some("Hi".to_string()), Some(0.8));
+        let occ = build_occurrence(
+            font.clone(),
+            Some(2),
+            bbox,
+            Some("Hi".to_string()),
+            Some(0.8),
+        );
 
         assert_eq!(occ.font, font);
         assert_eq!(occ.location.page_index, Some(2));
@@ -400,9 +427,27 @@ mod tests {
 
         let occs = FontOccurrences {
             items: vec![
-                build_occurrence(arial.clone(), Some(0), Rect::new(0.0, 0.0, 1.0, 1.0), None, None),
-                build_occurrence(arial.clone(), Some(0), Rect::new(1.0, 0.0, 2.0, 1.0), None, None),
-                build_occurrence(calibri.clone(), Some(1), Rect::new(0.0, 1.0, 2.0, 2.0), None, None),
+                build_occurrence(
+                    arial.clone(),
+                    Some(0),
+                    Rect::new(0.0, 0.0, 1.0, 1.0),
+                    None,
+                    None,
+                ),
+                build_occurrence(
+                    arial.clone(),
+                    Some(0),
+                    Rect::new(1.0, 0.0, 2.0, 1.0),
+                    None,
+                    None,
+                ),
+                build_occurrence(
+                    calibri.clone(),
+                    Some(1),
+                    Rect::new(0.0, 1.0, 2.0, 2.0),
+                    None,
+                    None,
+                ),
             ],
         };
 
@@ -417,7 +462,12 @@ mod tests {
             occurrences: Some(occs),
         };
 
-        let out = finalize_report(report, FontProcessConfig { include_details: true });
+        let out = finalize_report(
+            report,
+            FontProcessConfig {
+                include_details: true,
+            },
+        );
         let map = out
             .fonts
             .counts
@@ -456,7 +506,12 @@ mod tests {
             }),
         };
 
-        let out = finalize_report(report, FontProcessConfig { include_details: false });
+        let out = finalize_report(
+            report,
+            FontProcessConfig {
+                include_details: false,
+            },
+        );
 
         assert_eq!(out.occurrences, None);
         assert_eq!(out.fonts.distinct, vec![arial.clone()]);
@@ -470,15 +525,8 @@ mod tests {
     }
 
     #[test]
-    fn run_font_process_rejects_empty_inputs() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let input = FontProcessInput {
-            inputs: vec![],
-            output: None,
-            format: OutputFormat::Json,
-            include_details: true,
-        };
-        let err = run_font_process(&accessor, input).unwrap_err();
+    fn validate_inputs_rejects_empty_inputs() {
+        let err = validate_inputs(&[]).unwrap_err();
         assert_eq!(err, "no inputs provided".to_string());
     }
 
@@ -486,7 +534,14 @@ mod tests {
     fn process_many_rejects_empty_inputs() {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
-        let err = process_many(&builder, &[], FontProcessConfig { include_details: true }).unwrap_err();
+        let err = process_many(
+            &builder,
+            &[],
+            FontProcessConfig {
+                include_details: true,
+            },
+        )
+        .unwrap_err();
         assert_eq!(err, "no inputs provided".to_string());
     }
 
@@ -494,7 +549,14 @@ mod tests {
     fn process_one_propagates_data_builder_error() {
         let accessor = FakeAccessor::fail("io");
         let builder = FileDataBuilder::new(&accessor);
-        let err = process_one(&builder, Path::new("x.pdf"), FontProcessConfig { include_details: true }).unwrap_err();
+        let err = process_one(
+            &builder,
+            Path::new("x.pdf"),
+            FontProcessConfig {
+                include_details: true,
+            },
+        )
+        .unwrap_err();
         assert_eq!(err, "io".to_string());
     }
 }

@@ -23,7 +23,10 @@ impl From<FontProcessInput> for DetectFontsRequest {
     }
 }
 
-pub fn detect_fonts(accessor: &dyn FileAccessor, req: DetectFontsRequest) -> Result<FontDetectionReport, String> {
+pub fn detect_fonts(
+    accessor: &dyn FileAccessor,
+    req: DetectFontsRequest,
+) -> Result<FontDetectionReport, String> {
     validate_inputs(&req.inputs)?;
     let builder = FileDataBuilder::new(accessor);
 
@@ -50,7 +53,10 @@ pub fn detect_fonts_encoded(
     })
 }
 
-pub fn run_font_detection(accessor: &dyn FileAccessor, input: FontProcessInput) -> Result<EncodedOutput, String> {
+pub fn run_font_detection(
+    accessor: &dyn FileAccessor,
+    input: FontProcessInput,
+) -> Result<EncodedOutput, String> {
     let format = input.format;
     let path = input.output.clone();
 
@@ -176,6 +182,9 @@ mod tests {
         .unwrap();
 
         let _ = (accessor, report);
-        assert_eq!(Path::new("x.bin").to_string_lossy().to_string(), "x.bin".to_string());
+        assert_eq!(
+            Path::new("x.bin").to_string_lossy().to_string(),
+            "x.bin".to_string()
+        );
     }
 }

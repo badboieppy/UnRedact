@@ -58,7 +58,10 @@ fn extract_occurrences(
     }
 }
 
-fn extract_pdf_occurrences(builder: &FileDataBuilder<'_>, path: &Path) -> Result<FontOccurrences, String> {
+fn extract_pdf_occurrences(
+    builder: &FileDataBuilder<'_>,
+    path: &Path,
+) -> Result<FontOccurrences, String> {
     let bytes = builder
         .accessor
         .read(FileReadRequest {
@@ -95,7 +98,10 @@ fn extract_pdf_page_occurrences(
     ))
 }
 
-fn extract_pdf_page_fonts(doc: &Document, page_id: lopdf::ObjectId) -> Result<BTreeMap<String, String>, String> {
+fn extract_pdf_page_fonts(
+    doc: &Document,
+    page_id: lopdf::ObjectId,
+) -> Result<BTreeMap<String, String>, String> {
     let (resources, _) = doc.get_page_resources(page_id).map_err(|e| e.to_string())?;
     let resources = match resources {
         None => return Ok(BTreeMap::new()),
@@ -136,7 +142,10 @@ fn resolve_pdf_font_name(doc: &Document, font_obj: &Object) -> Option<String> {
     let desc_obj = dict.get(b"FontDescriptor").ok();
     let desc_dict = desc_obj.and_then(|o| deref_to_dict(doc, o));
     let desc_dict = desc_dict?;
-    let name = desc_dict.get(b"FontName").ok().and_then(object_to_name_string)?;
+    let name = desc_dict
+        .get(b"FontName")
+        .ok()
+        .and_then(object_to_name_string)?;
     Some(normalize_subset_font_name(&name))
 }
 
@@ -163,10 +172,22 @@ fn reduce_op(
     let op_name = op.operator.as_str();
 
     if op_name == "BT" {
-        return (TextState { in_text: true, ..state }, acc);
+        return (
+            TextState {
+                in_text: true,
+                ..state
+            },
+            acc,
+        );
     }
     if op_name == "ET" {
-        return (TextState { in_text: false, ..state }, acc);
+        return (
+            TextState {
+                in_text: false,
+                ..state
+            },
+            acc,
+        );
     }
     if op_name == "Tf" {
         return (apply_tf(state, &op.operands, fonts), acc);
@@ -181,7 +202,13 @@ fn reduce_op(
         return (apply_td(state, &op.operands), acc);
     }
     if op_name == "T*" {
-        return (TextState { text_matrix: state.text_matrix.next_line(), ..state }, acc);
+        return (
+            TextState {
+                text_matrix: state.text_matrix.next_line(),
+                ..state
+            },
+            acc,
+        );
     }
 
     let occ = if op_name == "TJ" || op_name == "Tj" || op_name == "'" {
@@ -208,9 +235,15 @@ fn apply_tf(state: TextState, operands: &[Object], fonts: &BTreeMap<String, Stri
         .get(0)
         .and_then(object_to_name_string)
         .unwrap_or_else(|| state.font_key.clone());
-    let size = operands.get(1).and_then(object_to_f32).unwrap_or(state.font_size_pt);
+    let size = operands
+        .get(1)
+        .and_then(object_to_f32)
+        .unwrap_or(state.font_size_pt);
 
-    let resolved = fonts.get(&font_key).cloned().unwrap_or_else(|| font_key.clone());
+    let resolved = fonts
+        .get(&font_key)
+        .cloned()
+        .unwrap_or_else(|| font_key.clone());
     let normalized = normalize_subset_font_name(&resolved);
 
     TextState {
@@ -223,14 +256,20 @@ fn apply_tf(state: TextState, operands: &[Object], fonts: &BTreeMap<String, Stri
 
 fn apply_tm(state: TextState, operands: &[Object]) -> TextState {
     let tm = Matrix::from_operands(operands).unwrap_or(state.text_matrix);
-    TextState { text_matrix: tm, ..state }
+    TextState {
+        text_matrix: tm,
+        ..state
+    }
 }
 
 fn apply_td(state: TextState, operands: &[Object]) -> TextState {
     let dx = operands.get(0).and_then(object_to_f32).unwrap_or(0.0);
     let dy = operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
     let tm = state.text_matrix.translate(dx, dy);
-    TextState { text_matrix: tm, ..state }
+    TextState {
+        text_matrix: tm,
+        ..state
+    }
 }
 
 fn occ_from_tj(
@@ -252,7 +291,13 @@ fn occ_from_tj(
     let font = font_id_from_name(&state.font_name);
     let bbox = estimate_bbox(state);
 
-    Some(build_occurrence(font, Some(page_index), bbox, Some(trimmed), None))
+    Some(build_occurrence(
+        font,
+        Some(page_index),
+        bbox,
+        Some(trimmed),
+        None,
+    ))
 }
 
 fn occ_from_double_quote(
@@ -260,7 +305,11 @@ fn occ_from_double_quote(
     state: &TextState,
     operands: &[Object],
 ) -> Option<crate::font_detection::logic::types::file_types::FontOccurrence> {
-    let last = operands.last().cloned().map(|o| vec![o]).unwrap_or_else(Vec::new);
+    let last = operands
+        .last()
+        .cloned()
+        .map(|o| vec![o])
+        .unwrap_or_else(Vec::new);
     occ_from_tj(page_index, state, &last)
 }
 
@@ -389,8 +438,12 @@ impl Matrix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::font_detection::dependency::file_accessor::{FileAccessor, FileReadRequest, FileReadResponse};
-    use crate::font_detection::logic::types::file_types::{FontOccurrences, FontsFound, InputFileKind, TextSourceKind};
+    use crate::font_detection::dependency::file_accessor::{
+        FileAccessor, FileReadRequest, FileReadResponse,
+    };
+    use crate::font_detection::logic::types::file_types::{
+        FontOccurrences, FontsFound, InputFileKind, TextSourceKind,
+    };
     use lopdf::{Document, Object};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -444,7 +497,9 @@ mod tests {
         let report = build_file_font_report(
             &builder,
             Path::new("x.bin"),
-            DataBuildConfig { include_details: true },
+            DataBuildConfig {
+                include_details: true,
+            },
         )
         .unwrap();
 
@@ -569,13 +624,22 @@ mod tests {
         let ops = vec![
             lopdf::content::Operation::new(
                 "Tj",
-                vec![Object::String(b"Hello".to_vec(), lopdf::StringFormat::Literal)],
+                vec![Object::String(
+                    b"Hello".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
             ),
             lopdf::content::Operation::new("BT", vec![]),
-            lopdf::content::Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Integer(11)]),
+            lopdf::content::Operation::new(
+                "Tf",
+                vec![Object::Name(b"F1".to_vec()), Object::Integer(11)],
+            ),
             lopdf::content::Operation::new(
                 "Tj",
-                vec![Object::String(b"Hello".to_vec(), lopdf::StringFormat::Literal)],
+                vec![Object::String(
+                    b"Hello".to_vec(),
+                    lopdf::StringFormat::Literal,
+                )],
             ),
             lopdf::content::Operation::new("ET", vec![]),
         ];
@@ -594,7 +658,9 @@ mod tests {
         let report = build_file_font_report(
             &builder,
             Path::new("x.png"),
-            DataBuildConfig { include_details: true },
+            DataBuildConfig {
+                include_details: true,
+            },
         )
         .unwrap();
 
@@ -638,7 +704,10 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(map.get(&font_id_from_name("Arial")).copied(), Some(2));
-        assert_eq!(map.get(&font_id_from_name("Calibri-Bold")).copied(), Some(1));
+        assert_eq!(
+            map.get(&font_id_from_name("Calibri-Bold")).copied(),
+            Some(1)
+        );
     }
 
     #[test]
@@ -649,9 +718,30 @@ mod tests {
         let accessor = FakeAccessor::ok(files);
         let builder = FileDataBuilder::new(&accessor);
 
-        let pdf = build_file_font_report(&builder, Path::new("a.pdf"), DataBuildConfig { include_details: false }).unwrap();
-        let img = build_file_font_report(&builder, Path::new("a.jpg"), DataBuildConfig { include_details: false }).unwrap();
-        let unk = build_file_font_report(&builder, Path::new("a.bin"), DataBuildConfig { include_details: false }).unwrap();
+        let pdf = build_file_font_report(
+            &builder,
+            Path::new("a.pdf"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
+        let img = build_file_font_report(
+            &builder,
+            Path::new("a.jpg"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
+        let unk = build_file_font_report(
+            &builder,
+            Path::new("a.bin"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(pdf.text_source, TextSourceKind::EmbeddedText);
         assert_eq!(img.text_source, TextSourceKind::Ocr);
@@ -663,8 +753,22 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let r1 = build_file_font_report(&builder, Path::new("x.bin"), DataBuildConfig { include_details: true }).unwrap();
-        let r2 = build_file_font_report(&builder, Path::new("x.bin"), DataBuildConfig { include_details: true }).unwrap();
+        let r1 = build_file_font_report(
+            &builder,
+            Path::new("x.bin"),
+            DataBuildConfig {
+                include_details: true,
+            },
+        )
+        .unwrap();
+        let r2 = build_file_font_report(
+            &builder,
+            Path::new("x.bin"),
+            DataBuildConfig {
+                include_details: true,
+            },
+        )
+        .unwrap();
 
         assert_eq!(r1, r2);
     }
@@ -756,7 +860,14 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let image = build_file_font_report(&builder, Path::new("x.png"), DataBuildConfig { include_details: true }).unwrap();
+        let image = build_file_font_report(
+            &builder,
+            Path::new("x.png"),
+            DataBuildConfig {
+                include_details: true,
+            },
+        )
+        .unwrap();
         assert_eq!(image.kind, InputFileKind::Image);
         assert_eq!(image.occurrences.unwrap().items.len(), 0);
     }
@@ -769,7 +880,9 @@ mod tests {
         let err = build_file_font_report(
             &builder,
             Path::new("x.pdf"),
-            DataBuildConfig { include_details: true },
+            DataBuildConfig {
+                include_details: true,
+            },
         )
         .unwrap_err();
 
@@ -796,7 +909,9 @@ mod tests {
         let report = build_file_font_report(
             &builder,
             Path::new("X.PdF"),
-            DataBuildConfig { include_details: false },
+            DataBuildConfig {
+                include_details: false,
+            },
         )
         .unwrap();
 
@@ -842,7 +957,8 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let err = extract_occurrences(&builder, Path::new("missing.pdf"), InputFileKind::Pdf).unwrap_err();
+        let err = extract_occurrences(&builder, Path::new("missing.pdf"), InputFileKind::Pdf)
+            .unwrap_err();
         assert_eq!(err, "not found".to_string());
     }
 
@@ -851,7 +967,14 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let report = build_file_font_report(&builder, Path::new("x.bin"), DataBuildConfig { include_details: false }).unwrap();
+        let report = build_file_font_report(
+            &builder,
+            Path::new("x.bin"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
         assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
         assert_eq!(report.kind, InputFileKind::Unknown);
         assert_eq!(report.text_source, TextSourceKind::Unknown);
@@ -862,7 +985,14 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let report = build_file_font_report(&builder, Path::new("x.png"), DataBuildConfig { include_details: false }).unwrap();
+        let report = build_file_font_report(
+            &builder,
+            Path::new("x.png"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
         assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
         assert_eq!(report.kind, InputFileKind::Image);
         assert_eq!(report.text_source, TextSourceKind::Ocr);
@@ -882,7 +1012,14 @@ mod tests {
         let accessor = FakeAccessor::ok(BTreeMap::new());
         let builder = FileDataBuilder::new(&accessor);
 
-        let report = build_file_font_report(&builder, Path::new("x.bin"), DataBuildConfig { include_details: false }).unwrap();
+        let report = build_file_font_report(
+            &builder,
+            Path::new("x.bin"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .unwrap();
         assert_eq!(report.path, "x.bin".to_string());
     }
 
@@ -912,7 +1049,9 @@ mod tests {
 
     #[test]
     fn read_request_path_is_owned() {
-        let req = FileReadRequest { path: PathBuf::from("x.pdf") };
+        let req = FileReadRequest {
+            path: PathBuf::from("x.pdf"),
+        };
         assert_eq!(req.path, PathBuf::from("x.pdf"));
     }
 }
