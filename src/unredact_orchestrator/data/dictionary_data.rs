@@ -35,8 +35,8 @@ impl DictionaryData {
             diagnostics.push("dictionary_source=file".to_owned());
             normalize_dictionary(tokens, max_dictionary)
         } else {
-            diagnostics.push("dictionary_source=fonts".to_owned());
-            let mut tokens = Vec::new();
+            diagnostics.push("dictionary_source=default_names+fonts".to_owned());
+            let mut tokens = default_names_tokens();
             for input in &fonts.inputs {
                 if let Some(occurrences) = &input.occurrences {
                     for occ in &occurrences.items {
@@ -92,4 +92,14 @@ fn split_into_words(text: &str) -> Vec<String> {
         out.push(buf);
     }
     out
+}
+
+#[inline]
+fn default_names_tokens() -> Vec<String> {
+    let raw = include_str!("../../../assets/names.txt");
+    raw.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_owned())
+        .collect::<Vec<_>>()
 }
