@@ -53,3 +53,4 @@ The `unredact_orchestrator_cli` binary runs redaction detection, font detection,
 - Include a custom dictionary: `--dictionary words.txt`
 - Control redaction detection: `--details --include-full-page-rects --no-image-analysis --raster-dpi 200`
 - Control guessing: `--max-words 4 --max-candidates 50 --max-dictionary 2000 --tol-pt 4.0 --max-nodes 50000`
+- Visualize redactions: `--visualize --visualize-border 1.0` (writes a `*.visualized.pdf`)

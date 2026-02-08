@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::redaction_finder::types::RedactionFinderConfig;
 use crate::redaction_guess::types::GuessConfig;
+use crate::redaction_visualizer::logic::VisualizerConfig;
 use crate::unredact_orchestrator::data::{DictionaryData, FontData, GuessData, RedactionData};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,6 +12,8 @@ pub struct OrchestratorConfig {
     pub enable_image_analysis: bool,
     pub raster_dpi: f32,
     pub guess: GuessConfig,
+    pub visualize: bool,
+    pub visualizer: VisualizerConfig,
 }
 
 impl Default for OrchestratorConfig {
@@ -22,6 +25,8 @@ impl Default for OrchestratorConfig {
             enable_image_analysis: true,
             raster_dpi: 200.0_f32,
             guess: GuessConfig::default(),
+            visualize: false,
+            visualizer: VisualizerConfig::default(),
         }
     }
 }
@@ -39,6 +44,7 @@ pub struct OrchestratorOutputs {
     pub redactions_path: PathBuf,
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
+    pub visualized_pdf_path: Option<PathBuf>,
 }
 
 #[inline]
@@ -72,6 +78,7 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
 
     diagnostics.push(format!("redactions_count={}", redactions.redactions.len()));
 
+    let redactions_for_visualizer = redactions.clone();
     let guess_report = guess_data.build_guess_report(
         &outputs.redactions_path,
         &outputs.fonts_path,
@@ -81,6 +88,19 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
         &req.cfg.guess,
     );
     guess_data.write_guesses(&outputs.guesses_path, &guess_report)?;
+
+    if req.cfg.visualize {
+        let output_path = outputs
+            .visualized_pdf_path
+            .clone()
+            .ok_or_else(|| "visualized pdf path missing".to_owned())?;
+        crate::redaction_visualizer::service::run_from_report(
+            &req.input,
+            &redactions_for_visualizer,
+            &output_path,
+            req.cfg.visualizer,
+        )?;
+    }
 
     Ok(outputs)
 }
@@ -94,10 +114,12 @@ pub fn build_output_paths(input: &Path, output_dir: &Path) -> Result<Orchestrato
     let redactions_path = output_dir.join(format!("{stem}.redactions.json"));
     let fonts_path = output_dir.join(format!("{stem}.fonts.json"));
     let guesses_path = output_dir.join(format!("{stem}.guesses.json"));
+    let visualized_pdf_path = Some(output_dir.join(format!("{stem}.visualized.pdf")));
     Ok(OrchestratorOutputs {
         redactions_path,
         fonts_path,
         guesses_path,
+        visualized_pdf_path,
     })
 }
 
@@ -117,6 +139,10 @@ mod tests {
         assert_eq!(
             out.guesses_path,
             PathBuf::from("C:/out/report.guesses.json")
+        );
+        assert_eq!(
+            out.visualized_pdf_path,
+            Some(PathBuf::from("C:/out/report.visualized.pdf"))
         );
     }
 }

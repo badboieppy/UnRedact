@@ -45,6 +45,12 @@ struct Args {
 
     #[arg(long, default_value_t = 50_000)]
     max_nodes: usize,
+
+    #[arg(long, default_value_t = false)]
+    visualize: bool,
+
+    #[arg(long, default_value_t = 1.0)]
+    visualize_border: f32,
 }
 
 fn main() -> std::process::ExitCode {
@@ -78,6 +84,9 @@ fn run() -> Result<(), String> {
     if args.max_nodes == 0 {
         return Err("max_nodes must be > 0".to_owned());
     }
+    if !args.visualize_border.is_finite() || args.visualize_border <= 0.0 {
+        return Err("visualize_border must be finite and > 0".to_owned());
+    }
 
     let output_dir = args.output_dir.clone().unwrap_or_else(default_output_dir);
 
@@ -92,6 +101,11 @@ fn run() -> Result<(), String> {
             max_dictionary: args.max_dictionary,
             tol_pt: args.tol_pt,
             max_nodes: args.max_nodes,
+        },
+        visualize: args.visualize,
+        visualizer: unredact::redaction_visualizer::logic::VisualizerConfig {
+            color: [1.0, 0.0, 0.0],
+            border_width: args.visualize_border,
         },
     };
 
