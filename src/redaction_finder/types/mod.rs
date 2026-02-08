@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x0: f32,
     pub y0: f32,
@@ -38,14 +38,14 @@ impl Rect {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnderlyingTextHit {
     pub page_index: u32,
     pub bbox: Rect,
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedactionOccurrence {
     pub page_index: u32,
     pub bbox: Rect,
@@ -55,7 +55,7 @@ pub struct RedactionOccurrence {
     pub underlying_text: Vec<UnderlyingTextHit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedactionKind {
     Annotation,
@@ -65,7 +65,7 @@ pub enum RedactionKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedactionReport {
     pub input: String,
     pub redactions: Vec<RedactionOccurrence>,

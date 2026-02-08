@@ -26,3 +26,30 @@ The `redaction_cli` binary surfaces annotation, drawn, and raster redactions:
 - Write JSON to disk instead of stdout: `--output path/to/report.json`
 
 Raster detection in the CLI uses the pure-Rust `hayro` crate.
+
+### Redaction Guesser CLI
+The `redaction_guess_cli` binary generates standalone guess reports from precomputed JSON inputs:
+
+- Basic run: `cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json`
+- Include a custom dictionary: `--dictionary words.txt`
+- Control search size: `--max-words 4 --max-candidates 50 --max-dictionary 2000`
+- Control tolerance: `--tol-pt 4.0`
+- Cap search work: `--max-nodes 50000`
+- Write JSON to disk instead of stdout: `--output path/to/guesses.json`
+
+Example orchestration:
+
+```bash
+cargo run --bin redaction_cli -- path/to/file.pdf --output redactions.json --details
+cargo run -- detect path/to/file.pdf --output fonts.json --details
+cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --output guesses.json
+```
+
+### Orchestrator CLI
+The `unredact_cli` binary runs redaction detection, font detection, and guessing in one pass:
+
+- Basic run: `cargo run --bin unredact_cli -- path/to/file.pdf`
+- Output directory: `--output-dir path/to/out` (defaults to the system temp dir under `unredact`)
+- Include a custom dictionary: `--dictionary words.txt`
+- Control redaction detection: `--details --include-full-page-rects --no-image-analysis --raster-dpi 200`
+- Control guessing: `--max-words 4 --max-candidates 50 --max-dictionary 2000 --tol-pt 4.0 --max-nodes 50000`

@@ -21,3 +21,5 @@
 
 pub mod font_detection;
 pub mod redaction_finder;
+pub mod redaction_guess;
+pub mod unredact_cli;
