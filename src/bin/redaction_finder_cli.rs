@@ -13,7 +13,7 @@ use unredact::redaction_finder::types::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "redaction_cli",
+    name = "redaction_finder_cli",
     about = "Detect redactions (annotations, drawn shapes, raster regions) in PDFs"
 )]
 struct Args {

@@ -8,16 +8,16 @@ Un-redact files
 ## Available CLIs
 
 ### Font Detection CLI
-Use the default binary to analyze embedded fonts and emit JSON metadata:
+Use the `font_detection_cli` binary to analyze embedded fonts and emit JSON metadata:
 
-- Scan one or more files: `cargo run -- detect <FILE>...`
+- Scan one or more files: `cargo run --bin font_detection_cli -- detect <FILE>...`
 - Include verbose metadata: add `--details`
 - Write output to a file: `--output path/to/report.json`
 
 ### Redaction Finder CLI
-The `redaction_cli` binary surfaces annotation, drawn, and raster redactions:
+The `redaction_finder_cli` binary surfaces annotation, drawn, and raster redactions:
 
-- Basic run: `cargo run --bin redaction_cli -- path/to/file.pdf`
+- Basic run: `cargo run --bin redaction_finder_cli -- path/to/file.pdf`
 - Emit extra per-redaction metadata: `--details`
 - Limit detection scope: `--mode annotations|drawn|all`
 - Include full-page rectangles: `--include-full-page-rects`
@@ -40,15 +40,15 @@ The `redaction_guess_cli` binary generates standalone guess reports from precomp
 Example orchestration:
 
 ```bash
-cargo run --bin redaction_cli -- path/to/file.pdf --output redactions.json --details
-cargo run -- detect path/to/file.pdf --output fonts.json --details
+cargo run --bin redaction_finder_cli -- path/to/file.pdf --output redactions.json --details
+cargo run --bin font_detection_cli -- detect path/to/file.pdf --output fonts.json --details
 cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --output guesses.json
 ```
 
 ### Orchestrator CLI
-The `unredact_cli` binary runs redaction detection, font detection, and guessing in one pass:
+The `unredact_orchestrator_cli` binary runs redaction detection, font detection, and guessing in one pass:
 
-- Basic run: `cargo run --bin unredact_cli -- path/to/file.pdf`
+- Basic run: `cargo run --bin unredact_orchestrator_cli -- path/to/file.pdf`
 - Output directory: `--output-dir path/to/out` (defaults to the system temp dir under `unredact`)
 - Include a custom dictionary: `--dictionary words.txt`
 - Control redaction detection: `--details --include-full-page-rects --no-image-analysis --raster-dpi 200`

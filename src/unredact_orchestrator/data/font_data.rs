@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::font_detection::logic::types::file_types::FontDetectionReport;
-use crate::unredact_cli::dependency::{FileStore, FontDetectionClient};
+use crate::unredact_orchestrator::dependency::{FileStore, FontDetectionClient};
 
 #[derive(Debug, Clone, Copy)]
 pub struct FontData {

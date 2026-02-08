@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::redaction_finder::types::RedactionReport;
 use crate::redaction_guess::types::{GuessConfig, GuessReport};
-use crate::unredact_cli::dependency::{FileStore, GuessClient};
+use crate::unredact_orchestrator::dependency::{FileStore, GuessClient};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GuessData {

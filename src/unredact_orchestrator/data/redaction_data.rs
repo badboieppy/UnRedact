@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::redaction_finder::types::{RedactionFinderConfig, RedactionReport};
-use crate::unredact_cli::dependency::{FileStore, RedactionFinderClient};
+use crate::unredact_orchestrator::dependency::{FileStore, RedactionFinderClient};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RedactionData {

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::unredact_cli::logic::{
+use crate::unredact_orchestrator::logic::{
     run_orchestrator, OrchestratorConfig, OrchestratorOutputs, OrchestratorRequest,
 };
 

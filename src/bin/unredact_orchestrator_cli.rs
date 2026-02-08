@@ -2,12 +2,12 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use unredact::redaction_guess::types::GuessConfig;
-use unredact::unredact_cli::logic::OrchestratorConfig;
-use unredact::unredact_cli::service::run_from_paths;
+use unredact::unredact_orchestrator::logic::OrchestratorConfig;
+use unredact::unredact_orchestrator::service::run_from_paths;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "unredact_cli",
+    name = "unredact_orchestrator_cli",
     about = "Run redaction detection, font detection, and guessing in one pass"
 )]
 struct Args {

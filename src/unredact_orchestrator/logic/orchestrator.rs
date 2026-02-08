@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::redaction_finder::types::RedactionFinderConfig;
 use crate::redaction_guess::types::GuessConfig;
-use crate::unredact_cli::data::{DictionaryData, FontData, GuessData, RedactionData};
+use crate::unredact_orchestrator::data::{DictionaryData, FontData, GuessData, RedactionData};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrchestratorConfig {

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::font_detection::logic::types::file_types::FontDetectionReport;
-use crate::unredact_cli::dependency::FileStore;
+use crate::unredact_orchestrator::dependency::FileStore;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DictionaryData {
