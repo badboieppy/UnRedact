@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::redaction_finder::types::RedactionFinderConfig;
 use crate::redaction_guess::types::GuessConfig;
 use crate::redaction_visualizer::logic::VisualizerConfig;
-use crate::unredact_orchestrator::data::{DictionaryData, FontData, GuessData, RedactionData};
+use crate::unredact_orchestrator::data::{FontData, RedactionData};
+use crate::unredact_orchestrator::dependency::FileStore;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrchestratorConfig {
@@ -53,8 +54,7 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
 
     let redaction_data = RedactionData::new();
     let font_data = FontData::new();
-    let dictionary_data = DictionaryData::new();
-    let guess_data = GuessData::new();
+    let file_store = FileStore;
 
     let bytes = redaction_data.read_input_bytes(&req.input)?;
     let redaction_cfg = RedactionFinderConfig {
@@ -70,33 +70,31 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
     let fonts = font_data.detect_fonts(&req.input, req.cfg.include_details)?;
     font_data.write_fonts(&outputs.fonts_path, &fonts)?;
 
-    let (dictionary, mut diagnostics) = dictionary_data.build_dictionary(
-        req.dictionary_path.as_deref(),
-        &fonts,
-        req.cfg.guess.max_dictionary,
-    )?;
-
-    diagnostics.push(format!("redactions_count={}", redactions.redactions.len()));
-
     let redactions_for_visualizer = redactions.clone();
-    let guess_report = guess_data.build_guess_report(
+    let guess_report = crate::redaction_guess::service::run_from_paths(
         &outputs.redactions_path,
         &outputs.fonts_path,
-        redactions,
-        dictionary,
-        diagnostics,
-        &req.cfg.guess,
-    );
-    guess_data.write_guesses(&outputs.guesses_path, &guess_report)?;
+        &req.input,
+        req.dictionary_path.as_deref(),
+        req.cfg.guess,
+    )?;
+    let guesses_json = serde_json::to_vec_pretty(&guess_report)
+        .map_err(|e| format!("failed to encode guesses json: {e}"))?;
+    file_store.write(&outputs.guesses_path, &guesses_json)?;
 
     if req.cfg.visualize {
         let output_path = outputs
             .visualized_pdf_path
             .clone()
             .ok_or_else(|| "visualized pdf path missing".to_owned())?;
+        let accessor = crate::font_detection::dependency::file_accessor::OsFileAccessor::new();
+        let font_runs =
+            crate::font_detection::service::entry::detect_font_runs(&accessor, &req.input)?;
         crate::redaction_visualizer::service::run_from_report(
             &req.input,
             &redactions_for_visualizer,
+            Some(&guess_report),
+            Some(&font_runs),
             &output_path,
             req.cfg.visualizer,
         )?;

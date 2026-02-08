@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::font_detection::logic::types::file_types::FontDetectionReport;
 use crate::unredact_orchestrator::dependency::FileStore;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,7 +20,6 @@ impl DictionaryData {
     pub fn build_dictionary(
         &self,
         dictionary_path: Option<&Path>,
-        fonts: &FontDetectionReport,
         max_dictionary: usize,
     ) -> Result<(Vec<String>, Vec<String>), String> {
         let mut diagnostics = Vec::new();
@@ -35,18 +33,8 @@ impl DictionaryData {
             diagnostics.push("dictionary_source=file".to_owned());
             normalize_dictionary(tokens, max_dictionary)
         } else {
-            diagnostics.push("dictionary_source=default_names+fonts".to_owned());
-            let mut tokens = default_names_tokens();
-            for input in &fonts.inputs {
-                if let Some(occurrences) = &input.occurrences {
-                    for occ in &occurrences.items {
-                        if let Some(text) = &occ.text {
-                            tokens.extend(split_into_words(text));
-                        }
-                    }
-                }
-            }
-            normalize_dictionary(tokens, max_dictionary)
+            diagnostics.push("dictionary_source=default_names".to_owned());
+            normalize_dictionary(default_names_tokens(), max_dictionary)
         };
         diagnostics.push(format!("dictionary_size={}", dictionary.len()));
         Ok((dictionary, diagnostics))

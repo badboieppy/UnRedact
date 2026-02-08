@@ -45,6 +45,31 @@ pub struct FontDetectionReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FontRunReport {
+    pub input: String,
+    pub runs: Vec<FontTextRun>,
+    pub assets: Vec<FontAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FontTextRun {
+    pub page_index: u32,
+    pub text: String,
+    pub bbox: Rect,
+    pub font_key: String,
+    pub font_name: String,
+    pub font_size_pt: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FontAsset {
+    pub font_key: String,
+    pub font_name: String,
+    pub units_per_em: u16,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileFontReport {
     pub path: String,
     pub kind: InputFileKind,
@@ -343,4 +368,3 @@ mod tests {
         assert_eq!(decoded, report);
     }
 }
-

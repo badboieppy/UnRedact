@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::font_detection::logic::types::file_types::FontDetectionReport;
 use crate::redaction_guess::dependency::FileStore;
 
 #[derive(Debug, Clone)]
@@ -14,7 +13,6 @@ pub trait DictionaryDataSource {
     fn load_dictionary(
         &self,
         dictionary_path: Option<&Path>,
-        fonts: &FontDetectionReport,
         max_dictionary: usize,
     ) -> Result<DictionaryInputs, String>;
 }
@@ -44,7 +42,6 @@ impl Default for DictionaryData {
 pub fn load_dictionary(
     file_store: &FileStore,
     dictionary_path: Option<&Path>,
-    fonts: &FontDetectionReport,
     max_dictionary: usize,
 ) -> Result<DictionaryInputs, String> {
     let mut diagnostics = Vec::new();
@@ -58,18 +55,8 @@ pub fn load_dictionary(
         diagnostics.push("dictionary_source=file".to_owned());
         normalize_dictionary(tokens, max_dictionary)
     } else {
-        diagnostics.push("dictionary_source=default_names+fonts".to_owned());
-        let mut tokens = default_names_tokens();
-        for input in &fonts.inputs {
-            if let Some(occurrences) = &input.occurrences {
-                for occ in &occurrences.items {
-                    if let Some(text) = &occ.text {
-                        tokens.extend(split_into_words(text));
-                    }
-                }
-            }
-        }
-        normalize_dictionary(tokens, max_dictionary)
+        diagnostics.push("dictionary_source=default_names".to_owned());
+        normalize_dictionary(default_names_tokens(), max_dictionary)
     };
     diagnostics.push(format!("dictionary_size={}", dictionary.len()));
     Ok(DictionaryInputs {
@@ -83,10 +70,9 @@ impl DictionaryDataSource for DictionaryData {
     fn load_dictionary(
         &self,
         dictionary_path: Option<&Path>,
-        fonts: &FontDetectionReport,
         max_dictionary: usize,
     ) -> Result<DictionaryInputs, String> {
-        load_dictionary(&self.file_store, dictionary_path, fonts, max_dictionary)
+        load_dictionary(&self.file_store, dictionary_path, max_dictionary)
     }
 }
 

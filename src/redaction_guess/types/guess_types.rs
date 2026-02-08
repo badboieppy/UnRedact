@@ -37,6 +37,7 @@ pub struct RedactionGuess {
     pub page_index: u32,
     pub bbox: Rect,
     pub candidates: Vec<GuessCandidate>,
+    pub exact_matches: Vec<String>,
     pub context: GuessContext,
 }
 

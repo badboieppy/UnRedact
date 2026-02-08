@@ -105,6 +105,7 @@ fn run() -> Result<(), String> {
         visualize: args.visualize,
         visualizer: unredact::redaction_visualizer::logic::VisualizerConfig {
             color: [1.0, 0.0, 0.0],
+            text_color: [0.0, 0.4, 1.0],
             border_width: args.visualize_border,
         },
     };

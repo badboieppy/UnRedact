@@ -30,7 +30,7 @@ Raster detection in the CLI uses the pure-Rust `hayro` crate.
 ### Redaction Guesser CLI
 The `redaction_guess_cli` binary generates standalone guess reports from precomputed JSON inputs:
 
-- Basic run: `cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json`
+- Basic run: `cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --pdf path/to/file.pdf`
 - Include a custom dictionary: `--dictionary words.txt`
 - Control search size: `--max-words 4 --max-candidates 50 --max-dictionary 2000`
 - Control tolerance: `--tol-pt 4.0`
@@ -42,7 +42,7 @@ Example orchestration:
 ```bash
 cargo run --bin redaction_finder_cli -- path/to/file.pdf --output redactions.json --details
 cargo run --bin font_detection_cli -- detect path/to/file.pdf --output fonts.json --details
-cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --output guesses.json
+cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --pdf path/to/file.pdf --output guesses.json
 ```
 
 ### Orchestrator CLI
@@ -54,3 +54,13 @@ The `unredact_orchestrator_cli` binary runs redaction detection, font detection,
 - Control redaction detection: `--details --include-full-page-rects --no-image-analysis --raster-dpi 200`
 - Control guessing: `--max-words 4 --max-candidates 50 --max-dictionary 2000 --tol-pt 4.0 --max-nodes 50000`
 - Visualize redactions: `--visualize --visualize-border 1.0` (writes a `*.visualized.pdf`)
+
+## Example PDFs
+
+Original sample:
+
+<embed src="example/EFTA02238592.pdf" type="application/pdf" width="100%" height="600px" />
+
+Visualized output:
+
+<embed src="example/EFTA02238592.visualized.pdf" type="application/pdf" width="100%" height="600px" />

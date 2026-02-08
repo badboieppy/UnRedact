@@ -4,9 +4,10 @@ use crate::font_detection::logic::file_font_process::{
     encode_report, process_many, validate_inputs, FontProcessConfig,
 };
 use crate::font_detection::logic::types::file_types::{
-    EncodedOutput, FontDetectionReport, FontProcessInput, OutputFormat,
+    EncodedOutput, FontDetectionReport, FontProcessInput, FontRunReport, OutputFormat,
 };
-use std::path::PathBuf;
+use crate::font_detection::data::font_run_builder::build_font_run_report;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectFontsRequest {
@@ -64,6 +65,15 @@ pub fn run_font_detection(
     let mut out = detect_fonts_encoded(accessor, req, format)?;
     out.path = path;
     Ok(out)
+}
+
+pub fn detect_font_runs(accessor: &dyn FileAccessor, path: &Path) -> Result<FontRunReport, String> {
+    let bytes = accessor
+        .read(crate::font_detection::dependency::file_accessor::FileReadRequest {
+            path: path.to_path_buf(),
+        })?
+        .bytes;
+    build_font_run_report(path, &bytes)
 }
 
 #[cfg(test)]
@@ -188,4 +198,3 @@ mod tests {
         );
     }
 }
-

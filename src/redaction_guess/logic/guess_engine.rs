@@ -1,9 +1,11 @@
 use std::path::Path;
 
-use crate::redaction_finder::types::{Rect, RedactionOccurrence};
-use crate::redaction_guess::data::{DictionaryDataSource, ReportDataSource};
-use crate::redaction_guess::types::GuessReport;
-use crate::redaction_guess::types::{GuessCandidate, GuessConfig, GuessContext, RedactionGuess};
+use crate::font_detection::logic::types::file_types::{
+    FontAsset, FontRunReport, FontTextRun, Rect as FontRect,
+};
+use crate::redaction_finder::types::{Rect, RedactionOccurrence, RedactionReport};
+use crate::redaction_guess::data::{DictionaryDataSource, FontRunDataSource, ReportDataSource};
+use crate::redaction_guess::types::{GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess};
 
 #[derive(Debug, Clone)]
 struct WordMetric {
@@ -16,6 +18,17 @@ struct CandidateInternal {
     text: String,
     error_pt: f64,
     word_count: usize,
+}
+
+pub struct RunGuessRequest<'a> {
+    pub report_data: &'a dyn ReportDataSource,
+    pub dictionary_data: &'a dyn DictionaryDataSource,
+    pub font_run_data: &'a dyn FontRunDataSource,
+    pub redactions_path: &'a Path,
+    pub fonts_path: &'a Path,
+    pub pdf_path: &'a Path,
+    pub dictionary_path: Option<&'a Path>,
+    pub cfg: &'a GuessConfig,
 }
 
 #[inline]
@@ -70,6 +83,7 @@ pub fn guess_for_redaction(
         page_index: redaction.page_index,
         bbox: redaction.bbox,
         candidates,
+        exact_matches: Vec::new(),
         context: GuessContext {
             left_text,
             right_text,
@@ -94,25 +108,26 @@ pub fn build_guesses(
 
 #[inline]
 pub fn run_from_paths(
-    report_data: &dyn ReportDataSource,
-    dictionary_data: &dyn DictionaryDataSource,
-    redactions_path: &Path,
-    fonts_path: &Path,
-    dictionary_path: Option<&Path>,
-    cfg: &GuessConfig,
-) -> Result<crate::redaction_guess::types::GuessReport, String> {
-    let reports = report_data.load_reports(redactions_path, fonts_path)?;
-    let dictionary =
-        dictionary_data.load_dictionary(dictionary_path, &reports.fonts, cfg.max_dictionary)?;
+    req: RunGuessRequest<'_>,
+) -> Result<GuessReport, String> {
+    let reports = req
+        .report_data
+        .load_reports(req.redactions_path, req.fonts_path)?;
+    let dictionary = req.dictionary_data.load_dictionary(
+        req.dictionary_path,
+        req.cfg.max_dictionary,
+    )?;
+    let font_runs = req.font_run_data.load_font_runs(req.pdf_path)?;
     let mut diagnostics = reports.diagnostics;
     diagnostics.extend(dictionary.diagnostics);
-    Ok(build_report_from_parts(
-        redactions_path,
-        fonts_path,
+    Ok(build_report_from_parts_with_fonts(
+        req.redactions_path,
+        req.fonts_path,
         reports.redactions,
         dictionary.dictionary,
         diagnostics,
-        cfg,
+        font_runs.report,
+        req.cfg,
     ))
 }
 
@@ -120,7 +135,7 @@ pub fn run_from_paths(
 pub fn build_report_from_parts(
     redactions_path: &Path,
     fonts_path: &Path,
-    redactions: crate::redaction_finder::types::RedactionReport,
+    redactions: RedactionReport,
     dictionary: Vec<String>,
     diagnostics: Vec<String>,
     cfg: &GuessConfig,
@@ -132,6 +147,170 @@ pub fn build_report_from_parts(
         guesses,
         diagnostics,
     }
+}
+
+#[inline]
+pub fn build_report_from_parts_with_fonts(
+    redactions_path: &Path,
+    fonts_path: &Path,
+    redactions: RedactionReport,
+    dictionary: Vec<String>,
+    diagnostics: Vec<String>,
+    font_runs: FontRunReport,
+    cfg: &GuessConfig,
+) -> GuessReport {
+    let exact = find_exact_matches(&redactions.redactions, &font_runs, &dictionary, cfg);
+    let mut guesses = build_guesses(&redactions.redactions, &dictionary, cfg);
+    for (guess, matches) in guesses.iter_mut().zip(exact.into_iter()) {
+        guess.exact_matches = matches;
+    }
+    GuessReport {
+        input_redactions: redactions_path.to_string_lossy().to_string(),
+        input_fonts: fonts_path.to_string_lossy().to_string(),
+        guesses,
+        diagnostics,
+    }
+}
+
+fn find_exact_matches(
+    redactions: &[RedactionOccurrence],
+    font_runs: &FontRunReport,
+    dictionary: &[String],
+    cfg: &GuessConfig,
+) -> Vec<Vec<String>> {
+    let assets = font_runs
+        .assets
+        .iter()
+        .map(|a| (a.font_key.clone(), a.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut by_page: std::collections::BTreeMap<u32, Vec<&FontTextRun>> =
+        std::collections::BTreeMap::new();
+    for run in &font_runs.runs {
+        by_page.entry(run.page_index).or_default().push(run);
+    }
+
+    let mut out = vec![Vec::new(); redactions.len()];
+    for (idx, redaction) in redactions.iter().enumerate() {
+        let left = redaction.underlying_text.first();
+        let right = redaction.underlying_text.get(1);
+        let left_text = left.map(|h| h.text.trim()).unwrap_or("");
+        let right_text = right.map(|h| h.text.trim()).unwrap_or("");
+        if left_text.is_empty() || right_text.is_empty() {
+            continue;
+        }
+        let runs = match by_page.get(&redaction.page_index) {
+            Some(r) => r,
+            None => continue,
+        };
+        let left_run = match select_run(runs, left_text, left.map(|h| h.bbox), redaction.bbox) {
+            Some(r) => r,
+            None => continue,
+        };
+        let right_run = match select_run(runs, right_text, right.map(|h| h.bbox), redaction.bbox) {
+            Some(r) => r,
+            None => continue,
+        };
+        if left_run.font_key != right_run.font_key {
+            continue;
+        }
+        if (left_run.font_size_pt - right_run.font_size_pt).abs() > 0.01 {
+            continue;
+        }
+        let asset = match assets.get(&left_run.font_key) {
+            Some(a) => a,
+            None => continue,
+        };
+        let matches = exact_matches_for_row(
+            left_run,
+            right_run,
+            dictionary,
+            asset,
+            cfg,
+        );
+        if !matches.is_empty() {
+            out[idx] = matches;
+        }
+    }
+    out
+}
+
+fn select_run<'a>(
+    runs: &'a [&FontTextRun],
+    text: &str,
+    bbox: Option<Rect>,
+    red_bbox: Rect,
+) -> Option<&'a FontTextRun> {
+    let mut best: Option<(&FontTextRun, f32)> = None;
+    for run in runs {
+        if run.text.trim() != text {
+            continue;
+        }
+        if let Some(b) = bbox {
+            if vertical_overlap_run(&run.bbox, &b) <= 0.0 {
+                continue;
+            }
+        }
+        let dist = if run.bbox.x1 < red_bbox.x0 {
+            red_bbox.x0 - run.bbox.x1
+        } else if run.bbox.x0 > red_bbox.x1 {
+            run.bbox.x0 - red_bbox.x1
+        } else {
+            0.0
+        };
+        let score = dist.abs();
+        match best {
+            None => best = Some((run, score)),
+            Some((_, best_score)) if score < best_score => best = Some((run, score)),
+            _ => {}
+        }
+    }
+    best.map(|(r, _)| r)
+}
+
+fn exact_matches_for_row(
+    left: &FontTextRun,
+    right: &FontTextRun,
+    dictionary: &[String],
+    asset: &FontAsset,
+    cfg: &GuessConfig,
+) -> Vec<String> {
+    let face = match rustybuzz::Face::from_slice(&asset.bytes, 0) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let units_per_em = asset.units_per_em.max(1) as f32;
+    let font_size = left.font_size_pt;
+    let left_x = left.bbox.x0;
+    let right_x = right.bbox.x0;
+    let tol = 0.1_f32;
+
+    let mut out = Vec::new();
+    for word in dictionary {
+        let candidate = format!("{} {} ", left.text.trim(), word.trim());
+        let advance = advance_pt(&face, &candidate, font_size, units_per_em);
+        let expected = left_x + advance;
+        let err = (expected - right_x).abs();
+        if err <= tol {
+            out.push(word.clone());
+        }
+        if out.len() >= cfg.max_candidates {
+            break;
+        }
+    }
+    out
+}
+
+fn advance_pt(face: &rustybuzz::Face<'_>, text: &str, font_size: f32, units_per_em: f32) -> f32 {
+    let mut buf = rustybuzz::UnicodeBuffer::new();
+    buf.push_str(text);
+    let out = rustybuzz::shape(face, &[], buf);
+    let units = out
+        .glyph_positions()
+        .iter()
+        .map(|p| p.x_advance as f32)
+        .sum::<f32>()
+        / 64.0;
+    units * (font_size / units_per_em)
 }
 
 fn extract_context(
@@ -258,10 +437,14 @@ fn search_candidates(
     out
 }
 
+fn vertical_overlap_run(a: &FontRect, b: &Rect) -> f32 {
+    (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redaction_finder::types::{RedactionKind, RedactionOccurrence, UnderlyingTextHit};
+    use crate::redaction_finder::types::{RedactionKind, UnderlyingTextHit};
 
     fn redaction(bbox: Rect, left: &str, right: &str) -> RedactionOccurrence {
         RedactionOccurrence {

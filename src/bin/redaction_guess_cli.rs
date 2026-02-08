@@ -19,6 +19,9 @@ struct Args {
     fonts: PathBuf,
 
     #[arg(long)]
+    pdf: PathBuf,
+
+    #[arg(long)]
     dictionary: Option<PathBuf>,
 
     #[arg(long)]
@@ -80,6 +83,7 @@ fn run() -> Result<(), String> {
     let report = run_from_paths(
         &args.redactions,
         &args.fonts,
+        &args.pdf,
         args.dictionary.as_deref(),
         cfg,
     )?;

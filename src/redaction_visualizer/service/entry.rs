@@ -8,11 +8,13 @@ use crate::redaction_visualizer::logic::{run_visualizer, VisualizerConfig};
 pub fn run_from_report(
     pdf_path: &Path,
     report: &crate::redaction_finder::types::RedactionReport,
+    guesses: Option<&crate::redaction_guess::types::GuessReport>,
+    font_runs: Option<&crate::font_detection::logic::types::file_types::FontRunReport>,
     output_path: &Path,
     cfg: VisualizerConfig,
 ) -> Result<(), String> {
     let data = VisualizationData::new();
     let annotator = PdfAnnotator;
-    let bytes = run_visualizer(&data, &annotator, pdf_path, report, cfg)?;
+    let bytes = run_visualizer(&data, &annotator, pdf_path, report, guesses, font_runs, cfg)?;
     data.write_output(output_path, &bytes)
 }
