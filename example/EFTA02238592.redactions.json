@@ -1,0 +1,180 @@
+{
+  "input": ".\\example\\EFTA02238592.pdf",
+  "redactions": [
+    {
+      "page_index": 0,
+      "bbox": {
+        "x0": 69.119995,
+        "y0": 649.23,
+        "x1": 103.68001,
+        "y1": 657.87
+      },
+      "kind": "raster_dark_region",
+      "score": 0.7272177,
+      "meta": {},
+      "underlying_text": [
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 69.119995,
+            "y0": 649.23,
+            "x1": 103.68001,
+            "y1": 657.87
+          },
+          "text": ""
+        },
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 69.119995,
+            "y0": 649.23,
+            "x1": 103.68001,
+            "y1": 657.87
+          },
+          "text": ""
+        }
+      ]
+    },
+    {
+      "page_index": 0,
+      "bbox": {
+        "x0": 120.96,
+        "y0": 709.71,
+        "x1": 181.44,
+        "y1": 718.35
+      },
+      "kind": "raster_dark_region",
+      "score": 0.5898732,
+      "meta": {},
+      "underlying_text": [
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 71.04,
+            "y0": 699.77,
+            "x1": 106.98,
+            "y1": 711.75
+          },
+          "text": "From:"
+        },
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 120.96,
+            "y0": 709.71,
+            "x1": 181.44,
+            "y1": 718.35
+          },
+          "text": ""
+        }
+      ]
+    },
+    {
+      "page_index": 0,
+      "bbox": {
+        "x0": 181.44,
+        "y0": 718.35,
+        "x1": 319.68,
+        "y1": 735.63
+      },
+      "kind": "raster_dark_region",
+      "score": 0.5117093,
+      "meta": {},
+      "underlying_text": [
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 71.78,
+            "y0": 711.02,
+            "x1": 191.098,
+            "y1": 723.38
+          },
+          "text": "To: Saida Dennis"
+        },
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 181.44,
+            "y0": 718.35,
+            "x1": 319.68,
+            "y1": 735.63
+          },
+          "text": ""
+        }
+      ]
+    },
+    {
+      "page_index": 0,
+      "bbox": {
+        "x0": 241.92,
+        "y0": 450.51,
+        "x1": 414.72003,
+        "y1": 467.79
+      },
+      "kind": "raster_dark_region",
+      "score": 0.6114144,
+      "meta": {},
+      "underlying_text": [
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 71.6,
+            "y0": 444.77,
+            "x1": 241.93399,
+            "y1": 456.75
+          },
+          "text": "On Wed, Feb 14, 2018 at 4:39 PM,"
+        },
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 426.49,
+            "y0": 444.77,
+            "x1": 469.61798,
+            "y1": 456.75
+          },
+          "text": "wrote:"
+        }
+      ]
+    },
+    {
+      "page_index": 0,
+      "bbox": {
+        "x0": 328.32,
+        "y0": 606.03,
+        "x1": 457.92,
+        "y1": 623.31
+      },
+      "kind": "raster_dark_region",
+      "score": 0.6217578,
+      "meta": {},
+      "underlying_text": [
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 107.6,
+            "y0": 596.64,
+            "x1": 328.268,
+            "y1": 608.62
+          },
+          "text": "On Feb 15, 2018, at 9:56 AM, Saida Dennis <"
+        },
+        {
+          "page_index": 0,
+          "bbox": {
+            "x0": 457.89,
+            "y0": 596.27,
+            "x1": 510.86798,
+            "y1": 608.25
+          },
+          "text": "> wrote:"
+        }
+      ]
+    }
+  ],
+  "count": 5,
+  "page_counts": {
+    "0": 5
+  },
+  "diagnostics": []
+}

@@ -59,8 +59,8 @@ The `unredact_orchestrator_cli` binary runs redaction detection, font detection,
 
 Original sample:
 
-<embed src="example/EFTA02238592.pdf" type="application/pdf" width="100%" height="600px" />
+![Original PDF preview](example/EFTA02238592.png)
 
 Visualized output:
 
-<embed src="example/EFTA02238592.visualized.pdf" type="application/pdf" width="100%" height="600px" />
+![Visualized PDF preview](example/EFTA02238592.visualized.png)

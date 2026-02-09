@@ -111,18 +111,22 @@ fn build_overlays(
             None => continue,
         };
 
-        let left_run = select_run(
+        let left_bbox = left_hit.map(|h| h.bbox);
+        let right_bbox = right_hit.map(|h| h.bbox);
+        let left_run = select_run_by_text(
             &font_runs.runs,
             redaction.page_index,
             left_text,
-            left_hit.map(|h| h.bbox),
-        );
-        let right_run = select_run(
+            left_bbox,
+        )
+        .or_else(|| select_run_by_bbox(&font_runs.runs, redaction.page_index, left_bbox));
+        let right_run = select_run_by_text(
             &font_runs.runs,
             redaction.page_index,
             right_text,
-            right_hit.map(|h| h.bbox),
-        );
+            right_bbox,
+        )
+        .or_else(|| select_run_by_bbox(&font_runs.runs, redaction.page_index, right_bbox));
         let (left_run, _right_run) = match (left_run, right_run) {
             (Some(l), Some(r)) => (l, r),
             _ => continue,
@@ -135,8 +139,8 @@ fn build_overlays(
             continue;
         }
 
-        let left_bbox = left_hit.map(|h| h.bbox).unwrap_or(redaction.bbox);
-        let right_bbox = right_hit.map(|h| h.bbox).unwrap_or(redaction.bbox);
+        let left_bbox = left_bbox.unwrap_or(redaction.bbox);
+        let right_bbox = right_bbox.unwrap_or(redaction.bbox);
         let x0 = left_bbox.x0.min(redaction.bbox.x0);
         let x1 = right_bbox.x1.max(redaction.bbox.x1);
         let y0 = left_bbox
@@ -169,7 +173,7 @@ fn pick_best_guess(guess: &crate::redaction_guess::types::RedactionGuess) -> Opt
     guess.candidates.first().map(|c| c.text.as_str())
 }
 
-fn select_run<'a>(
+fn select_run_by_text<'a>(
     runs: &'a [FontTextRun],
     page_index: u32,
     text: &str,
@@ -196,6 +200,34 @@ fn select_run<'a>(
         }
     }
     best.map(|(r, _)| r)
+}
+
+fn select_run_by_bbox(
+    runs: &[FontTextRun],
+    page_index: u32,
+    bbox: Option<Rect>,
+) -> Option<&FontTextRun> {
+    let bbox = bbox?;
+    let mut best: Option<(&FontTextRun, f32, f32)> = None;
+    for run in runs {
+        if run.page_index != page_index {
+            continue;
+        }
+        let overlap = vertical_overlap_run(&run.bbox, &bbox);
+        if overlap <= 0.0 {
+            continue;
+        }
+        let dist = (run.bbox.x0 - bbox.x0).abs();
+        match best {
+            None => best = Some((run, overlap, dist)),
+            Some((_, best_overlap, best_dist)) => {
+                if overlap > best_overlap || (overlap == best_overlap && dist < best_dist) {
+                    best = Some((run, overlap, dist));
+                }
+            }
+        }
+    }
+    best.map(|(r, _, _)| r)
 }
 
 fn vertical_overlap_run(a: &FontRect, b: &Rect) -> f32 {

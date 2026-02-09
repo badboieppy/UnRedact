@@ -1,0 +1,38 @@
+{
+  "inputs": [
+    {
+      "path": ".\\example\\EFTA02238592.pdf",
+      "kind": "pdf",
+      "text_source": "embedded_text",
+      "fonts": {
+        "distinct": [
+          {
+            "family": "Helvetica",
+            "variant": null
+          },
+          {
+            "family": "Times",
+            "variant": "Roman"
+          }
+        ],
+        "counts": [
+          {
+            "font": {
+              "family": "Helvetica",
+              "variant": null
+            },
+            "count": 18
+          },
+          {
+            "font": {
+              "family": "Times",
+              "variant": "Roman"
+            },
+            "count": 253
+          }
+        ]
+      },
+      "occurrences": null
+    }
+  ]
+}
