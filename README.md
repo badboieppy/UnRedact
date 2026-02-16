@@ -55,12 +55,21 @@ The `unredact_orchestrator_cli` binary runs redaction detection, font detection,
 - Control guessing: `--max-words 4 --max-candidates 50 --max-dictionary 2000 --tol-pt 4.0 --max-nodes 50000`
 - Visualize redactions: `--visualize --visualize-border 1.0` (writes a `*.visualized.pdf`)
 
+### PDF to PNG CLI
+Use the `pdf_to_png` binary to render PDF pages into PNG files for docs/README updates:
+
+- Render first page: `cargo run --bin pdf_to_png -- path/to/file.pdf`
+- Render a specific page: `cargo run --bin pdf_to_png -- path/to/file.pdf --page 2`
+- Render all pages: `cargo run --bin pdf_to_png -- path/to/file.pdf --all-pages --output-dir path/to/out`
+- Choose DPI: `--dpi 200`
+- Write single-page output to a specific file: `--output path/to/page.png`
+
 ## Example PDFs
 
 Original sample:
 
-![Original PDF preview](example/EFTA02238592.png)
+![Original PDF preview](example/EFTA00101126.png)
 
 Visualized output:
 
-![Visualized PDF preview](example/EFTA02238592.visualized.png)
+![Visualized PDF preview](example/EFTA00101126.visualized.png)

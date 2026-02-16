@@ -58,12 +58,14 @@ pub fn load_dictionary(
     let dictionary = if let Some(path) = dictionary_path {
         let bytes = file_store.read(path)?;
         let text = String::from_utf8_lossy(&bytes);
-        let mut tokens = Vec::new();
+        let mut expanded = Vec::new();
         for line in text.lines() {
-            tokens.extend(split_into_words(line));
+            for candidate in name_combinations(line) {
+                expanded.extend(case_variants(&candidate));
+            }
         }
         diagnostics.push("dictionary_source=file".to_owned());
-        normalize_dictionary(tokens, max_dictionary)
+        normalize_dictionary(expanded, max_dictionary)
     } else {
         diagnostics.push("dictionary_source=default_names".to_owned());
         build_name_dictionary(max_dictionary)
@@ -122,11 +124,7 @@ fn name_combinations(value: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let tokens = cleaned
-        .split_whitespace()
-        .map(|token| token.trim())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
+    let tokens = split_into_words(cleaned);
     if tokens.is_empty() {
         return Vec::new();
     }
@@ -135,14 +133,17 @@ fn name_combinations(value: &str) -> Vec<String> {
     let full = tokens.join(" ");
     set.insert(full.clone());
 
-    let first = tokens.first().copied().unwrap_or_default().to_owned();
-    let last = tokens.last().copied().unwrap_or_default().to_owned();
+    let first = tokens.first().cloned().unwrap_or_default();
+    let last = tokens.last().cloned().unwrap_or_default();
     set.insert(first.clone());
     set.insert(last.clone());
 
     if tokens.len() >= 2 {
         set.insert(format!("{first} {last}"));
         set.insert(format!("{last}, {first}"));
+        if cleaned.contains(',') {
+            set.insert(format!("{last} {first}"));
+        }
     }
 
     set.into_iter().collect::<Vec<_>>()
@@ -230,5 +231,49 @@ mod tests {
                 "E".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn name_combinations_support_last_first_input() {
+        let out = name_combinations("MUCINSKA, ADRIANA");
+        assert!(out.contains(&"MUCINSKA ADRIANA".to_owned()));
+        assert!(out.contains(&"ADRIANA MUCINSKA".to_owned()));
+    }
+
+    #[test]
+    fn file_dictionary_keeps_full_name_candidates() {
+        let tmp_path = std::env::temp_dir().join(format!(
+            "unredact_dict_test_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let write_result = std::fs::write(
+            &tmp_path,
+            "MUCINSKA, ADRIANA\nSarah Kellen\nNADIA MARCINKOVA\n",
+        );
+        assert!(
+            write_result.is_ok(),
+            "failed to create temp dictionary file for test: {:?}",
+            write_result.err()
+        );
+
+        let loaded = load_dictionary(&FileStore, Some(&tmp_path), 200);
+        assert!(
+            loaded.is_ok(),
+            "expected file dictionary to load in test, got {:?}",
+            loaded.err()
+        );
+        let loaded = loaded.expect("dictionary should load in test");
+        let items = loaded.dictionary;
+
+        assert!(items.contains(&"ADRIANA MUCINSKA".to_owned()));
+        assert!(items.contains(&"SARAH KELLEN".to_owned()));
+        assert!(items.contains(&"NADIA MARCINKOVA".to_owned()));
+
+        let remove_result = std::fs::remove_file(tmp_path);
+        drop(remove_result);
     }
 }
