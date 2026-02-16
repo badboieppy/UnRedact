@@ -417,6 +417,7 @@ mod guess_impl {
                         anchor_font_key: None,
                         anchor_font_size_pt: None,
                         anchor_h_scale_pct: None,
+                        anchor_row_bias_pt: None,
                         has_anchor_pair: false,
                     },
                 });
@@ -667,6 +668,7 @@ mod guess_impl {
                     anchor_font_key: Some(anchor.font_key.clone()),
                     anchor_font_size_pt: Some(anchor.font_size_pt),
                     anchor_h_scale_pct: Some(anchor.h_scale_pct),
+                    anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
                     has_anchor_pair: true,
                 },
             };
@@ -775,6 +777,7 @@ mod guess_impl {
                 anchor_font_key: Some(anchor.font_key.clone()),
                 anchor_font_size_pt: Some(anchor.font_size_pt),
                 anchor_h_scale_pct: Some(anchor.h_scale_pct),
+                anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
                 has_anchor_pair: true,
             },
         }

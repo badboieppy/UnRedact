@@ -154,9 +154,11 @@ fn build_overlays(
 
         if guess.context.has_anchor_pair {
             let anchor_left_x = guess.context.anchor_left_x;
+            let anchor_right_x = guess.context.anchor_right_x;
             let anchor_font_key = guess.context.anchor_font_key.as_deref();
             let anchor_font_size = guess.context.anchor_font_size_pt;
             let anchor_h_scale = guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32);
+            let anchor_row_bias = guess.context.anchor_row_bias_pt.unwrap_or(0.0_f32);
             if let (Some(left_x), Some(font_key), Some(font_size_pt)) =
                 (anchor_left_x, anchor_font_key, anchor_font_size)
             {
@@ -188,8 +190,15 @@ fn build_overlays(
                         &assets,
                         width_map,
                     );
-                    let guess_x = left_x + left_width + space_width;
-                    let right_x = guess_x + guess_width + space_width;
+                    let nominal_guess_x = left_x + left_width + space_width + anchor_row_bias;
+                    let nominal_right_x = nominal_guess_x + guess_width + space_width;
+                    let (guess_x, right_x) = match anchor_right_x {
+                        Some(x) if x.is_finite() => {
+                            let delta = x - nominal_right_x;
+                            (nominal_guess_x + delta, x)
+                        }
+                        _ => (nominal_guess_x, nominal_right_x),
+                    };
 
                     let left_bbox = left_hit.map(|hit| hit.bbox);
                     let right_bbox = right_hit.map(|hit| hit.bbox);

@@ -68,6 +68,8 @@ pub struct GuessContext {
     pub anchor_font_size_pt: Option<f32>,
     #[serde(default)]
     pub anchor_h_scale_pct: Option<f32>,
+    #[serde(default, alias = "row_bias_pt")]
+    pub anchor_row_bias_pt: Option<f32>,
     #[serde(
         rename = "guessable",
         alias = "has_anchor_pair",
