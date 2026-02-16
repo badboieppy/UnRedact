@@ -19,8 +19,8 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::unused_trait_names)]
 
-pub mod font_detection;
-pub mod redaction_finder;
-pub mod redaction_guess;
-pub mod redaction_visualizer;
-pub mod unredact_orchestrator;
+pub mod data;
+pub mod dependency;
+pub mod logic;
+pub mod service;
+pub mod types;

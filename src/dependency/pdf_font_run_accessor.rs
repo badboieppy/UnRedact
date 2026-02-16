@@ -1,0 +1,645 @@
+use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+#[derive(Debug, Clone)]
+struct FontInfo {
+    font_key: String,
+    font_name: String,
+    bytes: Option<Vec<u8>>,
+    units_per_em: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+struct TextState {
+    in_text: bool,
+    font_key: String,
+    font_name: String,
+    font_size_pt: f32,
+    h_scale_pct: f32,
+    text_matrix: Matrix,
+}
+
+impl Default for TextState {
+    fn default() -> Self {
+        Self {
+            in_text: false,
+            font_key: String::new(),
+            font_name: String::new(),
+            font_size_pt: 0.0,
+            h_scale_pct: 100.0_f32,
+            text_matrix: Matrix::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Matrix {
+    tx: f32,
+    ty: f32,
+}
+
+impl Default for Matrix {
+    fn default() -> Self {
+        Self { tx: 0.0, ty: 0.0 }
+    }
+}
+
+#[inline]
+pub fn build_font_run_report(path: &Path, bytes: &[u8]) -> Result<FontRunReport, String> {
+    let doc = Document::load_mem(bytes).map_err(|e| e.to_string())?;
+    let pages = doc.get_pages();
+
+    let mut runs = Vec::new();
+    let mut assets_map: BTreeMap<String, FontAsset> = BTreeMap::new();
+
+    for (page_no, page_id) in pages {
+        let page_index = page_no.saturating_sub(1);
+        let font_map = extract_page_font_info(&doc, page_id)?;
+        for info in font_map.values() {
+            if let Some(bytes) = &info.bytes {
+                let units_per_em = info.units_per_em.unwrap_or(1000);
+                assets_map
+                    .entry(info.font_key.clone())
+                    .or_insert(FontAsset {
+                        font_key: info.font_key.clone(),
+                        font_name: info.font_name.clone(),
+                        units_per_em,
+                        bytes: bytes.clone(),
+                    });
+            }
+        }
+        let content = doc
+            .get_page_content(page_id)
+            .map_err(|e| format!("page_content_error={e}"))?;
+        let decoded = lopdf::content::Content::decode(&content)
+            .map_err(|e| format!("page_decode_error={e}"))?;
+        runs.extend(extract_text_runs(
+            page_index,
+            &decoded.operations,
+            &font_map,
+        ));
+    }
+
+    Ok(FontRunReport {
+        input: path.to_string_lossy().to_string(),
+        runs,
+        assets: assets_map.into_values().collect(),
+    })
+}
+
+fn extract_text_runs(
+    page_index: u32,
+    ops: &[lopdf::content::Operation],
+    font_map: &BTreeMap<String, FontInfo>,
+) -> Vec<FontTextRun> {
+    let mut out = Vec::new();
+    let mut st = TextState::default();
+
+    for op in ops {
+        match op.operator.as_str() {
+            "BT" => st.in_text = true,
+            "ET" => st.in_text = false,
+            "Tf" => {
+                let font_key = op
+                    .operands
+                    .first()
+                    .and_then(object_to_name_string)
+                    .unwrap_or_else(|| st.font_key.clone());
+                let size = op
+                    .operands
+                    .get(1)
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.font_size_pt);
+                let info = font_map.get(&font_key);
+                st.font_key = font_key.clone();
+                st.font_name = info
+                    .map(|i| i.font_name.clone())
+                    .unwrap_or_else(|| font_key);
+                st.font_size_pt = size;
+            }
+            "Tz" => {
+                st.h_scale_pct = op
+                    .operands
+                    .first()
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.h_scale_pct);
+            }
+            "Tm" => {
+                if let Some(tx) = op.operands.get(4).and_then(object_to_f32) {
+                    st.text_matrix.tx = tx;
+                }
+                if let Some(ty) = op.operands.get(5).and_then(object_to_f32) {
+                    st.text_matrix.ty = ty;
+                }
+            }
+            "Td" | "TD" => {
+                let dx = op.operands.first().and_then(object_to_f32).unwrap_or(0.0);
+                let dy = op.operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
+                st.text_matrix.tx += dx;
+                st.text_matrix.ty += dy;
+            }
+            "Tj" | "TJ" | "'" | "\"" => {
+                if !st.in_text {
+                    continue;
+                }
+                let text = text_from_show_op(op);
+                if text.trim().is_empty() {
+                    continue;
+                }
+
+                let font_info = font_map.get(&st.font_key);
+                let width = estimate_run_width_pt(
+                    font_info,
+                    &st.font_name,
+                    st.font_size_pt,
+                    st.h_scale_pct,
+                    &text,
+                )
+                .unwrap_or_else(|| {
+                    let scale = (st.h_scale_pct / 100.0_f32).max(0.01_f32);
+                    let chars = text.chars().count().max(1) as f32;
+                    (st.font_size_pt.abs() * 0.6_f32 * chars * scale).max(1.0_f32)
+                });
+                let h = st.font_size_pt.abs().max(1.0);
+                let x0 = st.text_matrix.tx;
+                let y1 = st.text_matrix.ty;
+                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
+                out.push(FontTextRun {
+                    page_index,
+                    text,
+                    bbox,
+                    font_key: st.font_key.clone(),
+                    font_name: st.font_name.clone(),
+                    font_size_pt: st.font_size_pt,
+                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
+                });
+                st.text_matrix.tx += width;
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn extract_page_font_info(
+    doc: &Document,
+    page_id: ObjectId,
+) -> Result<BTreeMap<String, FontInfo>, String> {
+    let (page_resources_opt, _unused_pages) = doc
+        .get_page_resources(page_id)
+        .map_err(|error| error.to_string())?;
+    let resources = match page_resources_opt {
+        None => return Ok(BTreeMap::new()),
+        Some(resources_dict) => resources_dict,
+    };
+
+    let font_obj_opt = resources.get(b"Font").ok();
+    let font_obj = match font_obj_opt {
+        None => return Ok(BTreeMap::new()),
+        Some(font_object) => font_object,
+    };
+
+    let font_dict_opt = deref_to_dict(doc, font_obj).or_else(|| object_to_dict(font_obj));
+    let font_dict = match font_dict_opt {
+        None => return Ok(BTreeMap::new()),
+        Some(font_dictionary) => font_dictionary,
+    };
+
+    let map = font_dict
+        .iter()
+        .filter_map(|(key_bytes, value_object)| {
+            let key = String::from_utf8_lossy(key_bytes).to_string();
+            let dict = deref_to_dict(doc, value_object)?;
+            let font_name = resolve_pdf_font_name(doc, dict).unwrap_or_else(|| key.clone());
+            let (bytes, units_per_em) = extract_font_bytes(doc, dict);
+            Some((
+                key.clone(),
+                FontInfo {
+                    font_key: key,
+                    font_name,
+                    bytes,
+                    units_per_em,
+                },
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    Ok(map)
+}
+
+fn resolve_pdf_font_name(doc: &Document, dict: &Dictionary) -> Option<String> {
+    let base = dict.get(b"BaseFont").ok().and_then(object_to_name_string);
+    if let Some(base_font_name) = base {
+        return Some(normalize_subset_font_name(&base_font_name));
+    }
+
+    let desc_obj = dict.get(b"FontDescriptor").ok();
+    let desc_dict_opt =
+        desc_obj.and_then(|descriptor_object| deref_to_dict(doc, descriptor_object));
+    let desc_dict = desc_dict_opt?;
+    let name = desc_dict
+        .get(b"FontName")
+        .ok()
+        .and_then(object_to_name_string)?;
+    Some(normalize_subset_font_name(&name))
+}
+
+fn extract_font_bytes(doc: &Document, dict: &Dictionary) -> (Option<Vec<u8>>, Option<u16>) {
+    let desc_obj = match dict.get(b"FontDescriptor").ok() {
+        Some(o) => o,
+        None => return (None, None),
+    };
+    let desc = match deref_to_dict(doc, desc_obj) {
+        Some(d) => d,
+        None => return (None, None),
+    };
+
+    for key in [&b"FontFile"[..], &b"FontFile2"[..], &b"FontFile3"[..]] {
+        if let Some(stream) = desc.get(key).ok().and_then(|o| deref_to_stream(doc, o)) {
+            let bytes = stream.decompressed_content().ok();
+            if let Some(b) = bytes {
+                let units = ttf_parser::Face::parse(&b, 0)
+                    .ok()
+                    .map(|f| f.units_per_em());
+                return (Some(b), units);
+            }
+        }
+    }
+
+    (None, None)
+}
+
+fn text_from_show_op(op: &lopdf::content::Operation) -> String {
+    if op.operator.as_str() == "TJ" {
+        if let Some(Object::Array(a)) = op.operands.first() {
+            return a
+                .iter()
+                .filter_map(decode_pdf_text)
+                .collect::<Vec<_>>()
+                .join("");
+        }
+    }
+
+    if let Some(text) = op.operands.last().and_then(decode_pdf_text) {
+        return text;
+    }
+
+    String::new()
+}
+
+fn estimate_run_width_pt(
+    font_info: Option<&FontInfo>,
+    font_name: &str,
+    font_size_pt: f32,
+    h_scale_pct: f32,
+    text: &str,
+) -> Option<f32> {
+    if text.is_empty() {
+        return Some(0.0_f32);
+    }
+    let scale = (h_scale_pct / 100.0_f32).max(0.01_f32);
+
+    if let Some(info) = font_info {
+        if let Some(bytes) = info.bytes.as_ref() {
+            if let Some(face) = rustybuzz::Face::from_slice(bytes, 0) {
+                let units_per_em = info.units_per_em.unwrap_or(1000).max(1) as f32;
+                let width = advance_pt(&face, text, font_size_pt.abs().max(1.0_f32), units_per_em);
+                if width.is_finite() && width > 0.0_f32 {
+                    return Some(width * scale);
+                }
+            }
+        }
+    }
+
+    let core = core_font_width(font_name, text, font_size_pt.abs().max(1.0_f32));
+    core.map(|width| width * scale)
+}
+
+fn advance_pt(face: &rustybuzz::Face<'_>, text: &str, font_size_pt: f32, units_per_em: f32) -> f32 {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    let shaped = rustybuzz::shape(face, &[], buffer);
+    let units = shaped
+        .glyph_positions()
+        .iter()
+        .map(|position| position.x_advance as f32)
+        .sum::<f32>()
+        / 64.0_f32;
+    units * (font_size_pt / units_per_em.max(1.0_f32))
+}
+
+fn core_font_width(font_name: &str, text: &str, font_size_pt: f32) -> Option<f32> {
+    let normalized = font_name.to_ascii_lowercase();
+    let table: fn(char) -> i32 = if normalized.contains("times") && normalized.contains("roman") {
+        times_roman_width as fn(char) -> i32
+    } else if normalized.contains("helvetica") {
+        helvetica_width as fn(char) -> i32
+    } else {
+        return None;
+    };
+
+    let mut units = 0.0_f32;
+    for ch in text.chars() {
+        units += table(ch) as f32;
+    }
+    Some(units * (font_size_pt / 1000.0_f32))
+}
+
+fn times_roman_width(ch: char) -> i32 {
+    match ch {
+        ' ' => 250,
+        '!' => 333,
+        '"' => 408,
+        '#' => 500,
+        '$' => 500,
+        '%' => 833,
+        '&' => 778,
+        '\'' => 180,
+        '(' => 333,
+        ')' => 333,
+        '*' => 500,
+        '+' => 564,
+        ',' => 250,
+        '-' => 333,
+        '.' => 250,
+        '/' => 278,
+        '0' => 500,
+        '1' => 500,
+        '2' => 500,
+        '3' => 500,
+        '4' => 500,
+        '5' => 500,
+        '6' => 500,
+        '7' => 500,
+        '8' => 500,
+        '9' => 500,
+        ':' => 278,
+        ';' => 278,
+        '<' => 564,
+        '=' => 564,
+        '>' => 564,
+        '?' => 444,
+        '@' => 921,
+        'A' => 722,
+        'B' => 667,
+        'C' => 667,
+        'D' => 722,
+        'E' => 611,
+        'F' => 556,
+        'G' => 722,
+        'H' => 722,
+        'I' => 333,
+        'J' => 389,
+        'K' => 722,
+        'L' => 611,
+        'M' => 889,
+        'N' => 722,
+        'O' => 722,
+        'P' => 556,
+        'Q' => 722,
+        'R' => 667,
+        'S' => 556,
+        'T' => 611,
+        'U' => 722,
+        'V' => 722,
+        'W' => 944,
+        'X' => 722,
+        'Y' => 722,
+        'Z' => 611,
+        '[' => 333,
+        '\\' => 278,
+        ']' => 333,
+        '^' => 469,
+        '_' => 500,
+        '`' => 333,
+        'a' => 444,
+        'b' => 500,
+        'c' => 444,
+        'd' => 500,
+        'e' => 444,
+        'f' => 333,
+        'g' => 500,
+        'h' => 500,
+        'i' => 278,
+        'j' => 278,
+        'k' => 500,
+        'l' => 278,
+        'm' => 778,
+        'n' => 500,
+        'o' => 500,
+        'p' => 500,
+        'q' => 500,
+        'r' => 333,
+        's' => 389,
+        't' => 278,
+        'u' => 500,
+        'v' => 500,
+        'w' => 722,
+        'x' => 500,
+        'y' => 500,
+        'z' => 444,
+        '{' => 480,
+        '|' => 200,
+        '}' => 480,
+        '~' => 541,
+        _ => 500,
+    }
+}
+
+fn helvetica_width(ch: char) -> i32 {
+    match ch {
+        ' ' => 278,
+        '!' => 278,
+        '"' => 355,
+        '#' => 556,
+        '$' => 556,
+        '%' => 889,
+        '&' => 667,
+        '\'' => 191,
+        '(' => 333,
+        ')' => 333,
+        '*' => 389,
+        '+' => 584,
+        ',' => 278,
+        '-' => 333,
+        '.' => 278,
+        '/' => 278,
+        '0' => 556,
+        '1' => 556,
+        '2' => 556,
+        '3' => 556,
+        '4' => 556,
+        '5' => 556,
+        '6' => 556,
+        '7' => 556,
+        '8' => 556,
+        '9' => 556,
+        ':' => 278,
+        ';' => 278,
+        '<' => 584,
+        '=' => 584,
+        '>' => 584,
+        '?' => 556,
+        '@' => 1015,
+        'A' => 667,
+        'B' => 667,
+        'C' => 722,
+        'D' => 722,
+        'E' => 667,
+        'F' => 611,
+        'G' => 778,
+        'H' => 722,
+        'I' => 278,
+        'J' => 500,
+        'K' => 667,
+        'L' => 556,
+        'M' => 833,
+        'N' => 722,
+        'O' => 778,
+        'P' => 667,
+        'Q' => 778,
+        'R' => 722,
+        'S' => 667,
+        'T' => 611,
+        'U' => 722,
+        'V' => 667,
+        'W' => 944,
+        'X' => 667,
+        'Y' => 667,
+        'Z' => 611,
+        '[' => 278,
+        '\\' => 278,
+        ']' => 278,
+        '^' => 469,
+        '_' => 556,
+        '`' => 222,
+        'a' => 556,
+        'b' => 556,
+        'c' => 500,
+        'd' => 556,
+        'e' => 556,
+        'f' => 278,
+        'g' => 556,
+        'h' => 556,
+        'i' => 222,
+        'j' => 222,
+        'k' => 500,
+        'l' => 222,
+        'm' => 833,
+        'n' => 556,
+        'o' => 556,
+        'p' => 556,
+        'q' => 556,
+        'r' => 333,
+        's' => 500,
+        't' => 278,
+        'u' => 556,
+        'v' => 500,
+        'w' => 722,
+        'x' => 500,
+        'y' => 500,
+        'z' => 500,
+        '{' => 334,
+        '|' => 260,
+        '}' => 334,
+        '~' => 584,
+        _ => 500,
+    }
+}
+
+fn decode_pdf_text(obj: &Object) -> Option<String> {
+    match obj {
+        Object::String(raw_bytes, _) => {
+            let decoded = lopdf::decode_text_string(obj)
+                .ok()
+                .filter(|text| !text.contains('\u{FFFD}'));
+            match decoded {
+                Some(text) => Some(text),
+                None => Some(String::from_utf8_lossy(raw_bytes).to_string()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn object_to_f32(object: &Object) -> Option<f32> {
+    match object {
+        Object::Real(real_value) => Some(*real_value),
+        Object::Integer(integer_value) => Some(*integer_value as f32),
+        _ => None,
+    }
+}
+
+fn object_to_name_string(object: &Object) -> Option<String> {
+    match object {
+        Object::Name(name_bytes) => Some(String::from_utf8_lossy(name_bytes).to_string()),
+        _ => None,
+    }
+}
+
+fn object_to_dict(object: &Object) -> Option<&Dictionary> {
+    match object {
+        Object::Dictionary(dictionary) => Some(dictionary),
+        _ => None,
+    }
+}
+
+fn deref_to_dict<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'doc Dictionary> {
+    match object {
+        Object::Reference(object_id) => match doc.get_object(*object_id).ok()? {
+            Object::Dictionary(d) => Some(d),
+            _ => None,
+        },
+        Object::Dictionary(d) => Some(d),
+        _ => None,
+    }
+}
+
+fn deref_to_stream<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'doc Stream> {
+    match object {
+        Object::Reference(object_id) => match doc.get_object(*object_id).ok()? {
+            Object::Stream(s) => Some(s),
+            _ => None,
+        },
+        Object::Stream(s) => Some(s),
+        _ => None,
+    }
+}
+
+#[inline]
+fn normalize_subset_font_name(raw: &str) -> String {
+    let parts = raw.split('+').collect::<Vec<_>>();
+    normalize_from_parts(&parts)
+}
+
+fn normalize_from_parts(parts: &[&str]) -> String {
+    let is_subset = is_subset_prefix(parts);
+    if !is_subset {
+        return parts.join("+");
+    }
+
+    let second = parts.get(1).copied().unwrap_or("");
+    if second.is_empty() {
+        return parts.join("+");
+    }
+
+    second.to_owned()
+}
+
+fn is_subset_prefix(parts: &[&str]) -> bool {
+    let has_two = parts.len() == 2;
+    if !has_two {
+        return false;
+    }
+
+    let prefix = parts[0];
+    let len_ok = prefix.len() == 6;
+    if !len_ok {
+        return false;
+    }
+
+    prefix.chars().all(|c| c.is_ascii_uppercase())
+}

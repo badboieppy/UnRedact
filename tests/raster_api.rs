@@ -1,13 +1,10 @@
 use std::path::Path;
 
 use lopdf::Document;
-use unredact::redaction_finder::dependency::hayro_renderer::HayroRenderer;
-use unredact::redaction_finder::service::redaction_finder_entry::{
-    find_redactions_in_pdf_bytes_vector_only, find_redactions_in_pdf_bytes_with_renderer,
-    find_redactions_in_pdf_path_with_renderer,
-};
-use unredact::redaction_finder::types::{
-    PdfRenderer, RedactionFinderConfig, RedactionKind, RenderedPage,
+use unredact::dependency::hayro_renderer::HayroRenderer;
+use unredact::logic::run_redaction_scan_from_bytes;
+use unredact::types::redaction_types::{
+    PdfRenderer, RedactionFinderConfig, RedactionKind, RedactionMode, RenderedPage,
 };
 
 #[derive(Clone)]
@@ -78,7 +75,7 @@ fn bytes_api_with_renderer_detects_raster_region_on_real_pdf() {
         ..RedactionFinderConfig::default()
     };
 
-    let output = find_redactions_in_pdf_bytes_with_renderer(&bytes, &renderer, cfg).unwrap();
+    let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg).unwrap();
     assert!(output
         .redactions
         .iter()
@@ -91,11 +88,12 @@ fn vector_only_api_parses_real_pdf() {
     let bytes = std::fs::read(path).unwrap();
     let cfg = RedactionFinderConfig {
         enable_image_analysis: false,
+        mode: RedactionMode::All,
         ..RedactionFinderConfig::default()
     };
 
-    let output_a = find_redactions_in_pdf_bytes_vector_only(&bytes, cfg).unwrap();
-    let output_b = find_redactions_in_pdf_bytes_vector_only(&bytes, cfg).unwrap();
+    let output_a = run_redaction_scan_from_bytes(&bytes, None, cfg).unwrap();
+    let output_b = run_redaction_scan_from_bytes(&bytes, None, cfg).unwrap();
 
     assert_eq!(output_a.redactions.len(), output_b.redactions.len());
     assert_eq!(output_a.diagnostics, output_b.diagnostics);
@@ -114,7 +112,8 @@ fn hayro_renderer_real_pdf_smoke_if_available() {
         ..RedactionFinderConfig::default()
     };
 
-    let output = find_redactions_in_pdf_path_with_renderer(path, &renderer, cfg).unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg).unwrap();
     assert!(!output
         .diagnostics
         .iter()
