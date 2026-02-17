@@ -66,6 +66,12 @@ pub trait RedactionDataRetriever {
         cfg: &RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String>;
+    fn ocr_context_hits(
+        &self,
+        page_index: u32,
+        red_bbox: &crate::types::redaction_types::Rect,
+        cfg: &RedactionFinderConfig,
+    ) -> Result<Vec<UnderlyingTextHit>, String>;
 }
 
 pub struct PdfFileRetriever<'renderer> {
@@ -129,5 +135,15 @@ impl RedactionDataRetriever for PdfFileRetriever<'_> {
     #[inline]
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String> {
         DependencyRedactionDataRetriever::underlying_text_hits(&self.inner, page_index)
+    }
+
+    #[inline]
+    fn ocr_context_hits(
+        &self,
+        page_index: u32,
+        red_bbox: &crate::types::redaction_types::Rect,
+        cfg: &RedactionFinderConfig,
+    ) -> Result<Vec<UnderlyingTextHit>, String> {
+        DependencyRedactionDataRetriever::ocr_context_hits(&self.inner, page_index, red_bbox, cfg)
     }
 }

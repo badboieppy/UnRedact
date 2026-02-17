@@ -259,7 +259,8 @@ mod guess_impl {
     #[derive(Debug, Clone)]
     struct ScoredDictionaryCandidate {
         text: String,
-        error_pt: f64,
+        raw_error_pt: f64,
+        effective_error_pt: f64,
         word_count: u32,
     }
 
@@ -270,6 +271,7 @@ mod guess_impl {
         font_penalty: u8,
         hint_penalty: u8,
         contains_center_penalty: u8,
+        baseline_distance: f64,
         y_distance: f64,
         x_distance: f64,
         gap_width: f64,
@@ -824,17 +826,24 @@ mod guess_impl {
             };
             let _prefix_width_px = prefix_width.px;
             let predicted_right = anchor.left_x + prefix_width.pt + anchor.row_bias_pt;
-            let err = (predicted_right - anchor.right_x).abs();
+            let raw_err = (predicted_right - anchor.right_x).abs();
+            let context_penalty = punctuation_context_penalty(
+                &anchor.left_anchor_text,
+                &anchor.right_anchor_text,
+                trimmed,
+            );
+            let effective_err = raw_err + context_penalty;
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
-                error_pt: err,
+                raw_error_pt: raw_err,
+                effective_error_pt: effective_err,
                 word_count: trimmed.split_whitespace().count() as u32,
             });
         }
         scored.sort_by(|left_candidate, right_candidate| {
             left_candidate
-                .error_pt
-                .partial_cmp(&right_candidate.error_pt)
+                .effective_error_pt
+                .partial_cmp(&right_candidate.effective_error_pt)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
                     let left_is_base = is_base_name(&left_candidate.text);
@@ -848,7 +857,7 @@ mod guess_impl {
         let epsilon = anchor.epsilon_pt.max(0.0);
         let exact_scored = scored
             .iter()
-            .filter(|candidate| candidate.error_pt <= epsilon)
+            .filter(|candidate| candidate.effective_error_pt <= epsilon)
             .cloned()
             .collect::<Vec<_>>();
         let exact_matches = exact_scored
@@ -879,8 +888,8 @@ mod guess_impl {
             .iter()
             .map(|candidate| GuessCandidate {
                 text: candidate.text.clone(),
-                score: (1.0 - (candidate.error_pt / denom)).clamp(0.0, 1.0) as f32,
-                error_pt: candidate.error_pt as f32,
+                score: (1.0 - (candidate.effective_error_pt / denom)).clamp(0.0, 1.0) as f32,
+                error_pt: candidate.raw_error_pt as f32,
                 word_count: candidate.word_count,
             })
             .collect::<Vec<_>>();
@@ -933,23 +942,10 @@ mod guess_impl {
         let left_hint = left_hint_hit.map(|hit| hit.text.trim());
         let right_hint = right_hint_hit.map(|hit| hit.text.trim());
 
-        let mut row_runs = runs
-            .iter()
-            .copied()
-            .filter(|run| {
-                let overlap = vertical_overlap_run(
-                    &run.bbox,
-                    &Rect::new(
-                        redaction.bbox.x0,
-                        redaction.bbox.y0,
-                        redaction.bbox.x1,
-                        redaction.bbox.y1,
-                    ),
-                );
-                let center_distance = (run_center_y(run) - red_center_y).abs();
-                overlap > 0.0 || center_distance <= 20.0
-            })
-            .collect::<Vec<_>>();
+        let mut row_runs = collect_row_runs_for_anchor(redaction, runs, true);
+        if row_runs.is_empty() {
+            row_runs = collect_row_runs_for_anchor(redaction, runs, false);
+        }
         if row_runs.is_empty() {
             return None;
         }
@@ -1048,6 +1044,8 @@ mod guess_impl {
                     u8::from(red_center_x < left_end || red_center_x > right_start);
                 let y_distance = (run_center_y(left_run) - red_center_y).abs()
                     + (run_center_y(right_run) - red_center_y).abs();
+                let baseline_distance = (left_run.bbox.y1 - redaction.bbox.y1).abs()
+                    + (right_run.bbox.y1 - redaction.bbox.y1).abs();
                 let x_distance = (redaction.bbox.x0 as f64 - left_end).abs()
                     + (right_start - redaction.bbox.x1 as f64).abs();
                 let gap_width = right_start - left_end;
@@ -1057,6 +1055,7 @@ mod guess_impl {
                     font_penalty,
                     hint_penalty,
                     contains_center_penalty,
+                    baseline_distance: baseline_distance as f64,
                     y_distance: y_distance as f64,
                     x_distance,
                     gap_width,
@@ -1076,6 +1075,12 @@ mod guess_impl {
                     left_pair
                         .contains_center_penalty
                         .cmp(&right_pair.contains_center_penalty)
+                })
+                .then_with(|| {
+                    left_pair
+                        .baseline_distance
+                        .partial_cmp(&right_pair.baseline_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .then_with(|| {
                     left_pair
@@ -2002,6 +2007,46 @@ mod guess_impl {
         (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0)
     }
 
+    fn collect_row_runs_for_anchor<'a>(
+        redaction: &RedactionOccurrence,
+        runs: &[&'a FontTextRun],
+        tight: bool,
+    ) -> Vec<&'a FontTextRun> {
+        let red_rect = Rect::new(
+            redaction.bbox.x0,
+            redaction.bbox.y0,
+            redaction.bbox.x1,
+            redaction.bbox.y1,
+        );
+        let red_center_y = rect_center_y(&redaction.bbox);
+        let red_center_x = ((redaction.bbox.x0 + redaction.bbox.x1) * 0.5) as f64;
+        let y_tolerance = if tight { 12.0_f32 } else { 20.0_f32 };
+        let baseline_tolerance = if tight { 8.0_f32 } else { 16.0_f32 };
+        let x_tolerance = if tight { 120.0_f64 } else { 220.0_f64 };
+
+        runs.iter()
+            .copied()
+            .filter(|run| {
+                let overlap = vertical_overlap_run(&run.bbox, &red_rect);
+                let center_distance = (run_center_y(run) - red_center_y).abs();
+                let baseline_distance = (run.bbox.y1 - redaction.bbox.y1).abs();
+                let left_gap = (redaction.bbox.x0 as f64 - run.bbox.x1 as f64).abs();
+                let right_gap = (run.bbox.x0 as f64 - redaction.bbox.x1 as f64).abs();
+                let contains_center =
+                    run.bbox.x0 as f64 <= red_center_x && run.bbox.x1 as f64 >= red_center_x;
+                let near_x = left_gap <= x_tolerance || right_gap <= x_tolerance || contains_center;
+                let near_y = overlap > 0.0
+                    || center_distance <= y_tolerance
+                    || baseline_distance <= baseline_tolerance;
+                if tight {
+                    near_x && near_y
+                } else {
+                    near_y
+                }
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn text_matches(run_text: &str, target: &str) -> bool {
         if run_text == target {
             return true;
@@ -2028,6 +2073,49 @@ mod guess_impl {
         true
     }
 
+    fn punctuation_context_penalty(
+        left_anchor_text: &str,
+        right_anchor_text: &str,
+        candidate: &str,
+    ) -> f64 {
+        let left_lower = left_anchor_text.trim().to_ascii_lowercase();
+        let right_lower = right_anchor_text.trim().to_ascii_lowercase();
+        let candidate_trim = candidate.trim();
+        if candidate_trim.is_empty() {
+            return 5.0;
+        }
+
+        let word_count = candidate_trim.split_whitespace().count();
+        let mut penalty = 0.0_f64;
+        let list_context = left_lower.contains("including")
+            || left_lower.contains("included")
+            || left_lower.contains("among")
+            || left_lower.contains("served")
+            || right_lower.starts_with(',')
+            || right_lower.starts_with("and ");
+
+        if list_context {
+            if word_count <= 1 {
+                penalty += 0.85_f64;
+            }
+            if word_count >= 5 {
+                penalty += 0.40_f64;
+            }
+        }
+
+        if (right_lower.starts_with(',') || right_lower.starts_with("and "))
+            && (candidate_trim.ends_with(',') || candidate_trim.ends_with(';'))
+        {
+            penalty += 0.35_f64;
+        }
+
+        if candidate_trim.chars().any(|ch| ch.is_ascii_digit()) {
+            penalty += 0.35_f64;
+        }
+
+        penalty.max(0.0)
+    }
+
     fn is_base_name(value: &str) -> bool {
         let set = base_name_set();
         set.contains(&value.to_lowercase())
@@ -2042,6 +2130,65 @@ mod guess_impl {
                 .filter(|line| !line.is_empty())
                 .collect::<std::collections::BTreeSet<String>>()
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::collections::BTreeMap;
+
+        fn run(page_index: u32, text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> FontTextRun {
+            FontTextRun {
+                page_index,
+                text: text.to_owned(),
+                bbox: FontRect::new(x0, y0, x1, y1),
+                font_key: "F1".to_owned(),
+                font_name: "Helvetica".to_owned(),
+                font_size_pt: 11.0,
+                h_scale_pct: 100.0,
+                measured_width_pt: None,
+                measured_width_px: None,
+                measured_dpi: None,
+                char_advances_pt: Vec::new(),
+                char_advances_px: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn punctuation_penalty_prefers_full_name_for_list_context() {
+            let short = punctuation_context_penalty("those served included", ",", "MAXWELL");
+            let full =
+                punctuation_context_penalty("those served included", ",", "GHISLAINE MAXWELL");
+            assert!(short > full, "expected short token to be penalized more");
+        }
+
+        #[test]
+        fn select_anchor_pair_uses_tight_row_before_broad_fallback() {
+            let redaction = RedactionOccurrence {
+                page_index: 1,
+                bbox: Rect::new(50.0, 100.0, 80.0, 112.0),
+                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
+                score: 1.0,
+                meta: BTreeMap::new(),
+                underlying_text: Vec::new(),
+            };
+
+            let runs = [
+                run(1, "included", 10.0, 100.0, 45.0, 112.0),
+                run(1, ",", 82.0, 100.0, 90.0, 112.0),
+                run(1, "noise_left", 12.0, 118.0, 46.0, 130.0),
+                run(1, "noise_right", 82.0, 118.0, 95.0, 130.0),
+            ];
+            let run_refs = runs.iter().collect::<Vec<_>>();
+            let assets = BTreeMap::new();
+            let width_tables = BTreeMap::new();
+
+            let selected = select_anchor_pair(&redaction, &run_refs, &assets, &width_tables)
+                .expect("expected an anchor pair");
+            assert_eq!(selected.left_anchor_text, "included");
+            assert_eq!(selected.right_anchor_text, ",");
+            assert!((selected.left_bbox.y1 - 112.0).abs() < 0.01);
+        }
     }
 }
 
@@ -2115,7 +2262,7 @@ mod redaction_impl {
                 }
             }
 
-            attach_underlying_text(retriever, page_index, &mut all, &mut diagnostics);
+            attach_underlying_text(retriever, page_index, &cfg, &mut all, &mut diagnostics);
         }
 
         RedactionFinderOutput {
@@ -2178,9 +2325,11 @@ mod redaction_impl {
     fn attach_underlying_text(
         retriever: &dyn RedactionDataRetriever,
         page_index: u32,
+        cfg: &RedactionFinderConfig,
         occs: &mut [RedactionOccurrence],
         diagnostics: &mut Vec<String>,
     ) {
+        let mut ocr_diagnostics_seen = BTreeSet::<String>::new();
         let page_redactions = occs
             .iter_mut()
             .filter(|occurrence| occurrence.page_index == page_index)
@@ -2203,7 +2352,65 @@ mod redaction_impl {
         }
 
         for redaction in page_redactions {
-            redaction.underlying_text = collect_context_hits_for_redaction(&hits, &redaction.bbox);
+            let mut context = collect_context_hits_for_redaction(&hits, &redaction.bbox);
+            if should_try_ocr(redaction, &context) {
+                match retriever.ocr_context_hits(page_index, &redaction.bbox, cfg) {
+                    Ok(ocr_hits) => merge_ocr_context_hits(&mut context, &ocr_hits),
+                    Err(message) => {
+                        if ocr_diagnostics_seen.insert(message.clone()) {
+                            diagnostics.push(format!(
+                                "page_index={page_index} ocr_context_error={message}"
+                            ));
+                        }
+                    }
+                }
+            }
+            redaction.underlying_text = context;
+        }
+    }
+
+    fn should_try_ocr(redaction: &RedactionOccurrence, context: &[UnderlyingTextHit]) -> bool {
+        if redaction.kind != crate::types::redaction_types::RedactionKind::RasterDarkRegion {
+            return false;
+        }
+        let left = context
+            .first()
+            .map(|hit| hit.text.as_str())
+            .unwrap_or_default();
+        let right = context
+            .get(1)
+            .map(|hit| hit.text.as_str())
+            .unwrap_or_default();
+        is_weak_anchor_text(left) || is_weak_anchor_text(right)
+    }
+
+    fn is_weak_anchor_text(text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let alpha_count = trimmed
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .count();
+        alpha_count < 2
+    }
+
+    fn merge_ocr_context_hits(
+        context: &mut Vec<UnderlyingTextHit>,
+        ocr_hits: &[UnderlyingTextHit],
+    ) {
+        for (idx, ocr_hit) in ocr_hits.iter().enumerate() {
+            if ocr_hit.text.trim().is_empty() {
+                continue;
+            }
+            if idx < context.len() {
+                if is_weak_anchor_text(&context[idx].text) {
+                    context[idx] = ocr_hit.clone();
+                }
+            } else {
+                context.push(ocr_hit.clone());
+            }
         }
     }
 

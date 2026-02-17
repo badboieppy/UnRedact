@@ -1,9 +1,22 @@
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use crate::types::redaction_types::{
     PdfRenderer, Rect, RedactionFinderConfig, RedactionKind, RedactionOccurrence, UnderlyingTextHit,
 };
+
+const OCR_WINDOW_MIN_WIDTH_PT: f32 = 64.0;
+const OCR_WINDOW_MAX_WIDTH_PT: f32 = 220.0;
+const OCR_WINDOW_PADDING_PT: f32 = 2.0;
+const OCR_ENABLE_ENV: &str = "UNREDACT_ENABLE_LOCAL_OCR";
+const OCR_CMD_ENV: &str = "UNREDACT_TESSERACT_CMD";
+static OCR_TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub trait RedactionDataRetriever {
     fn page_indices(&self) -> Vec<u32>;
@@ -24,6 +37,15 @@ pub trait RedactionDataRetriever {
         cfg: &RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String>;
+    #[inline]
+    fn ocr_context_hits(
+        &self,
+        _page_index: u32,
+        _red_bbox: &Rect,
+        _cfg: &RedactionFinderConfig,
+    ) -> Result<Vec<UnderlyingTextHit>, String> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct PdfFileRetriever<'renderer> {
@@ -125,6 +147,16 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
             .ok_or_else(|| format!("page_missing:index={page_index}"))?;
 
         extract_page_text_runs(&self.doc, page_id, page_index)
+    }
+
+    #[inline]
+    fn ocr_context_hits(
+        &self,
+        page_index: u32,
+        red_bbox: &Rect,
+        cfg: &RedactionFinderConfig,
+    ) -> Result<Vec<UnderlyingTextHit>, String> {
+        extract_ocr_context_hits(self, page_index, red_bbox, cfg)
     }
 }
 fn extract_annotation_redactions(
@@ -910,6 +942,245 @@ fn rect_pixels_to_pdf(
     Rect::new(x0_pt, y0_pt, x1_pt, y1_pt)
 }
 
+/// Map a rectangle in PDF user-space coordinates to rendered-page pixel
+/// coordinates (top-left origin). Returns `None` when the input cannot be
+/// represented as a non-empty pixel rect.
+fn rect_pdf_to_pixels(
+    rect: &Rect,
+    page_box: Rect,
+    dpi: f32,
+    width_px: u32,
+    height_px: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    if dpi <= 0.0 || width_px == 0 || height_px == 0 {
+        return None;
+    }
+
+    let x0 = (((rect.x0 - page_box.x0) / 72.0) * dpi).floor();
+    let x1 = (((rect.x1 - page_box.x0) / 72.0) * dpi).ceil();
+    let y0 = (((page_box.y1 - rect.y1) / 72.0) * dpi).floor();
+    let y1 = (((page_box.y1 - rect.y0) / 72.0) * dpi).ceil();
+
+    let x0_px = x0.clamp(0.0, width_px as f32) as u32;
+    let x1_px = x1.clamp(0.0, width_px as f32) as u32;
+    let y0_px = y0.clamp(0.0, height_px as f32) as u32;
+    let y1_px = y1.clamp(0.0, height_px as f32) as u32;
+
+    if x1_px <= x0_px || y1_px <= y0_px {
+        return None;
+    }
+    Some((x0_px, y0_px, x1_px, y1_px))
+}
+
+fn build_ocr_context_windows(red_bbox: &Rect, page_box: Rect) -> Vec<Rect> {
+    let mut windows = Vec::with_capacity(2);
+    let red_width = red_bbox.width().abs().max(1.0);
+    let window_width_pt = (red_width * 1.4).clamp(OCR_WINDOW_MIN_WIDTH_PT, OCR_WINDOW_MAX_WIDTH_PT);
+    let y0 = (red_bbox.y0 - OCR_WINDOW_PADDING_PT).max(page_box.y0);
+    let y1 = (red_bbox.y1 + OCR_WINDOW_PADDING_PT).min(page_box.y1);
+    if y1 <= y0 {
+        return windows;
+    }
+
+    let left_x0 = (red_bbox.x0 - window_width_pt).max(page_box.x0);
+    let left_x1 = red_bbox.x0.min(page_box.x1);
+    if left_x1 - left_x0 >= 2.0 {
+        windows.push(Rect::new(left_x0, y0, left_x1, y1));
+    }
+
+    let right_x0 = red_bbox.x1.max(page_box.x0);
+    let right_x1 = (red_bbox.x1 + window_width_pt).min(page_box.x1);
+    if right_x1 - right_x0 >= 2.0 {
+        windows.push(Rect::new(right_x0, y0, right_x1, y1));
+    }
+
+    windows
+}
+
+fn ocr_enabled_from_env() -> bool {
+    static OCR_ENABLED: OnceLock<bool> = OnceLock::new();
+    *OCR_ENABLED.get_or_init(|| {
+        std::env::var(OCR_ENABLE_ENV)
+            .map(|raw| {
+                let value = raw.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn ocr_command_from_env() -> OsString {
+    static OCR_COMMAND: OnceLock<OsString> = OnceLock::new();
+    OCR_COMMAND
+        .get_or_init(|| {
+            std::env::var_os(OCR_CMD_ENV).unwrap_or_else(|| OsString::from("tesseract"))
+        })
+        .clone()
+}
+
+fn write_temp_pgm(
+    gray: &[u8],
+    width: u32,
+    height: u32,
+    page_index: u32,
+) -> Result<PathBuf, String> {
+    let seq = OCR_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "unredact_ocr_p{page_index}_{}_{}.pgm",
+        std::process::id(),
+        seq
+    );
+    let path = std::env::temp_dir().join(name);
+
+    let mut bytes = format!("P5\n{} {}\n255\n", width, height).into_bytes();
+    bytes.extend_from_slice(gray);
+    fs::write(&path, bytes).map_err(|e| format!("ocr_temp_write_failed:{e}"))?;
+    Ok(path)
+}
+
+fn normalize_ocr_text(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn run_local_ocr(image_path: &Path, dpi: f32) -> Result<String, String> {
+    let command = ocr_command_from_env();
+    let output = Command::new(command)
+        .arg(image_path)
+        .arg("stdout")
+        .arg("--psm")
+        .arg("7")
+        .arg("--oem")
+        .arg("1")
+        .arg("-l")
+        .arg("eng")
+        .arg("--dpi")
+        .arg(format!("{:.0}", dpi.max(72.0)))
+        .output()
+        .map_err(|e| format!("ocr_exec_failed:{e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "ocr_failed:status={} stderr={stderr}",
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn crop_gray_region(
+    gray: &[u8],
+    image_width: usize,
+    image_height: usize,
+    x0_px: u32,
+    y0_px: u32,
+    x1_px: u32,
+    y1_px: u32,
+) -> Option<Vec<u8>> {
+    if gray.len() < image_width.saturating_mul(image_height) {
+        return None;
+    }
+    let x0 = x0_px.min(image_width as u32) as usize;
+    let y0 = y0_px.min(image_height as u32) as usize;
+    let x1 = x1_px.min(image_width as u32) as usize;
+    let y1 = y1_px.min(image_height as u32) as usize;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let crop_w = x1 - x0;
+    let crop_h = y1 - y0;
+    let mut out = Vec::with_capacity(crop_w.saturating_mul(crop_h));
+    for y in y0..y1 {
+        let row_start = y.saturating_mul(image_width);
+        out.extend_from_slice(&gray[row_start + x0..row_start + x1]);
+    }
+    Some(out)
+}
+
+fn extract_ocr_context_hits(
+    retriever: &PdfFileRetriever<'_>,
+    page_index: u32,
+    red_bbox: &Rect,
+    cfg: &RedactionFinderConfig,
+) -> Result<Vec<UnderlyingTextHit>, String> {
+    if !ocr_enabled_from_env() {
+        return Err(format!(
+            "ocr_disabled:set {OCR_ENABLE_ENV}=1 to enable local OCR context"
+        ));
+    }
+
+    let Some(renderer) = retriever.renderer else {
+        return Err("ocr_renderer_unavailable".to_owned());
+    };
+    let Some(page_id) = retriever.page_id(page_index) else {
+        return Err("ocr_page_missing".to_owned());
+    };
+
+    let page_box = page_render_box_from_page(&retriever.doc, page_id)
+        .unwrap_or(Rect::new(0.0, 0.0, 612.0, 792.0));
+
+    let rendered = renderer
+        .render_page_to_rgba(page_index as usize, cfg.raster_dpi)
+        .map_err(|e| format!("ocr_render_failed:{e}"))?;
+    if rendered.width_px == 0 || rendered.height_px == 0 {
+        return Err("ocr_empty_render".to_owned());
+    }
+
+    let gray = rgba_to_grayscale(&rendered.pixels, rendered.width_px, rendered.height_px);
+    if gray.is_empty() {
+        return Err("ocr_gray_conversion_empty".to_owned());
+    }
+
+    let windows = build_ocr_context_windows(red_bbox, page_box);
+    if windows.is_empty() {
+        return Err("ocr_windows_empty".to_owned());
+    }
+
+    let mut hits = Vec::new();
+    for window in windows {
+        let Some((x0_px, y0_px, x1_px, y1_px)) = rect_pdf_to_pixels(
+            &window,
+            page_box,
+            rendered.dpi,
+            rendered.width_px,
+            rendered.height_px,
+        ) else {
+            continue;
+        };
+        let crop = crop_gray_region(
+            &gray,
+            rendered.width_px as usize,
+            rendered.height_px as usize,
+            x0_px,
+            y0_px,
+            x1_px,
+            y1_px,
+        );
+        let Some(crop) = crop else {
+            continue;
+        };
+        let crop_w = x1_px.saturating_sub(x0_px);
+        let crop_h = y1_px.saturating_sub(y0_px);
+        if crop_w < 8 || crop_h < 8 {
+            continue;
+        }
+
+        let path = write_temp_pgm(&crop, crop_w, crop_h, page_index)?;
+        let ocr_text = run_local_ocr(&path, rendered.dpi);
+        drop(fs::remove_file(&path));
+        let text = normalize_ocr_text(&ocr_text?);
+        if text.is_empty() {
+            continue;
+        }
+        hits.push(UnderlyingTextHit {
+            page_index,
+            bbox: window,
+            text,
+        });
+    }
+
+    Ok(hits)
+}
+
 #[derive(Debug, Clone)]
 
 struct ImageDetectionResult {
@@ -945,6 +1216,16 @@ struct DarkRegion {
 #[derive(Debug, Clone)]
 struct DarkRegionDetections {
     regions: Vec<DarkRegion>,
+}
+
+#[derive(Debug, Clone)]
+struct DarkRunProfile {
+    /// Contiguous dark-column runs relative to the region origin.
+    /// Each tuple is `[x0, x1)` in pixels.
+    dark_runs: Vec<(u32, u32)>,
+    max_gap_px: u32,
+    split_confidence: f32,
+    dark_ratio: f32,
 }
 
 #[expect(
@@ -1227,6 +1508,183 @@ fn build_bins(size: usize, target: usize) -> Vec<(usize, usize)> {
     result
 }
 
+fn dark_run_profile_for_region(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    region: &DarkRegion,
+) -> DarkRunProfile {
+    if width == 0 || height == 0 || gray.len() < width.saturating_mul(height) {
+        return DarkRunProfile {
+            dark_runs: Vec::new(),
+            max_gap_px: 0,
+            split_confidence: 0.0,
+            dark_ratio: 0.0,
+        };
+    }
+
+    let x0 = region.x0_px.min(width as u32) as usize;
+    let y0 = region.y0_px.min(height as u32) as usize;
+    let x1 = region.x1_px.min(width as u32) as usize;
+    let y1 = region.y1_px.min(height as u32) as usize;
+    if x1 <= x0 || y1 <= y0 {
+        return DarkRunProfile {
+            dark_runs: Vec::new(),
+            max_gap_px: 0,
+            split_confidence: 0.0,
+            dark_ratio: 0.0,
+        };
+    }
+
+    let region_w = x1 - x0;
+    let region_h = y1 - y0;
+    let region_area = region_w.saturating_mul(region_h).max(1);
+    let dark_threshold = (region.avg_luminance + 22.0).clamp(28.0, 145.0) as u8;
+
+    let mut dark_cols = vec![false; region_w];
+    let mut dark_pixels = 0_u64;
+
+    for (offset, x) in (x0..x1).enumerate() {
+        let mut col_dark = 0_u32;
+        let mut col_sum = 0_u32;
+        for y in y0..y1 {
+            let px = gray[y * width + x];
+            col_sum += px as u32;
+            if px <= dark_threshold {
+                col_dark += 1;
+            }
+        }
+        dark_pixels += col_dark as u64;
+        let col_ratio = col_dark as f32 / region_h as f32;
+        let col_avg = col_sum as f32 / region_h as f32;
+        dark_cols[offset] =
+            col_ratio >= 0.55 || (col_ratio >= 0.38 && col_avg <= dark_threshold as f32);
+    }
+
+    fill_small_bright_gaps(&mut dark_cols, 2);
+
+    let min_run_px = ((region_w as f32) * 0.035).ceil() as usize;
+    let min_run_px = min_run_px.max(2);
+
+    let mut runs = Vec::<(u32, u32)>::new();
+    let mut idx = 0_usize;
+    while idx < dark_cols.len() {
+        if !dark_cols[idx] {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx < dark_cols.len() && dark_cols[idx] {
+            idx += 1;
+        }
+        let end = idx;
+        if end.saturating_sub(start) >= min_run_px {
+            runs.push((start as u32, end as u32));
+        }
+    }
+
+    let mut max_gap_px = 0_u32;
+    for pair in runs.windows(2) {
+        let gap = pair[1].0.saturating_sub(pair[0].1);
+        max_gap_px = max_gap_px.max(gap);
+    }
+
+    let dark_ratio = (dark_pixels as f32 / region_area as f32).clamp(0.0, 1.0);
+    let split_confidence = if runs.len() <= 1 {
+        0.0
+    } else {
+        let run_count_factor = (((runs.len() - 1) as f32) / 3.0).clamp(0.0, 1.0);
+        let gap_factor = (max_gap_px as f32 / ((region_w as f32) * 0.18).max(1.0)).clamp(0.0, 1.0);
+        let run_coverage = runs
+            .iter()
+            .map(|(run_x0, run_x1)| run_x1.saturating_sub(*run_x0))
+            .sum::<u32>() as f32
+            / (region_w as f32).max(1.0);
+        let coverage_factor = (1.0 - ((run_coverage - 0.55).abs() / 0.55)).clamp(0.0, 1.0);
+        let mut confidence =
+            (0.45 * run_count_factor) + (0.35 * gap_factor) + (0.20 * coverage_factor);
+        if max_gap_px < 2 {
+            confidence *= 0.5;
+        }
+        if dark_ratio < 0.08 {
+            confidence *= 0.6;
+        }
+        confidence.clamp(0.0, 1.0)
+    };
+
+    DarkRunProfile {
+        dark_runs: runs,
+        max_gap_px,
+        split_confidence,
+        dark_ratio,
+    }
+}
+
+fn fill_small_bright_gaps(columns: &mut [bool], max_gap: usize) {
+    if columns.is_empty() || max_gap == 0 {
+        return;
+    }
+    let mut idx = 0_usize;
+    while idx < columns.len() {
+        if columns[idx] {
+            idx += 1;
+            continue;
+        }
+        let gap_start = idx;
+        while idx < columns.len() && !columns[idx] {
+            idx += 1;
+        }
+        let gap_end = idx;
+        let gap_len = gap_end.saturating_sub(gap_start);
+        let bounded =
+            gap_start > 0 && gap_end < columns.len() && columns[gap_start - 1] && columns[gap_end];
+        if bounded && gap_len <= max_gap {
+            for col in &mut columns[gap_start..gap_end] {
+                *col = true;
+            }
+        }
+    }
+}
+
+fn split_dark_region_by_profile(region: &DarkRegion, profile: &DarkRunProfile) -> Vec<DarkRegion> {
+    if profile.dark_runs.len() <= 1 || profile.split_confidence < 0.25 {
+        return vec![region.clone()];
+    }
+
+    let region_width = region.x1_px.saturating_sub(region.x0_px).max(1);
+    let mut split = profile
+        .dark_runs
+        .iter()
+        .filter_map(|(run_x0, run_x1)| {
+            let abs_x0 = region.x0_px.saturating_add(*run_x0).min(region.x1_px);
+            let abs_x1 = region.x0_px.saturating_add(*run_x1).min(region.x1_px);
+            if abs_x1 <= abs_x0 {
+                return None;
+            }
+            let span = abs_x1.saturating_sub(abs_x0);
+            if span < 2 {
+                return None;
+            }
+            let span_fraction = span as f32 / region_width as f32;
+            Some(DarkRegion {
+                x0_px: abs_x0,
+                y0_px: region.y0_px,
+                x1_px: abs_x1,
+                y1_px: region.y1_px,
+                avg_luminance: region.avg_luminance,
+                area_fraction: (region.area_fraction * span_fraction).clamp(0.0, 1.0),
+                score: (region.score * (0.85 + 0.15 * profile.split_confidence)).clamp(0.0, 1.0),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if split.len() <= 1 {
+        return vec![region.clone()];
+    }
+    split.sort_by(|left, right| left.x0_px.cmp(&right.x0_px));
+    split
+}
+
 fn page_render_box_from_page(doc: &Document, page_id: ObjectId) -> Option<Rect> {
     inherited_page_rect(doc, page_id, b"CropBox")
         .or_else(|| inherited_page_rect(doc, page_id, b"MediaBox"))
@@ -1303,56 +1761,98 @@ fn extract_raster_page_redactions(
 
     let mut out = Vec::new();
     for det in regions.regions {
-        // Map pixel rects back into PDF user space.
-        let page_rect = rect_pixels_to_pdf(
-            det.x0_px,
-            det.y0_px,
-            det.x1_px,
-            det.y1_px,
-            page_box,
-            rendered.dpi,
+        let profile = dark_run_profile_for_region(
+            &gray,
+            rendered.width_px as usize,
+            rendered.height_px as usize,
+            &det,
         );
+        let split_regions = split_dark_region_by_profile(&det, &profile);
+        let split_count = split_regions.len().max(1);
 
-        if rect_is_near_full_page_with_size(
-            &page_rect,
-            page_box.width().abs(),
-            page_box.height().abs(),
-        ) {
-            continue;
-        }
-        if page_rect.width().abs() < 2.0 || page_rect.height().abs() < 2.0 {
-            continue;
-        }
+        for (split_index, split_region) in split_regions.into_iter().enumerate() {
+            // Map pixel rects back into PDF user space.
+            let page_rect = rect_pixels_to_pdf(
+                split_region.x0_px,
+                split_region.y0_px,
+                split_region.x1_px,
+                split_region.y1_px,
+                page_box,
+                rendered.dpi,
+            );
 
-        let darkness = (1.0 - det.avg_luminance / 255.0).clamp(0.0, 1.0);
-        let mut score = (det.score * 0.7) + (darkness * 0.3);
-        score = score.min(1.0);
+            if rect_is_near_full_page_with_size(
+                &page_rect,
+                page_box.width().abs(),
+                page_box.height().abs(),
+            ) {
+                continue;
+            }
+            if page_rect.width().abs() < 2.0 || page_rect.height().abs() < 2.0 {
+                continue;
+            }
 
-        let mut meta: BTreeMap<String, String> = BTreeMap::new();
-        if cfg.include_details {
-            meta.insert("raster_dpi".to_owned(), format!("{:.1}", rendered.dpi));
+            let darkness =
+                (1.0_f32 - split_region.avg_luminance / 255.0_f32).clamp(0.0_f32, 1.0_f32);
+            let mut score = (split_region.score * 0.7) + (darkness * 0.3);
+            score = score.min(1.0);
+
+            let split_profile = dark_run_profile_for_region(
+                &gray,
+                rendered.width_px as usize,
+                rendered.height_px as usize,
+                &split_region,
+            );
+
+            let mut meta: BTreeMap<String, String> = BTreeMap::new();
+            if cfg.include_details {
+                meta.insert("raster_dpi".to_owned(), format!("{:.1}", rendered.dpi));
+                meta.insert(
+                    "image_dims_px".to_owned(),
+                    format!("{}x{}", rendered.width_px, rendered.height_px),
+                );
+                meta.insert(
+                    "region_area_fraction".to_owned(),
+                    format!("{:.4}", split_region.area_fraction),
+                );
+                meta.insert(
+                    "region_avg_luminance".to_owned(),
+                    format!("{:.1}", split_region.avg_luminance),
+                );
+            }
             meta.insert(
-                "image_dims_px".to_owned(),
-                format!("{}x{}", rendered.width_px, rendered.height_px),
+                "profile_split_confidence".to_owned(),
+                format!("{:.3}", split_profile.split_confidence),
             );
             meta.insert(
-                "region_area_fraction".to_owned(),
-                format!("{:.4}", det.area_fraction),
+                "profile_max_gap_px".to_owned(),
+                split_profile.max_gap_px.to_string(),
             );
             meta.insert(
-                "region_avg_luminance".to_owned(),
-                format!("{:.1}", det.avg_luminance),
+                "profile_dark_ratio".to_owned(),
+                format!("{:.3}", split_profile.dark_ratio),
             );
-        }
+            let run_labels = split_profile
+                .dark_runs
+                .iter()
+                .map(|(x0, x1)| format!("{x0}-{x1}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            meta.insert("profile_dark_runs".to_owned(), run_labels);
+            if split_count > 1 {
+                meta.insert("profile_split_index".to_owned(), split_index.to_string());
+                meta.insert("profile_split_count".to_owned(), split_count.to_string());
+            }
 
-        out.push(RedactionOccurrence {
-            page_index,
-            bbox: page_rect,
-            kind: RedactionKind::RasterDarkRegion,
-            score,
-            meta,
-            underlying_text: vec![],
-        });
+            out.push(RedactionOccurrence {
+                page_index,
+                bbox: page_rect,
+                kind: RedactionKind::RasterDarkRegion,
+                score,
+                meta,
+                underlying_text: vec![],
+            });
+        }
     }
 
     Ok(out)
@@ -1433,6 +1933,64 @@ mod tests {
         assert!((mapped.x0 - 0.0).abs() < 0.01);
         assert!((mapped.y1 - 804.75).abs() < 0.01);
         assert!((mapped.y0 - 768.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn dark_profile_splits_two_bars() {
+        let width = 120_usize;
+        let height = 24_usize;
+        let mut buf = vec![230_u8; width * height];
+        for y in 8..17 {
+            for x in 10..46 {
+                buf[y * width + x] = 8;
+            }
+            for x in 60..101 {
+                buf[y * width + x] = 10;
+            }
+        }
+
+        let region = DarkRegion {
+            x0_px: 10,
+            y0_px: 8,
+            x1_px: 101,
+            y1_px: 17,
+            avg_luminance: 35.0,
+            area_fraction: 0.10,
+            score: 0.9,
+        };
+        let profile = dark_run_profile_for_region(&buf, width, height, &region);
+        assert!(profile.dark_runs.len() >= 2);
+        assert!(profile.max_gap_px >= 4);
+        assert!(profile.split_confidence > 0.2);
+
+        let split = split_dark_region_by_profile(&region, &profile);
+        assert_eq!(split.len(), 2);
+        assert!(split[0].x1_px <= split[1].x0_px);
+    }
+
+    #[test]
+    fn dark_profile_does_not_split_single_bar() {
+        let width = 80_usize;
+        let height = 20_usize;
+        let mut buf = vec![220_u8; width * height];
+        for y in 6..14 {
+            for x in 14..66 {
+                buf[y * width + x] = 6;
+            }
+        }
+
+        let region = DarkRegion {
+            x0_px: 14,
+            y0_px: 6,
+            x1_px: 66,
+            y1_px: 14,
+            avg_luminance: 28.0,
+            area_fraction: 0.09,
+            score: 0.85,
+        };
+        let profile = dark_run_profile_for_region(&buf, width, height, &region);
+        let split = split_dark_region_by_profile(&region, &profile);
+        assert_eq!(split.len(), 1);
     }
 }
 
