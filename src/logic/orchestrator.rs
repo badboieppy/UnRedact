@@ -636,33 +636,23 @@ mod guess_impl {
             h_scale_bits: anchor.h_scale_pct.to_bits(),
             metrics_dpi_bits: DEFAULT_METRICS_DPI.to_bits(),
         };
-
-        let space_width = if let Some(cached) = cache.spaces.get(&key) {
-            *cached
-        } else {
-            let width = measure_width(" ").unwrap_or_else(|| {
-                fallback_measured_width(
-                    " ",
-                    fallback_char_width,
-                    fallback_space_width,
-                    DEFAULT_METRICS_DPI,
-                )
-            });
-            cache.spaces.insert(key.clone(), width);
-            width
+        let left_anchor_text = anchor.left_anchor_text.trim();
+        let phrase_key = PhraseWidthKey {
+            width_key: key.clone(),
+            left_anchor_text: left_anchor_text.to_owned(),
         };
-        let _space_width_px = space_width.px;
 
-        if !cache.words.contains_key(&key) {
+        if !cache.phrases.contains_key(&phrase_key) {
             let mut widths = std::collections::BTreeMap::new();
             for word in dictionary {
                 let trimmed = word.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                let width = measure_width(trimmed).unwrap_or_else(|| {
+                let phrase = candidate_prefix_phrase(left_anchor_text, trimmed);
+                let width = measure_width(&phrase).unwrap_or_else(|| {
                     fallback_measured_width(
-                        trimmed,
+                        &phrase,
                         fallback_char_width,
                         fallback_space_width,
                         DEFAULT_METRICS_DPI,
@@ -670,19 +660,19 @@ mod guess_impl {
                 });
                 widths.insert(trimmed.to_owned(), width);
             }
-            cache.words.insert(key.clone(), widths);
+            cache.phrases.insert(phrase_key.clone(), widths);
         }
 
-        let left_width = measure_width(anchor.left_anchor_text.trim()).unwrap_or_else(|| {
+        let left_width = measure_width(left_anchor_text).unwrap_or_else(|| {
             fallback_measured_width(
-                anchor.left_anchor_text.trim(),
+                left_anchor_text,
                 fallback_char_width,
                 fallback_space_width,
                 DEFAULT_METRICS_DPI,
             )
         });
-        let candidate_widths = cache.words.get(&key);
-        let Some(candidate_widths) = candidate_widths else {
+        let candidate_prefix_widths = cache.phrases.get(&phrase_key);
+        let Some(candidate_prefix_widths) = candidate_prefix_widths else {
             return RedactionGuess {
                 page_index: redaction.page_index,
                 bbox: redaction.bbox,
@@ -715,15 +705,11 @@ mod guess_impl {
             {
                 continue;
             }
-            let Some(word_width) = candidate_widths.get(trimmed).copied() else {
+            let Some(prefix_width) = candidate_prefix_widths.get(trimmed).copied() else {
                 continue;
             };
-            let predicted_right = anchor.left_x
-                + left_width.pt
-                + space_width.pt
-                + word_width.pt
-                + space_width.pt
-                + anchor.row_bias_pt;
+            let _prefix_width_px = prefix_width.px;
+            let predicted_right = anchor.left_x + prefix_width.pt + anchor.row_bias_pt;
             let err = (predicted_right - anchor.right_x).abs();
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
@@ -1847,12 +1833,25 @@ mod guess_impl {
         fallback_space_width: f64,
         dpi: f32,
     ) -> MeasuredWidth {
-        let width_pt = if text.trim().is_empty() {
-            fallback_space_width
-        } else {
-            (text.chars().count() as f64) * fallback_char_width.max(0.1_f64)
-        };
+        let width_pt = text
+            .chars()
+            .map(|ch| {
+                if ch.is_whitespace() {
+                    fallback_space_width
+                } else {
+                    fallback_char_width.max(0.1_f64)
+                }
+            })
+            .sum::<f64>();
         measured_width_from_points(width_pt, dpi)
+    }
+
+    fn candidate_prefix_phrase(left_anchor_text: &str, candidate: &str) -> String {
+        if left_anchor_text.is_empty() {
+            format!("{candidate} ")
+        } else {
+            format!("{left_anchor_text} {candidate} ")
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1864,17 +1863,23 @@ mod guess_impl {
         metrics_dpi_bits: u32,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct PhraseWidthKey {
+        width_key: WidthKey,
+        left_anchor_text: String,
+    }
+
     struct WidthCache {
-        words:
-            std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
-        spaces: std::collections::BTreeMap<WidthKey, MeasuredWidth>,
+        phrases: std::collections::BTreeMap<
+            PhraseWidthKey,
+            std::collections::BTreeMap<String, MeasuredWidth>,
+        >,
     }
 
     impl WidthCache {
         fn new() -> Self {
             Self {
-                words: std::collections::BTreeMap::new(),
-                spaces: std::collections::BTreeMap::new(),
+                phrases: std::collections::BTreeMap::new(),
             }
         }
     }
