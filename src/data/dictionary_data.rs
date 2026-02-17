@@ -60,7 +60,7 @@ pub fn load_dictionary(
         let text = String::from_utf8_lossy(&bytes);
         let mut expanded = Vec::new();
         for line in text.lines() {
-            for candidate in name_combinations(line) {
+            for candidate in name_combinations(line, false) {
                 expanded.extend(case_variants(&candidate));
             }
         }
@@ -108,7 +108,7 @@ fn normalize_dictionary(words: Vec<String>, max_dictionary: usize) -> Vec<String
 fn build_name_dictionary(max_dictionary: usize) -> Vec<String> {
     let mut out = Vec::new();
     for base_name in default_names_tokens() {
-        for candidate in name_combinations(&base_name) {
+        for candidate in name_combinations(&base_name, true) {
             out.extend(case_variants(&candidate));
         }
         if out.len() >= max_dictionary.saturating_mul(4) {
@@ -118,7 +118,7 @@ fn build_name_dictionary(max_dictionary: usize) -> Vec<String> {
     normalize_dictionary(out, max_dictionary)
 }
 
-fn name_combinations(value: &str) -> Vec<String> {
+fn name_combinations(value: &str, include_single_parts: bool) -> Vec<String> {
     let cleaned = value.trim();
     if cleaned.is_empty() {
         return Vec::new();
@@ -133,16 +133,21 @@ fn name_combinations(value: &str) -> Vec<String> {
     let full = tokens.join(" ");
     set.insert(full.clone());
 
-    let first = tokens.first().cloned().unwrap_or_default();
-    let last = tokens.last().cloned().unwrap_or_default();
-    set.insert(first.clone());
-    set.insert(last.clone());
-
     if tokens.len() >= 2 {
+        let first = tokens.first().cloned().unwrap_or_default();
+        let last = tokens.last().cloned().unwrap_or_default();
         set.insert(format!("{first} {last}"));
         set.insert(format!("{last}, {first}"));
         if cleaned.contains(',') {
             set.insert(format!("{last} {first}"));
+        }
+    }
+    if include_single_parts {
+        if let Some(first) = tokens.first() {
+            set.insert(first.clone());
+        }
+        if let Some(last) = tokens.last() {
+            set.insert(last.clone());
         }
     }
 
@@ -235,7 +240,7 @@ mod tests {
 
     #[test]
     fn name_combinations_support_last_first_input() {
-        let out = name_combinations("MUCINSKA, ADRIANA");
+        let out = name_combinations("MUCINSKA, ADRIANA", false);
         assert!(out.contains(&"MUCINSKA ADRIANA".to_owned()));
         assert!(out.contains(&"ADRIANA MUCINSKA".to_owned()));
     }
@@ -272,6 +277,8 @@ mod tests {
         assert!(items.contains(&"ADRIANA MUCINSKA".to_owned()));
         assert!(items.contains(&"SARAH KELLEN".to_owned()));
         assert!(items.contains(&"NADIA MARCINKOVA".to_owned()));
+        assert!(!items.contains(&"SARAH".to_owned()));
+        assert!(!items.contains(&"KELLEN".to_owned()));
 
         let remove_result = std::fs::remove_file(tmp_path);
         drop(remove_result);

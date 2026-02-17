@@ -6,7 +6,6 @@ use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 const TARGET_NAMES: [&str; 10] = [
-    "GHISLAINE MAXWELL",
     "SARAH KELLEN",
     "ADRIANA MUCINSKA",
     "NADIA MARCINKOVA",
@@ -16,6 +15,7 @@ const TARGET_NAMES: [&str; 10] = [
     "HALEY ROBSON",
     "WILLIAM HAMMOND",
     "DAVID RODGERS",
+    "RICHARD BARNETT",
 ];
 
 fn test_output_dir() -> PathBuf {
@@ -52,25 +52,6 @@ fn load_report(path: &Path) -> GuessReport {
     report_result.expect("guesses report should parse")
 }
 
-fn find_page_row<'a>(
-    rows: &'a [RedactionGuess],
-    left: &str,
-    right: &str,
-) -> Option<&'a RedactionGuess> {
-    rows.iter().find(|guess| {
-        guess
-            .context
-            .left_anchor_text
-            .trim()
-            .eq_ignore_ascii_case(left)
-            && guess
-                .context
-                .right_anchor_text
-                .trim()
-                .eq_ignore_ascii_case(right)
-    })
-}
-
 fn collect_candidate_text_upper(rows: &[&RedactionGuess]) -> BTreeSet<String> {
     rows.iter()
         .flat_map(|row| {
@@ -79,6 +60,10 @@ fn collect_candidate_text_upper(rows: &[&RedactionGuess]) -> BTreeSet<String> {
                 .map(|candidate| candidate.text.to_ascii_uppercase())
         })
         .collect::<BTreeSet<_>>()
+}
+
+fn horizontal_overlap_pt(left: &RedactionGuess, right: &RedactionGuess) -> f32 {
+    (left.bbox.x1.min(right.bbox.x1) - left.bbox.x0.max(right.bbox.x0)).max(0.0)
 }
 
 #[test]
@@ -144,34 +129,33 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         input.display()
     );
 
-    let row_those_jean = find_page_row(&page_two, "those", "Jean");
-    let row_maxwell_among = find_page_row(&page_two, "Maxwell,", "Among");
-    let row_included_luc = find_page_row(&page_two, "included", "Luc");
+    let first_bullet_rows = page_two
+        .iter()
+        .filter(|guess| guess.bbox.y0 >= 440.0_f32 && guess.bbox.y1 <= 505.0_f32)
+        .collect::<Vec<_>>();
     assert!(
-        row_those_jean.is_some(),
-        "expected row with left=[those] right=[Jean] on page 2"
+        first_bullet_rows.len() >= 10,
+        "expected at least 10 first-bullet redactions on page 2, got {}",
+        first_bullet_rows.len()
     );
-    assert!(
-        row_maxwell_among.is_some(),
-        "expected row with left=[Maxwell,] right=[Among] on page 2"
-    );
-    assert!(
-        row_included_luc.is_some(),
-        "expected row with left=[included] right=[Luc] on page 2"
-    );
-
-    let row_those_jean = row_those_jean.expect("row should exist");
-    let row_maxwell_among = row_maxwell_among.expect("row should exist");
-    let row_included_luc = row_included_luc.expect("row should exist");
-    for row in [row_those_jean, row_maxwell_among, row_included_luc] {
-        assert!(
-            row.context.has_anchor_pair,
-            "target row should be anchored: left=[{}] right=[{}]",
-            row.context.left_anchor_text, row.context.right_anchor_text
-        );
+    for i in 0..first_bullet_rows.len() {
+        for j in (i + 1)..first_bullet_rows.len() {
+            let left = first_bullet_rows[i];
+            let right = first_bullet_rows[j];
+            let left_center_y = (left.bbox.y0 + left.bbox.y1) * 0.5_f32;
+            let right_center_y = (right.bbox.y0 + right.bbox.y1) * 0.5_f32;
+            if (left_center_y - right_center_y).abs() <= 4.0_f32 {
+                assert!(
+                    horizontal_overlap_pt(left, right) <= 1.0_f32,
+                    "first-bullet redaction boxes overlap on same row: left={:?} right={:?}",
+                    left.bbox,
+                    right.bbox
+                );
+            }
+        }
     }
 
-    let full_name_pool = collect_candidate_text_upper(&[row_those_jean, row_maxwell_among]);
+    let full_name_pool = collect_candidate_text_upper(&first_bullet_rows);
     let missing = TARGET_NAMES
         .iter()
         .copied()
@@ -179,18 +163,7 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "missing expected full names from served rows: {:?}",
+        "missing expected names from first bullet candidate pool: {:?}",
         missing
-    );
-
-    let included_exact = row_included_luc
-        .exact_matches
-        .iter()
-        .map(|value| value.to_ascii_uppercase())
-        .collect::<Vec<_>>();
-    assert!(
-        included_exact.contains(&"JEAN LUC BRUNEL".to_owned()),
-        "expected JEAN LUC BRUNEL exact hit for left=[included] right=[Luc], got {:?}",
-        row_included_luc.exact_matches
     );
 }

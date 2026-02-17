@@ -7,7 +7,7 @@ use crate::dependency::file_store::FileStore;
 use crate::dependency::pdf_annotator::PdfAnnotator;
 use crate::types::file_types::{FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::GuessReport;
-use crate::types::redaction_types::{Rect, RedactionReport};
+use crate::types::redaction_types::{Rect, RedactionKind, RedactionReport};
 use crate::types::text_overlay::TextOverlay;
 use crate::types::visualizer_config::VisualizerConfig;
 
@@ -144,6 +144,58 @@ fn build_overlays(
             Some(text) => text,
             None => continue,
         };
+        if matches!(redaction.kind, RedactionKind::RasterDarkRegion) {
+            let anchor_font = guess.context.anchor_font_key.as_ref().and_then(|font_key| {
+                guess.context.anchor_font_size_pt.map(|font_size_pt| {
+                    (
+                        font_key.clone(),
+                        font_size_pt,
+                        guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32),
+                    )
+                })
+            });
+            let nearby_run =
+                select_run_by_bbox(&font_runs.runs, redaction.page_index, Some(redaction.bbox));
+            let (font_key, font_size_pt, h_scale_pct, baseline_y) = if let Some(font) = anchor_font
+            {
+                (font.0, font.1, font.2, redaction.bbox.y1)
+            } else if let Some(run) = nearby_run {
+                (
+                    run.font_key.clone(),
+                    run.font_size_pt,
+                    run.h_scale_pct,
+                    run.bbox.y1.min(redaction.bbox.y1),
+                )
+            } else {
+                ("F1".to_owned(), 11.0_f32, 100.0_f32, redaction.bbox.y1)
+            };
+            let guess_width = text_width_pt(
+                redaction.page_index,
+                &font_key,
+                font_size_pt,
+                h_scale_pct,
+                selected.trim(),
+                &assets,
+                width_map,
+            );
+            let box_width = redaction.bbox.width().abs();
+            let x = if box_width > guess_width {
+                redaction.bbox.x0 + ((box_width - guess_width) * 0.5_f32)
+            } else {
+                redaction.bbox.x0 + 1.0_f32
+            };
+            out.push(TextOverlay {
+                page_index: redaction.page_index,
+                text: selected.trim().to_owned(),
+                font_key,
+                font_size_pt,
+                h_scale_pct,
+                x,
+                y: baseline_y,
+                bbox: redaction.bbox,
+            });
+            continue;
+        }
 
         let left_hit = redaction.underlying_text.first();
         let right_hit = redaction.underlying_text.get(1);

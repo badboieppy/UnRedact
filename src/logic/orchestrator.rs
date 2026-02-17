@@ -447,6 +447,7 @@ mod guess_impl {
         }
 
         apply_cluster_consensus(&mut guesses);
+        apply_row_sequence_consensus(&mut guesses);
         for (index, guess) in guesses.iter().enumerate() {
             if !guess.context.has_anchor_pair {
                 continue;
@@ -573,6 +574,119 @@ mod guess_impl {
                         .then_with(|| left_text.cmp(right_text))
                 });
             }
+        }
+    }
+
+    fn apply_row_sequence_consensus(guesses: &mut [RedactionGuess]) {
+        let mut rows = std::collections::BTreeMap::<(u32, i32), Vec<usize>>::new();
+        for (index, guess) in guesses.iter().enumerate() {
+            if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
+                continue;
+            }
+            let center_y = ((guess.bbox.y0 + guess.bbox.y1) * 0.5_f32) as f64;
+            let y_bucket = (center_y / 6.0_f64).round() as i32;
+            rows.entry((guess.page_index, y_bucket))
+                .or_default()
+                .push(index);
+        }
+
+        for indices in rows.values_mut() {
+            if indices.len() < 2 {
+                continue;
+            }
+            indices.sort_by(|left_idx, right_idx| {
+                guesses[*left_idx]
+                    .bbox
+                    .x0
+                    .partial_cmp(&guesses[*right_idx].bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        guesses[*left_idx]
+                            .bbox
+                            .x1
+                            .partial_cmp(&guesses[*right_idx].bbox.x1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+            let mut used = std::collections::BTreeSet::<String>::new();
+            for guess_index in indices.iter().copied() {
+                let guess = &mut guesses[guess_index];
+                if guess.candidates.is_empty() {
+                    continue;
+                }
+                let mut best: Option<(String, f64)> = None;
+                let max_scan = guess.candidates.len().min(80);
+                for (rank, candidate) in guess.candidates.iter().take(max_scan).enumerate() {
+                    let key = normalize_candidate_key(&candidate.text);
+                    let duplicate_penalty = if used.contains(&key) {
+                        6.0_f64
+                    } else {
+                        0.0_f64
+                    };
+                    let width_penalty = candidate_width_penalty_pt(guess, &candidate.text);
+                    let rank_penalty = rank as f64 * 0.05_f64;
+                    let cost = candidate.error_pt as f64
+                        + duplicate_penalty
+                        + width_penalty
+                        + rank_penalty;
+                    match &best {
+                        None => best = Some((candidate.text.clone(), cost)),
+                        Some((_, best_cost)) if cost < *best_cost => {
+                            best = Some((candidate.text.clone(), cost))
+                        }
+                        _ => {}
+                    }
+                }
+                let Some((selected_text, _)) = best else {
+                    continue;
+                };
+                used.insert(normalize_candidate_key(&selected_text));
+                promote_text_to_front(guess, &selected_text);
+            }
+        }
+    }
+
+    fn normalize_candidate_key(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_uppercase()
+    }
+
+    fn candidate_width_penalty_pt(guess: &RedactionGuess, text: &str) -> f64 {
+        let char_width = (guess.context.char_width_pt as f64).max(0.1_f64);
+        let target = guess.bbox.width().abs() as f64;
+        if target <= 0.0_f64 {
+            return 0.0_f64;
+        }
+        let glyph_count = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != ',')
+            .count()
+            .max(1) as f64;
+        let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f64;
+        let estimated = glyph_count * char_width + spaces * char_width * 0.45_f64;
+        ((estimated - target).abs() / target.max(1.0_f64)).min(3.0_f64)
+    }
+
+    fn promote_text_to_front(guess: &mut RedactionGuess, selected_text: &str) {
+        if let Some(pos) = guess
+            .candidates
+            .iter()
+            .position(|candidate| candidate.text == selected_text)
+        {
+            let chosen = guess.candidates.remove(pos);
+            guess.candidates.insert(0, chosen);
+        }
+        if let Some(pos) = guess
+            .exact_matches
+            .iter()
+            .position(|value| value == selected_text)
+        {
+            let chosen = guess.exact_matches.remove(pos);
+            guess.exact_matches.insert(0, chosen);
         }
     }
 

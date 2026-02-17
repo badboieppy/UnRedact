@@ -1185,8 +1185,8 @@ fn target_bin_count(size: usize) -> usize {
     if size <= 16 {
         return size.max(1);
     }
-    let approx = ((size as f32) / 24.0).ceil() as usize;
-    approx.clamp(4, 96).min(size.max(1))
+    let approx = ((size as f32) / 4.0).ceil() as usize;
+    approx.clamp(16, 512).min(size.max(1))
 }
 
 fn build_bins(size: usize, target: usize) -> Vec<(usize, usize)> {
