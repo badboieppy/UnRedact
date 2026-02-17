@@ -61,6 +61,16 @@ pub struct FontTextRun {
     pub font_size_pt: f32,
     #[serde(default = "default_h_scale_pct")]
     pub h_scale_pct: f32,
+    #[serde(default)]
+    pub measured_width_pt: Option<f32>,
+    #[serde(default)]
+    pub measured_width_px: Option<f32>,
+    #[serde(default)]
+    pub measured_dpi: Option<f32>,
+    #[serde(default)]
+    pub char_advances_pt: Vec<f32>,
+    #[serde(default)]
+    pub char_advances_px: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,5 +383,24 @@ mod tests {
         let decoded: FontDetectionReport =
             serde_json::from_str(&s).expect("expected value in test");
         assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn font_text_run_defaults_metric_fields_when_missing() {
+        let json = r#"{
+            "page_index": 0,
+            "text": "Sample",
+            "bbox": { "x0": 1.0, "y0": 2.0, "x1": 7.0, "y1": 10.0 },
+            "font_key": "F1",
+            "font_name": "Helvetica",
+            "font_size_pt": 12.0,
+            "h_scale_pct": 100.0
+        }"#;
+        let run: FontTextRun = serde_json::from_str(json).expect("expected value in test");
+        assert!(run.measured_width_pt.is_none());
+        assert!(run.measured_width_px.is_none());
+        assert!(run.measured_dpi.is_none());
+        assert!(run.char_advances_pt.is_empty());
+        assert!(run.char_advances_px.is_empty());
     }
 }

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use lopdf::{Dictionary, Document, Object};
 
@@ -519,7 +520,7 @@ fn advance_pt(
     let units_per_em = asset.units_per_em.max(1) as f32;
     let mut buf = rustybuzz::UnicodeBuffer::new();
     buf.push_str(text);
-    let out = rustybuzz::shape(&face, &[], buf);
+    let out = rustybuzz::shape(&face, shaping_features(), buf);
     let units = out
         .glyph_positions()
         .iter()
@@ -527,6 +528,19 @@ fn advance_pt(
         .sum::<f32>()
         / 64.0;
     Some(units * (font_size_pt / units_per_em))
+}
+
+fn shaping_features() -> &'static [rustybuzz::Feature] {
+    static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
+    FEATURES
+        .get_or_init(|| {
+            vec![
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
+            ]
+        })
+        .as_slice()
 }
 
 fn width_from_table(table: &FontWidthTable, text: &str, font_size_pt: f32) -> Option<f32> {

@@ -2,6 +2,10 @@ use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
+
+const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
+const GLYPH_UNITS_SCALE: f32 = 64.0_f32;
 
 #[derive(Debug, Clone)]
 struct FontInfo {
@@ -44,6 +48,14 @@ impl Default for Matrix {
     fn default() -> Self {
         Self { tx: 0.0, ty: 0.0 }
     }
+}
+
+#[derive(Debug, Clone)]
+struct TextMetrics {
+    width_pt: f32,
+    width_px: f32,
+    char_advances_pt: Vec<f32>,
+    char_advances_px: Vec<f32>,
 }
 
 #[inline]
@@ -150,7 +162,7 @@ fn extract_text_runs(
                 }
 
                 let font_info = font_map.get(&st.font_key);
-                let width = estimate_run_width_pt(
+                let metrics = measure_run_metrics(
                     font_info,
                     &st.font_name,
                     st.font_size_pt,
@@ -158,10 +170,14 @@ fn extract_text_runs(
                     &text,
                 )
                 .unwrap_or_else(|| {
-                    let scale = (st.h_scale_pct / 100.0_f32).max(0.01_f32);
-                    let chars = text.chars().count().max(1) as f32;
-                    (st.font_size_pt.abs() * 0.6_f32 * chars * scale).max(1.0_f32)
+                    fallback_text_metrics(
+                        &text,
+                        st.font_size_pt.abs().max(1.0_f32),
+                        st.h_scale_pct,
+                        DEFAULT_METRICS_DPI,
+                    )
                 });
+                let width = metrics.width_pt.max(0.0_f32);
                 let h = st.font_size_pt.abs().max(1.0);
                 let x0 = st.text_matrix.tx;
                 let y1 = st.text_matrix.ty;
@@ -174,6 +190,11 @@ fn extract_text_runs(
                     font_name: st.font_name.clone(),
                     font_size_pt: st.font_size_pt,
                     h_scale_pct: st.h_scale_pct.max(1.0_f32),
+                    measured_width_pt: Some(metrics.width_pt),
+                    measured_width_px: Some(metrics.width_px),
+                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    char_advances_pt: metrics.char_advances_pt,
+                    char_advances_px: metrics.char_advances_px,
                 });
                 st.text_matrix.tx += width;
             }
@@ -290,48 +311,112 @@ fn text_from_show_op(op: &lopdf::content::Operation) -> String {
     String::new()
 }
 
-fn estimate_run_width_pt(
+fn measure_run_metrics(
     font_info: Option<&FontInfo>,
     font_name: &str,
     font_size_pt: f32,
     h_scale_pct: f32,
     text: &str,
-) -> Option<f32> {
+) -> Option<TextMetrics> {
     if text.is_empty() {
-        return Some(0.0_f32);
+        return Some(TextMetrics {
+            width_pt: 0.0_f32,
+            width_px: 0.0_f32,
+            char_advances_pt: Vec::new(),
+            char_advances_px: Vec::new(),
+        });
     }
+    let font_size = font_size_pt.abs().max(1.0_f32);
     let scale = (h_scale_pct / 100.0_f32).max(0.01_f32);
 
     if let Some(info) = font_info {
         if let Some(bytes) = info.bytes.as_ref() {
             if let Some(face) = rustybuzz::Face::from_slice(bytes, 0) {
                 let units_per_em = info.units_per_em.unwrap_or(1000).max(1) as f32;
-                let width = advance_pt(&face, text, font_size_pt.abs().max(1.0_f32), units_per_em);
-                if width.is_finite() && width > 0.0_f32 {
-                    return Some(width * scale);
+                if let Some(metrics) = shape_text_metrics(
+                    &face,
+                    text,
+                    font_size,
+                    units_per_em,
+                    scale,
+                    DEFAULT_METRICS_DPI,
+                ) {
+                    return Some(metrics);
                 }
             }
         }
     }
 
-    let core = core_font_width(font_name, text, font_size_pt.abs().max(1.0_f32));
-    core.map(|width| width * scale)
+    core_font_metrics(font_name, text, font_size, scale, DEFAULT_METRICS_DPI)
 }
 
-fn advance_pt(face: &rustybuzz::Face<'_>, text: &str, font_size_pt: f32, units_per_em: f32) -> f32 {
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    let shaped = rustybuzz::shape(face, &[], buffer);
-    let units = shaped
-        .glyph_positions()
+fn shape_text_metrics(
+    face: &rustybuzz::Face<'_>,
+    text: &str,
+    font_size_pt: f32,
+    units_per_em: f32,
+    scale: f32,
+    dpi: f32,
+) -> Option<TextMetrics> {
+    let shaped = shape_text(face, text);
+    let glyph_positions = shaped.glyph_positions();
+    if glyph_positions.is_empty() {
+        return None;
+    }
+    let units = glyph_positions
         .iter()
         .map(|position| position.x_advance as f32)
         .sum::<f32>()
-        / 64.0_f32;
-    units * (font_size_pt / units_per_em.max(1.0_f32))
+        / GLYPH_UNITS_SCALE;
+    let width_pt = units * (font_size_pt / units_per_em.max(1.0_f32)) * scale;
+    if !width_pt.is_finite() || width_pt <= 0.0_f32 {
+        return None;
+    }
+
+    let char_units = contextual_char_advances_units(text, &shaped);
+    let mut char_advances_pt = char_units
+        .iter()
+        .map(|units_value| units_value * (font_size_pt / units_per_em.max(1.0_f32)) * scale)
+        .collect::<Vec<_>>();
+    char_advances_pt = normalize_char_advances(text, char_advances_pt, width_pt);
+    let char_advances_px = char_advances_pt
+        .iter()
+        .map(|value| points_to_pixels(*value, dpi))
+        .collect::<Vec<_>>();
+    Some(TextMetrics {
+        width_pt,
+        width_px: points_to_pixels(width_pt, dpi),
+        char_advances_pt,
+        char_advances_px,
+    })
 }
 
-fn core_font_width(font_name: &str, text: &str, font_size_pt: f32) -> Option<f32> {
+fn shape_text(face: &rustybuzz::Face<'_>, text: &str) -> rustybuzz::GlyphBuffer {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    rustybuzz::shape(face, shaping_features(), buffer)
+}
+
+fn shaping_features() -> &'static [rustybuzz::Feature] {
+    static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
+    FEATURES
+        .get_or_init(|| {
+            vec![
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
+                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
+            ]
+        })
+        .as_slice()
+}
+
+fn core_font_metrics(
+    font_name: &str,
+    text: &str,
+    font_size_pt: f32,
+    scale: f32,
+    dpi: f32,
+) -> Option<TextMetrics> {
     let normalized = font_name.to_ascii_lowercase();
     let table: fn(char) -> i32 = if normalized.contains("times") && normalized.contains("roman") {
         times_roman_width as fn(char) -> i32
@@ -341,11 +426,129 @@ fn core_font_width(font_name: &str, text: &str, font_size_pt: f32) -> Option<f32
         return None;
     };
 
-    let mut units = 0.0_f32;
+    let mut char_advances_pt = Vec::with_capacity(text.chars().count());
     for ch in text.chars() {
-        units += table(ch) as f32;
+        let unit_width = table(ch) as f32;
+        char_advances_pt.push(unit_width * (font_size_pt / 1000.0_f32) * scale);
     }
-    Some(units * (font_size_pt / 1000.0_f32))
+    let width_pt = char_advances_pt.iter().sum::<f32>();
+    if !width_pt.is_finite() || width_pt <= 0.0_f32 {
+        return None;
+    }
+    let char_advances_px = char_advances_pt
+        .iter()
+        .map(|value| points_to_pixels(*value, dpi))
+        .collect::<Vec<_>>();
+    Some(TextMetrics {
+        width_pt,
+        width_px: points_to_pixels(width_pt, dpi),
+        char_advances_pt,
+        char_advances_px,
+    })
+}
+
+fn contextual_char_advances_units(text: &str, shaped: &rustybuzz::GlyphBuffer) -> Vec<f32> {
+    let char_starts = text.char_indices().map(|(idx, _)| idx).collect::<Vec<_>>();
+    if char_starts.is_empty() {
+        return Vec::new();
+    }
+    let mut cluster_advances = BTreeMap::<usize, f32>::new();
+    for (info, position) in shaped
+        .glyph_infos()
+        .iter()
+        .zip(shaped.glyph_positions().iter())
+    {
+        let cluster = (info.cluster as usize).min(text.len());
+        let entry = cluster_advances.entry(cluster).or_insert(0.0_f32);
+        *entry += (position.x_advance as f32) / GLYPH_UNITS_SCALE;
+    }
+    if cluster_advances.is_empty() {
+        return vec![0.0_f32; char_starts.len()];
+    }
+    let mut clusters = cluster_advances.into_iter().collect::<Vec<_>>();
+    clusters.sort_by_key(|(cluster, _)| *cluster);
+    let mut per_char = vec![0.0_f32; char_starts.len()];
+    for (index, (start_byte, advance_units)) in clusters.iter().enumerate() {
+        let end_byte = clusters
+            .get(index + 1)
+            .map(|(cluster, _)| *cluster)
+            .unwrap_or(text.len())
+            .min(text.len());
+        let start_char = start_char_index(&char_starts, *start_byte);
+        let mut end_char = end_char_index(&char_starts, end_byte);
+        if end_char <= start_char {
+            end_char = (start_char + 1).min(char_starts.len());
+        }
+        let count = end_char.saturating_sub(start_char).max(1);
+        let per_value = *advance_units / count as f32;
+        for idx in start_char..(start_char + count).min(per_char.len()) {
+            per_char[idx] += per_value;
+        }
+    }
+    per_char
+}
+
+fn start_char_index(char_starts: &[usize], byte_offset: usize) -> usize {
+    match char_starts.binary_search(&byte_offset) {
+        Ok(idx) => idx,
+        Err(idx) => idx
+            .saturating_sub(1)
+            .min(char_starts.len().saturating_sub(1)),
+    }
+}
+
+fn end_char_index(char_starts: &[usize], byte_offset: usize) -> usize {
+    match char_starts.binary_search(&byte_offset) {
+        Ok(idx) => idx,
+        Err(idx) => idx.min(char_starts.len()),
+    }
+}
+
+fn normalize_char_advances(text: &str, advances: Vec<f32>, width_pt: f32) -> Vec<f32> {
+    let char_count = text.chars().count();
+    if char_count == 0 {
+        return Vec::new();
+    }
+    if advances.len() != char_count
+        || advances
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0_f32)
+    {
+        let per_char = width_pt / char_count as f32;
+        return vec![per_char; char_count];
+    }
+    let sum = advances.iter().sum::<f32>();
+    if !sum.is_finite() || sum <= 0.0_f32 || !width_pt.is_finite() {
+        let per_char = width_pt / char_count as f32;
+        return vec![per_char; char_count];
+    }
+    let factor = width_pt / sum;
+    advances
+        .into_iter()
+        .map(|value| value * factor)
+        .collect::<Vec<_>>()
+}
+
+fn fallback_text_metrics(text: &str, font_size_pt: f32, h_scale_pct: f32, dpi: f32) -> TextMetrics {
+    let scale = (h_scale_pct / 100.0_f32).max(0.01_f32);
+    let chars = text.chars().count().max(1);
+    let width_pt = (font_size_pt.abs().max(1.0_f32) * 0.6_f32 * chars as f32 * scale).max(1.0_f32);
+    let per_char = width_pt / chars as f32;
+    let char_advances_pt = vec![per_char; chars];
+    let char_advances_px = char_advances_pt
+        .iter()
+        .map(|value| points_to_pixels(*value, dpi))
+        .collect::<Vec<_>>();
+    TextMetrics {
+        width_pt,
+        width_px: points_to_pixels(width_pt, dpi),
+        char_advances_pt,
+        char_advances_px,
+    }
+}
+
+fn points_to_pixels(points: f32, dpi: f32) -> f32 {
+    points * (dpi / 72.0_f32)
 }
 
 fn times_roman_width(ch: char) -> i32 {

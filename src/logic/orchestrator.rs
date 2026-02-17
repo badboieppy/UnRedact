@@ -287,6 +287,15 @@ mod guess_impl {
         widths: Vec<f64>,
     }
 
+    const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
+    const GLYPH_UNITS_SCALE: f64 = 64.0_f64;
+
+    #[derive(Debug, Clone, Copy)]
+    struct MeasuredWidth {
+        pt: f64,
+        px: f64,
+    }
+
     struct WidthMeasureContext<'a> {
         page_index: u32,
         asset: Option<&'a FontAsset>,
@@ -301,6 +310,7 @@ mod guess_impl {
         font_size_pt: f32,
         h_scale_pct: f32,
         text: &'a str,
+        metrics_dpi: f32,
     }
 
     struct RowCalibration {
@@ -604,32 +614,44 @@ mod guess_impl {
                     font_size_pt: anchor.font_size_pt,
                     h_scale_pct: anchor.h_scale_pct,
                     text,
+                    metrics_dpi: DEFAULT_METRICS_DPI,
                 },
                 asset,
                 width_tables,
             );
             measured.or_else(|| {
-                if text.trim().is_empty() {
-                    Some(fallback_space_width)
-                } else {
-                    Some((text.chars().count() as f64) * fallback_char_width.max(0.1_f64))
-                }
+                Some(fallback_measured_width(
+                    text,
+                    fallback_char_width,
+                    fallback_space_width,
+                    DEFAULT_METRICS_DPI,
+                ))
             })
         };
 
         let key = WidthKey {
+            page_index: redaction.page_index,
             font_key: anchor.font_key.clone(),
             font_size_bits: anchor.font_size_pt.to_bits(),
             h_scale_bits: anchor.h_scale_pct.to_bits(),
+            metrics_dpi_bits: DEFAULT_METRICS_DPI.to_bits(),
         };
 
         let space_width = if let Some(cached) = cache.spaces.get(&key) {
             *cached
         } else {
-            let width = measure_width(" ").unwrap_or(fallback_space_width);
+            let width = measure_width(" ").unwrap_or_else(|| {
+                fallback_measured_width(
+                    " ",
+                    fallback_char_width,
+                    fallback_space_width,
+                    DEFAULT_METRICS_DPI,
+                )
+            });
             cache.spaces.insert(key.clone(), width);
             width
         };
+        let _space_width_px = space_width.px;
 
         if !cache.words.contains_key(&key) {
             let mut widths = std::collections::BTreeMap::new();
@@ -639,7 +661,12 @@ mod guess_impl {
                     continue;
                 }
                 let width = measure_width(trimmed).unwrap_or_else(|| {
-                    (trimmed.chars().count() as f64) * fallback_char_width.max(0.1_f64)
+                    fallback_measured_width(
+                        trimmed,
+                        fallback_char_width,
+                        fallback_space_width,
+                        DEFAULT_METRICS_DPI,
+                    )
                 });
                 widths.insert(trimmed.to_owned(), width);
             }
@@ -647,8 +674,12 @@ mod guess_impl {
         }
 
         let left_width = measure_width(anchor.left_anchor_text.trim()).unwrap_or_else(|| {
-            (anchor.left_anchor_text.trim().chars().count() as f64)
-                * fallback_char_width.max(0.1_f64)
+            fallback_measured_width(
+                anchor.left_anchor_text.trim(),
+                fallback_char_width,
+                fallback_space_width,
+                DEFAULT_METRICS_DPI,
+            )
         });
         let candidate_widths = cache.words.get(&key);
         let Some(candidate_widths) = candidate_widths else {
@@ -688,10 +719,10 @@ mod guess_impl {
                 continue;
             };
             let predicted_right = anchor.left_x
-                + left_width
-                + space_width
-                + word_width
-                + space_width
+                + left_width.pt
+                + space_width.pt
+                + word_width.pt
+                + space_width.pt
                 + anchor.row_bias_pt;
             let err = (predicted_right - anchor.right_x).abs();
             scored.push(ScoredDictionaryCandidate {
@@ -756,7 +787,7 @@ mod guess_impl {
 
         let char_width = if !anchor.left_anchor_text.trim().is_empty() {
             let chars = anchor.left_anchor_text.trim().chars().count().max(1) as f64;
-            (left_width / chars).max(0.0)
+            (left_width.pt / chars).max(0.0)
         } else {
             fallback_char_width
         };
@@ -1045,29 +1076,57 @@ mod guess_impl {
         }
         if let Some(prefix_bytes) = run_text.find(hint_text) {
             let prefix = &run_text[..prefix_bytes];
-            let offset = measure_text_width_from_sources(
-                &TextMeasureInput {
-                    page_index,
-                    font_key: &run.font_key,
-                    font_name: &run.font_name,
-                    font_size_pt: run.font_size_pt,
-                    h_scale_pct: run.h_scale_pct,
-                    text: prefix,
-                },
-                asset,
-                width_tables,
-            )
-            .unwrap_or_else(|| {
-                let run_chars = run_text.chars().count().max(1) as f64;
-                let prefix_chars = prefix.chars().count() as f64;
-                ((run.bbox.x1 - run.bbox.x0).abs() as f64) * (prefix_chars / run_chars)
-            });
+            let offset = prefix_width_from_run(run, prefix_bytes)
+                .or_else(|| {
+                    measure_text_width_from_sources(
+                        &TextMeasureInput {
+                            page_index,
+                            font_key: &run.font_key,
+                            font_name: &run.font_name,
+                            font_size_pt: run.font_size_pt,
+                            h_scale_pct: run.h_scale_pct,
+                            text: prefix,
+                            metrics_dpi: DEFAULT_METRICS_DPI,
+                        },
+                        asset,
+                        width_tables,
+                    )
+                    .map(|value| value.pt)
+                })
+                .unwrap_or_else(|| {
+                    let run_chars = run_text.chars().count().max(1) as f64;
+                    let prefix_chars = prefix.chars().count() as f64;
+                    ((run.bbox.x1 - run.bbox.x0).abs() as f64) * (prefix_chars / run_chars)
+                });
             return (hint_text.to_owned(), run.bbox.x0 as f64 + offset);
         }
         if hint_text.contains(run_text) {
             return (run_text.to_owned(), run.bbox.x0 as f64);
         }
         (hint_text.to_owned(), hint_x.unwrap_or(run.bbox.x0 as f64))
+    }
+
+    fn prefix_width_from_run(run: &FontTextRun, prefix_bytes: usize) -> Option<f64> {
+        if run.char_advances_pt.is_empty() {
+            return None;
+        }
+        if prefix_bytes == 0 {
+            return Some(0.0_f64);
+        }
+        let prefix_char_count = run.text.get(..prefix_bytes)?.chars().count();
+        if prefix_char_count == 0 {
+            return Some(0.0_f64);
+        }
+        if prefix_char_count > run.char_advances_pt.len() {
+            return None;
+        }
+        let width_pt = run
+            .char_advances_pt
+            .iter()
+            .take(prefix_char_count)
+            .map(|value| *value as f64)
+            .sum::<f64>();
+        (width_pt.is_finite() && width_pt >= 0.0_f64).then_some(width_pt)
     }
 
     fn estimate_row_epsilon(
@@ -1097,10 +1156,12 @@ mod guess_impl {
                 font_size_pt: left_run.font_size_pt,
                 h_scale_pct: measure_ctx.h_scale_pct,
                 text: " ",
+                metrics_dpi: DEFAULT_METRICS_DPI,
             },
             measure_ctx.asset,
             measure_ctx.width_tables,
         )
+        .map(|value| value.pt)
         .unwrap_or(0.5_f64 * fallback_char_width);
         let mut row = runs
             .iter()
@@ -1136,10 +1197,12 @@ mod guess_impl {
                     font_size_pt: current.font_size_pt,
                     h_scale_pct: current.h_scale_pct,
                     text: current_text,
+                    metrics_dpi: DEFAULT_METRICS_DPI,
                 },
                 measure_ctx.asset,
                 measure_ctx.width_tables,
             )
+            .map(|value| value.pt)
             .unwrap_or_else(|| {
                 let chars = current_text.chars().count().max(1) as f64;
                 chars * fallback_char_width
@@ -1152,10 +1215,12 @@ mod guess_impl {
                     font_size_pt: current.font_size_pt,
                     h_scale_pct: current.h_scale_pct,
                     text: " ",
+                    metrics_dpi: DEFAULT_METRICS_DPI,
                 },
                 measure_ctx.asset,
                 measure_ctx.width_tables,
             )
+            .map(|value| value.pt)
             .unwrap_or(space_width);
             let predicted_next = current.bbox.x0 as f64 + current_width + current_space_width;
             let residual = next.bbox.x0 as f64 - predicted_next;
@@ -1204,20 +1269,26 @@ mod guess_impl {
         text: &str,
         font_size_pt: f32,
         h_scale_pct: f32,
-    ) -> Option<f64> {
+        metrics_dpi: f32,
+    ) -> Option<MeasuredWidth> {
         let face = rustybuzz::Face::from_slice(&asset.bytes, 0)?;
         let units_per_em = asset.units_per_em.max(1) as f32;
         let scale = (h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-        Some((advance_pt(&face, text, font_size_pt, units_per_em) as f64) * scale)
+        let font_size = font_size_pt.abs().max(1.0_f32);
+        let width_pt = (advance_pt(&face, text, font_size, units_per_em) as f64) * scale;
+        if !width_pt.is_finite() || width_pt <= 0.0_f64 {
+            return None;
+        }
+        Some(measured_width_from_points(width_pt, metrics_dpi))
     }
 
     fn measure_text_width_from_sources(
         input: &TextMeasureInput<'_>,
         asset: Option<&FontAsset>,
         width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
-    ) -> Option<f64> {
+    ) -> Option<MeasuredWidth> {
         if input.text.is_empty() {
-            return Some(0.0_f64);
+            return Some(measured_width_from_points(0.0_f64, input.metrics_dpi));
         }
         if let Some(asset_value) = asset {
             if let Some(width) = measure_text_width_pt(
@@ -1225,8 +1296,9 @@ mod guess_impl {
                 input.text,
                 input.font_size_pt,
                 input.h_scale_pct,
+                input.metrics_dpi,
             ) {
-                if width.is_finite() && width > 0.0_f64 {
+                if width.pt.is_finite() && width.pt > 0.0_f64 {
                     return Some(width);
                 }
             }
@@ -1239,13 +1311,15 @@ mod guess_impl {
             if let Some(width) = width_from_table(table, input.text, input.font_size_pt) {
                 if width.is_finite() && width > 0.0_f64 {
                     let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-                    return Some(width * scale);
+                    return Some(measured_width_from_points(width * scale, input.metrics_dpi));
                 }
             }
         }
-        width_from_core_font(input.font_name, input.text, input.font_size_pt).map(|width| {
+        width_from_core_font(input.font_name, input.text, input.font_size_pt).and_then(|width| {
             let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-            width * scale
+            let width_pt = width * scale;
+            (width_pt.is_finite() && width_pt > 0.0_f64)
+                .then_some(measured_width_from_points(width_pt, input.metrics_dpi))
         })
     }
 
@@ -1464,14 +1538,38 @@ mod guess_impl {
     ) -> f32 {
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
-        let out = rustybuzz::shape(face, &[], buffer);
+        let out = rustybuzz::shape(face, shaping_features(), buffer);
         let units = out
             .glyph_positions()
             .iter()
             .map(|position| position.x_advance as f32)
             .sum::<f32>()
-            / 64.0_f32;
+            / GLYPH_UNITS_SCALE as f32;
         units * (font_size / units_per_em.max(1.0_f32))
+    }
+
+    fn shaping_features() -> &'static [rustybuzz::Feature] {
+        static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
+        FEATURES
+            .get_or_init(|| {
+                vec![
+                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
+                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
+                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
+                ]
+            })
+            .as_slice()
+    }
+
+    fn measured_width_from_points(width_pt: f64, dpi: f32) -> MeasuredWidth {
+        MeasuredWidth {
+            pt: width_pt,
+            px: points_to_pixels(width_pt, dpi),
+        }
+    }
+
+    fn points_to_pixels(points: f64, dpi: f32) -> f64 {
+        points * (dpi as f64 / 72.0_f64)
     }
 
     fn times_roman_width(ch: char) -> i32 {
@@ -1743,16 +1841,33 @@ mod guess_impl {
         }
     }
 
+    fn fallback_measured_width(
+        text: &str,
+        fallback_char_width: f64,
+        fallback_space_width: f64,
+        dpi: f32,
+    ) -> MeasuredWidth {
+        let width_pt = if text.trim().is_empty() {
+            fallback_space_width
+        } else {
+            (text.chars().count() as f64) * fallback_char_width.max(0.1_f64)
+        };
+        measured_width_from_points(width_pt, dpi)
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct WidthKey {
+        page_index: u32,
         font_key: String,
         font_size_bits: u32,
         h_scale_bits: u32,
+        metrics_dpi_bits: u32,
     }
 
     struct WidthCache {
-        words: std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, f64>>,
-        spaces: std::collections::BTreeMap<WidthKey, f64>,
+        words:
+            std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
+        spaces: std::collections::BTreeMap<WidthKey, MeasuredWidth>,
     }
 
     impl WidthCache {
