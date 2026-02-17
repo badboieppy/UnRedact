@@ -1,0 +1,111 @@
+{
+  "definitions": {
+    "evaluated_items": "Number of target strings evaluated in this dataset.",
+    "found_items": "How many targets appeared anywhere in ranked guesses (exact matches + candidate list).",
+    "recall_at_1": "Fraction of targets with best_rank <= 1. Higher is better.",
+    "recall_at_5": "Fraction of targets with best_rank <= 5. Higher is better.",
+    "recall_at_20": "Fraction of targets with best_rank <= 20. Higher is better.",
+    "mrr": "Mean reciprocal rank across all targets: avg(1/rank), with 0 for not-found.",
+    "mean_rank_found": "Average rank among found targets only. Lower is better.",
+    "best_rank": "Per-target best observed rank (1 is top candidate). Null means the target was not found."
+  },
+  "datasets": [
+    {
+      "name": "EFTA00101126",
+      "summary": {
+        "evaluated_items": 2,
+        "found_items": 2,
+        "recall_at_1": 1.0,
+        "recall_at_5": 1.0,
+        "recall_at_20": 1.0,
+        "mrr": 1.0,
+        "mean_rank_found": 1.0
+      },
+      "targets": [
+        {
+          "label": "second_last",
+          "target": "SARAH KELLEN",
+          "best_rank": 1
+        },
+        {
+          "label": "last",
+          "target": "SARAH KELLEN",
+          "best_rank": 1
+        }
+      ]
+    },
+    {
+      "name": "EFTA00038617",
+      "summary": {
+        "evaluated_items": 10,
+        "found_items": 10,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.0,
+        "recall_at_20": 0.4,
+        "mrr": 0.03846838701548008,
+        "mean_rank_found": 69.9
+      },
+      "targets": [
+        {
+          "label": "SARAH KELLEN",
+          "target": "SARAH KELLEN",
+          "best_rank": 46
+        },
+        {
+          "label": "ADRIANA MUCINSKA",
+          "target": "ADRIANA MUCINSKA",
+          "best_rank": 232
+        },
+        {
+          "label": "NADIA MARCINKOVA",
+          "target": "NADIA MARCINKOVA",
+          "best_rank": 233
+        },
+        {
+          "label": "LES WEXNER",
+          "target": "LES WEXNER",
+          "best_rank": 36
+        },
+        {
+          "label": "LESLEY GROFF",
+          "target": "LESLEY GROFF",
+          "best_rank": 47
+        },
+        {
+          "label": "JEAN LUC BRUNEL",
+          "target": "JEAN LUC BRUNEL",
+          "best_rank": 11
+        },
+        {
+          "label": "HALEY ROBSON",
+          "target": "HALEY ROBSON",
+          "best_rank": 17
+        },
+        {
+          "label": "WILLIAM HAMMOND",
+          "target": "WILLIAM HAMMOND",
+          "best_rank": 20
+        },
+        {
+          "label": "DAVID RODGERS",
+          "target": "DAVID RODGERS",
+          "best_rank": 45
+        },
+        {
+          "label": "RICHARD BARNETT",
+          "target": "RICHARD BARNETT",
+          "best_rank": 12
+        }
+      ]
+    }
+  ],
+  "overall": {
+    "evaluated_items": 12,
+    "found_items": 12,
+    "recall_at_1": 0.16666666666666666,
+    "recall_at_5": 0.16666666666666666,
+    "recall_at_20": 0.5,
+    "mrr": 0.1987236558462334,
+    "mean_rank_found": 58.416666666666664
+  }
+}

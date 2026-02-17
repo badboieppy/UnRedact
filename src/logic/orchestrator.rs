@@ -131,30 +131,6 @@ pub fn build_output_paths(input: &Path, output_dir: &Path) -> Result<Orchestrato
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_output_paths_uses_stem_and_dir() {
-        let input = Path::new("C:/data/report.pdf");
-        let out = build_output_paths(input, Path::new("C:/out")).expect("expected value in test");
-        assert_eq!(
-            out.redactions_path,
-            PathBuf::from("C:/out/report.redactions.json")
-        );
-        assert_eq!(out.fonts_path, PathBuf::from("C:/out/report.fonts.json"));
-        assert_eq!(
-            out.guesses_path,
-            PathBuf::from("C:/out/report.guesses.json")
-        );
-        assert_eq!(
-            out.visualized_pdf_path,
-            Some(PathBuf::from("C:/out/report.visualized.pdf"))
-        );
-    }
-}
-
 mod guess_impl {
     use lopdf::{Dictionary, Document, Object};
     use std::path::Path;
@@ -190,13 +166,6 @@ mod guess_impl {
         let width_tables = build_pdf_width_table_map(req.pdf_path).unwrap_or_default();
         let mut diagnostics = reports.diagnostics;
         diagnostics.extend(dictionary.diagnostics);
-        diagnostics.push(format!(
-            "dictionary_contains_sarah_kellen={}",
-            dictionary
-                .dictionary
-                .iter()
-                .any(|value| value.eq_ignore_ascii_case("SARAH KELLEN"))
-        ));
         let inputs = BuildReportWithFontsInputs {
             redactions_path: req.redactions_path,
             fonts_path: req.fonts_path,
@@ -2751,3 +2720,27 @@ mod redaction_impl {
 pub use guess_impl::{run_from_paths as run_guess_from_paths, RunGuessRequest};
 
 pub use redaction_impl::{build_report, run_redaction_scan, run_redaction_scan_from_bytes};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_output_paths_uses_stem_and_dir() {
+        let input = Path::new("C:/data/report.pdf");
+        let out = build_output_paths(input, Path::new("C:/out")).expect("expected value in test");
+        assert_eq!(
+            out.redactions_path,
+            PathBuf::from("C:/out/report.redactions.json")
+        );
+        assert_eq!(out.fonts_path, PathBuf::from("C:/out/report.fonts.json"));
+        assert_eq!(
+            out.guesses_path,
+            PathBuf::from("C:/out/report.guesses.json")
+        );
+        assert_eq!(
+            out.visualized_pdf_path,
+            Some(PathBuf::from("C:/out/report.visualized.pdf"))
+        );
+    }
+}

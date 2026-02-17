@@ -11,6 +11,11 @@ use crate::types::redaction_types::{Rect, RedactionKind, RedactionReport};
 use crate::types::text_overlay::TextOverlay;
 use crate::types::visualizer_config::VisualizerConfig;
 
+const RASTER_TEXT_PADDING_PT: f32 = 1.0_f32;
+const RASTER_MAX_FONT_TO_BOX_HEIGHT: f32 = 0.80_f32;
+const RASTER_MIN_FONT_SIZE_PT: f32 = 4.5_f32;
+const RASTER_BASELINE_ASCENT_RATIO: f32 = 0.75_f32;
+
 #[derive(Debug, Clone)]
 pub struct VisualizationInputs {
     pub pdf_bytes: Vec<u8>,
@@ -32,6 +37,13 @@ pub trait VisualizationDataSource {
 #[derive(Debug, Clone, Copy)]
 pub struct VisualizationData {
     file_store: FileStore,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RasterOverlayLayout {
+    x: f32,
+    y: f32,
+    font_size_pt: f32,
 }
 
 impl VisualizationData {
@@ -156,42 +168,35 @@ fn build_overlays(
             });
             let nearby_run =
                 select_run_by_bbox(&font_runs.runs, redaction.page_index, Some(redaction.bbox));
-            let (font_key, font_size_pt, h_scale_pct, baseline_y) = if let Some(font) = anchor_font
-            {
-                (font.0, font.1, font.2, redaction.bbox.y1)
+            let (font_key, requested_font_size_pt, h_scale_pct) = if let Some(font) = anchor_font {
+                (font.0, font.1, font.2)
             } else if let Some(run) = nearby_run {
-                (
-                    run.font_key.clone(),
-                    run.font_size_pt,
-                    run.h_scale_pct,
-                    run.bbox.y1.min(redaction.bbox.y1),
-                )
+                (run.font_key.clone(), run.font_size_pt, run.h_scale_pct)
             } else {
-                ("F1".to_owned(), 11.0_f32, 100.0_f32, redaction.bbox.y1)
+                ("F1".to_owned(), 11.0_f32, 100.0_f32)
             };
+            let box_height = redaction.bbox.height().abs().max(1.0_f32);
+            let fitted_font_size_pt = requested_font_size_pt
+                .min(box_height * RASTER_MAX_FONT_TO_BOX_HEIGHT)
+                .max(RASTER_MIN_FONT_SIZE_PT);
             let guess_width = text_width_pt(
                 redaction.page_index,
                 &font_key,
-                font_size_pt,
+                fitted_font_size_pt,
                 h_scale_pct,
                 selected.trim(),
                 &assets,
                 width_map,
             );
-            let box_width = redaction.bbox.width().abs();
-            let x = if box_width > guess_width {
-                redaction.bbox.x0 + ((box_width - guess_width) * 0.5_f32)
-            } else {
-                redaction.bbox.x0 + 1.0_f32
-            };
+            let layout = raster_overlay_layout(redaction.bbox, fitted_font_size_pt, guess_width);
             out.push(TextOverlay {
                 page_index: redaction.page_index,
                 text: selected.trim().to_owned(),
                 font_key,
-                font_size_pt,
+                font_size_pt: layout.font_size_pt,
                 h_scale_pct,
-                x,
-                y: baseline_y,
+                x: layout.x,
+                y: layout.y,
                 bbox: redaction.bbox,
             });
             continue;
@@ -450,6 +455,31 @@ fn build_overlays(
         });
     }
     out
+}
+
+fn raster_overlay_layout(
+    rect: Rect,
+    requested_font_size_pt: f32,
+    text_width_pt: f32,
+) -> RasterOverlayLayout {
+    let box_width = rect.width().abs().max(1.0_f32);
+    let box_height = rect.height().abs().max(1.0_f32);
+    let font_size_pt = requested_font_size_pt
+        .min(box_height * RASTER_MAX_FONT_TO_BOX_HEIGHT)
+        .max(RASTER_MIN_FONT_SIZE_PT);
+
+    let x_min = rect.x0 + RASTER_TEXT_PADDING_PT;
+    let x_max = (rect.x1 - RASTER_TEXT_PADDING_PT - text_width_pt).max(x_min);
+    let centered_x = rect.x0 + ((box_width - text_width_pt) * 0.5_f32);
+    let x = centered_x.clamp(x_min, x_max);
+
+    let text_bottom = rect.y0 + ((box_height - font_size_pt) * 0.5_f32);
+    let baseline = text_bottom + (font_size_pt * RASTER_BASELINE_ASCENT_RATIO);
+    let y_min = rect.y0 + RASTER_TEXT_PADDING_PT;
+    let y_max = rect.y1 - RASTER_TEXT_PADDING_PT;
+    let y = baseline.clamp(y_min, y_max);
+
+    RasterOverlayLayout { x, y, font_size_pt }
 }
 
 fn pick_best_guess(guess: &crate::types::guess_types::RedactionGuess) -> Option<&str> {
@@ -756,5 +786,27 @@ fn deref_to_dict<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'do
         },
         Object::Dictionary(d) => Some(d),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raster_overlay_layout_keeps_baseline_inside_box() {
+        let bbox = Rect::new(120.0, 300.0, 190.0, 314.0);
+        let layout = raster_overlay_layout(bbox, 12.0, 40.0);
+        assert!(layout.y >= bbox.y0);
+        assert!(layout.y <= bbox.y1);
+        assert!(layout.font_size_pt <= bbox.height().abs() * RASTER_MAX_FONT_TO_BOX_HEIGHT + 0.01);
+    }
+
+    #[test]
+    fn raster_overlay_layout_clamps_x_when_text_is_wide() {
+        let bbox = Rect::new(50.0, 100.0, 90.0, 112.0);
+        let layout = raster_overlay_layout(bbox, 11.0, 120.0);
+        assert!(layout.x >= bbox.x0 + RASTER_TEXT_PADDING_PT);
+        assert!(layout.x <= bbox.x1);
     }
 }

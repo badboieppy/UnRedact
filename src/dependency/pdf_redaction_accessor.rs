@@ -1883,117 +1883,6 @@ fn rgba_to_grayscale(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     gray
 }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn detects_dark_bar_in_synthetic_image() {
-        let width = 60;
-        let height = 32;
-        let mut buf = vec![235_u8; width * height];
-        for y in 10..22 {
-            for x in 5..55 {
-                buf[y * width + x] = 5;
-            }
-        }
-        let result = detect_dark_regions_in_image(&buf, width, height);
-        assert!(!result.detections.is_empty());
-        let region = &result.detections[0];
-        assert!(region.area_fraction > 0.1);
-        assert!(region.avg_luminance < 80.0);
-    }
-
-    #[test]
-    fn ignores_sparse_noise() {
-        let width = 64;
-        let height = 64;
-        let mut buf = vec![210_u8; width * height];
-        for i in (0..width * height).step_by(1500) {
-            buf[i] = 20;
-        }
-        let result = detect_dark_regions_in_image(&buf, width, height);
-        assert!(result.detections.is_empty());
-    }
-
-    #[test]
-    fn rect_pixels_to_pdf_maps_coords() {
-        let mapped = rect_pixels_to_pdf(72, 72, 648, 648, Rect::new(0.0, 0.0, 720.0, 720.0), 72.0);
-        assert!((mapped.x0 - 72.0).abs() < 0.01);
-        assert!((mapped.x1 - 648.0).abs() < 0.01);
-        assert!((mapped.y0 - 72.0).abs() < 0.01);
-        assert!((mapped.y1 - 648.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn rect_pixels_to_pdf_respects_page_box_origin() {
-        let mapped =
-            rect_pixels_to_pdf(0, 0, 100, 100, Rect::new(0.0, -18.0, 612.0, 804.75), 200.0);
-        assert!((mapped.x0 - 0.0).abs() < 0.01);
-        assert!((mapped.y1 - 804.75).abs() < 0.01);
-        assert!((mapped.y0 - 768.75).abs() < 0.01);
-    }
-
-    #[test]
-    fn dark_profile_splits_two_bars() {
-        let width = 120_usize;
-        let height = 24_usize;
-        let mut buf = vec![230_u8; width * height];
-        for y in 8..17 {
-            for x in 10..46 {
-                buf[y * width + x] = 8;
-            }
-            for x in 60..101 {
-                buf[y * width + x] = 10;
-            }
-        }
-
-        let region = DarkRegion {
-            x0_px: 10,
-            y0_px: 8,
-            x1_px: 101,
-            y1_px: 17,
-            avg_luminance: 35.0,
-            area_fraction: 0.10,
-            score: 0.9,
-        };
-        let profile = dark_run_profile_for_region(&buf, width, height, &region);
-        assert!(profile.dark_runs.len() >= 2);
-        assert!(profile.max_gap_px >= 4);
-        assert!(profile.split_confidence > 0.2);
-
-        let split = split_dark_region_by_profile(&region, &profile);
-        assert_eq!(split.len(), 2);
-        assert!(split[0].x1_px <= split[1].x0_px);
-    }
-
-    #[test]
-    fn dark_profile_does_not_split_single_bar() {
-        let width = 80_usize;
-        let height = 20_usize;
-        let mut buf = vec![220_u8; width * height];
-        for y in 6..14 {
-            for x in 14..66 {
-                buf[y * width + x] = 6;
-            }
-        }
-
-        let region = DarkRegion {
-            x0_px: 14,
-            y0_px: 6,
-            x1_px: 66,
-            y1_px: 14,
-            avg_luminance: 28.0,
-            area_fraction: 0.09,
-            score: 0.85,
-        };
-        let profile = dark_run_profile_for_region(&buf, width, height, &region);
-        let split = split_dark_region_by_profile(&region, &profile);
-        assert_eq!(split.len(), 1);
-    }
-}
-
 fn extract_page_text_runs(
     doc: &Document,
     page_id: ObjectId,
@@ -2302,4 +2191,114 @@ fn object_to_rect(o: &Object) -> Option<Rect> {
     let y1 = a.get(3).and_then(object_to_f32)?;
 
     Some(Rect::new(x0, y0, x1, y1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_dark_bar_in_synthetic_image() {
+        let width = 60;
+        let height = 32;
+        let mut buf = vec![235_u8; width * height];
+        for y in 10..22 {
+            for x in 5..55 {
+                buf[y * width + x] = 5;
+            }
+        }
+        let result = detect_dark_regions_in_image(&buf, width, height);
+        assert!(!result.detections.is_empty());
+        let region = &result.detections[0];
+        assert!(region.area_fraction > 0.1);
+        assert!(region.avg_luminance < 80.0);
+    }
+
+    #[test]
+    fn ignores_sparse_noise() {
+        let width = 64;
+        let height = 64;
+        let mut buf = vec![210_u8; width * height];
+        for i in (0..width * height).step_by(1500) {
+            buf[i] = 20;
+        }
+        let result = detect_dark_regions_in_image(&buf, width, height);
+        assert!(result.detections.is_empty());
+    }
+
+    #[test]
+    fn rect_pixels_to_pdf_maps_coords() {
+        let mapped = rect_pixels_to_pdf(72, 72, 648, 648, Rect::new(0.0, 0.0, 720.0, 720.0), 72.0);
+        assert!((mapped.x0 - 72.0).abs() < 0.01);
+        assert!((mapped.x1 - 648.0).abs() < 0.01);
+        assert!((mapped.y0 - 72.0).abs() < 0.01);
+        assert!((mapped.y1 - 648.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn rect_pixels_to_pdf_respects_page_box_origin() {
+        let mapped =
+            rect_pixels_to_pdf(0, 0, 100, 100, Rect::new(0.0, -18.0, 612.0, 804.75), 200.0);
+        assert!((mapped.x0 - 0.0).abs() < 0.01);
+        assert!((mapped.y1 - 804.75).abs() < 0.01);
+        assert!((mapped.y0 - 768.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn dark_profile_splits_two_bars() {
+        let width = 120_usize;
+        let height = 24_usize;
+        let mut buf = vec![230_u8; width * height];
+        for y in 8..17 {
+            for x in 10..46 {
+                buf[y * width + x] = 8;
+            }
+            for x in 60..101 {
+                buf[y * width + x] = 10;
+            }
+        }
+
+        let region = DarkRegion {
+            x0_px: 10,
+            y0_px: 8,
+            x1_px: 101,
+            y1_px: 17,
+            avg_luminance: 35.0,
+            area_fraction: 0.10,
+            score: 0.9,
+        };
+        let profile = dark_run_profile_for_region(&buf, width, height, &region);
+        assert!(profile.dark_runs.len() >= 2);
+        assert!(profile.max_gap_px >= 4);
+        assert!(profile.split_confidence > 0.2);
+
+        let split = split_dark_region_by_profile(&region, &profile);
+        assert_eq!(split.len(), 2);
+        assert!(split[0].x1_px <= split[1].x0_px);
+    }
+
+    #[test]
+    fn dark_profile_does_not_split_single_bar() {
+        let width = 80_usize;
+        let height = 20_usize;
+        let mut buf = vec![220_u8; width * height];
+        for y in 6..14 {
+            for x in 14..66 {
+                buf[y * width + x] = 6;
+            }
+        }
+
+        let region = DarkRegion {
+            x0_px: 14,
+            y0_px: 6,
+            x1_px: 66,
+            y1_px: 14,
+            avg_luminance: 28.0,
+            area_fraction: 0.09,
+            score: 0.85,
+        };
+        let profile = dark_run_profile_for_region(&buf, width, height, &region);
+        let split = split_dark_region_by_profile(&region, &profile);
+        assert_eq!(split.len(), 1);
+    }
 }
