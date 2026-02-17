@@ -46,6 +46,7 @@ struct BenchmarkSummary {
 struct DatasetResult {
     name: String,
     summary: BenchmarkSummary,
+    visual_summary: VisualSummary,
     targets: Vec<RankedTarget>,
 }
 
@@ -54,6 +55,7 @@ struct AccuracyBenchmark {
     definitions: MetricDefinitions,
     datasets: Vec<DatasetResult>,
     overall: BenchmarkSummary,
+    overall_visual: VisualSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +68,44 @@ struct MetricDefinitions {
     mrr: &'static str,
     mean_rank_found: &'static str,
     best_rank: &'static str,
+    visual_rows_total: &'static str,
+    visual_rows_with_top_guess: &'static str,
+    visual_rows_scored: &'static str,
+    visual_rows_dropped: &'static str,
+    visual_mean_abs_diff: &'static str,
+    visual_median_abs_diff: &'static str,
+    visual_p90_abs_diff: &'static str,
+    visual_mean_changed_pixel_ratio: &'static str,
+    visual_mean_compared_pixels: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VisualSummary {
+    rows_total: usize,
+    rows_with_top_guess: usize,
+    rows_scored: usize,
+    rows_dropped: usize,
+    mean_abs_diff: Option<f64>,
+    median_abs_diff: Option<f64>,
+    p90_abs_diff: Option<f64>,
+    mean_changed_pixel_ratio: Option<f64>,
+    mean_compared_pixels: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VisualAccumulator {
+    rows_total: usize,
+    rows_with_top_guess: usize,
+    rows_dropped: usize,
+    abs_diff: Vec<f64>,
+    changed_ratio: Vec<f64>,
+    compared_pixels: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluatedDataset {
+    dataset: DatasetResult,
+    visual_accumulator: VisualAccumulator,
 }
 
 fn parse_out_path() -> Result<PathBuf, String> {
@@ -101,6 +141,10 @@ fn benchmark_config() -> UnredactServiceConfig {
             max_dictionary: 5_000,
             tol_pt: 100.0,
             max_nodes: 200_000,
+            visual_score: true,
+            visual_score_dpi: 200.0_f32,
+            visual_min_ink_pixels: 64_u32,
+            visual_drop_threshold: None,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),
@@ -202,6 +246,82 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> BenchmarkSummary {
     }
 }
 
+fn has_top_guess(guess: &RedactionGuess) -> bool {
+    !guess.exact_matches.is_empty() || !guess.candidates.is_empty()
+}
+
+fn percentile_sorted(values: &[f64], q: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let quantile = q.clamp(0.0_f64, 1.0_f64);
+    let idx = ((values.len().saturating_sub(1) as f64) * quantile).round() as usize;
+    values.get(idx).copied()
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn visual_accumulator_from_guesses(guesses: &[RedactionGuess]) -> VisualAccumulator {
+    let mut acc = VisualAccumulator {
+        rows_total: guesses.len(),
+        ..VisualAccumulator::default()
+    };
+    for guess in guesses {
+        if has_top_guess(guess) {
+            acc.rows_with_top_guess += 1;
+        }
+        if guess.visual_dropped {
+            acc.rows_dropped += 1;
+        }
+        if let Some(value) = guess.visual_mean_abs_diff {
+            acc.abs_diff.push(value as f64);
+        }
+        if let Some(value) = guess.visual_changed_pixel_ratio {
+            acc.changed_ratio.push(value as f64);
+        }
+        if let Some(value) = guess.visual_compared_pixels {
+            acc.compared_pixels.push(value as f64);
+        }
+    }
+    acc
+}
+
+fn summarize_visual_accumulator(mut acc: VisualAccumulator) -> VisualSummary {
+    acc.abs_diff
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    VisualSummary {
+        rows_total: acc.rows_total,
+        rows_with_top_guess: acc.rows_with_top_guess,
+        rows_scored: acc.abs_diff.len(),
+        rows_dropped: acc.rows_dropped,
+        mean_abs_diff: mean(&acc.abs_diff),
+        median_abs_diff: percentile_sorted(&acc.abs_diff, 0.5_f64),
+        p90_abs_diff: percentile_sorted(&acc.abs_diff, 0.9_f64),
+        mean_changed_pixel_ratio: mean(&acc.changed_ratio),
+        mean_compared_pixels: mean(&acc.compared_pixels),
+    }
+}
+
+fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumulator {
+    let mut merged = VisualAccumulator::default();
+    for acc in accumulators {
+        merged.rows_total += acc.rows_total;
+        merged.rows_with_top_guess += acc.rows_with_top_guess;
+        merged.rows_dropped += acc.rows_dropped;
+        merged.abs_diff.extend_from_slice(&acc.abs_diff);
+        merged.changed_ratio.extend_from_slice(&acc.changed_ratio);
+        merged
+            .compared_pixels
+            .extend_from_slice(&acc.compared_pixels);
+    }
+    merged
+}
+
 fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
     let mut lines = targets
         .iter()
@@ -230,7 +350,7 @@ fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
         .map_err(|error| format!("failed to write dictionary {}: {error}", path.display()))
 }
 
-fn evaluate_efta00101126(root: &Path) -> Result<DatasetResult, String> {
+fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
     let input = Path::new("test_data/EFTA00101126.pdf");
     if !input.exists() {
         return Err(format!("missing dataset input {}", input.display()));
@@ -272,14 +392,20 @@ fn evaluate_efta00101126(root: &Path) -> Result<DatasetResult, String> {
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    Ok(DatasetResult {
-        name: "EFTA00101126".to_owned(),
-        summary: summarize_ranks(&ranks),
-        targets,
+    let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    Ok(EvaluatedDataset {
+        dataset: DatasetResult {
+            name: "EFTA00101126".to_owned(),
+            summary: summarize_ranks(&ranks),
+            visual_summary,
+            targets,
+        },
+        visual_accumulator,
     })
 }
 
-fn evaluate_efta00038617(root: &Path) -> Result<DatasetResult, String> {
+fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
     let input = Path::new("test_data/EFTA00038617.pdf");
     if !input.exists() {
         return Err(format!("missing dataset input {}", input.display()));
@@ -312,10 +438,16 @@ fn evaluate_efta00038617(root: &Path) -> Result<DatasetResult, String> {
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    Ok(DatasetResult {
-        name: "EFTA00038617".to_owned(),
-        summary: summarize_ranks(&ranks),
-        targets,
+    let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    Ok(EvaluatedDataset {
+        dataset: DatasetResult {
+            name: "EFTA00038617".to_owned(),
+            summary: summarize_ranks(&ranks),
+            visual_summary,
+            targets,
+        },
+        visual_accumulator,
     })
 }
 
@@ -335,6 +467,36 @@ fn print_summary(label: &str, summary: &BenchmarkSummary) {
     );
 }
 
+fn print_visual_summary(label: &str, summary: &VisualSummary) {
+    println!(
+        "{label:16} rows={:>3} top={:>3} scored={:>3} dropped={:>3} mean_abs_diff={} median_abs_diff={} p90_abs_diff={} mean_changed={} mean_pixels={}",
+        summary.rows_total,
+        summary.rows_with_top_guess,
+        summary.rows_scored,
+        summary.rows_dropped,
+        summary
+            .mean_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .median_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .p90_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .mean_changed_pixel_ratio
+            .map(|value| format!("{:.2}%", value * 100.0_f64))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .mean_compared_pixels
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+}
+
 fn metric_definitions() -> MetricDefinitions {
     MetricDefinitions {
         evaluated_items: "Number of target strings evaluated in this dataset.",
@@ -347,6 +509,23 @@ fn metric_definitions() -> MetricDefinitions {
         mean_rank_found: "Average rank among found targets only. Lower is better.",
         best_rank:
             "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
+        visual_rows_total: "Total redaction rows in guesses for the dataset.",
+        visual_rows_with_top_guess:
+            "Rows where a top guess exists (either first exact_match or first candidate).",
+        visual_rows_scored:
+            "Rows with computed visual score (visual_mean_abs_diff present).",
+        visual_rows_dropped:
+            "Rows removed by visual thresholding (visual_dropped=true).",
+        visual_mean_abs_diff:
+            "Mean absolute grayscale delta in the non-redaction overlay window; lower is better.",
+        visual_median_abs_diff:
+            "Median of visual_mean_abs_diff across scored rows; lower is better.",
+        visual_p90_abs_diff:
+            "90th percentile of visual_mean_abs_diff across scored rows; lower is better.",
+        visual_mean_changed_pixel_ratio:
+            "Average fraction of significantly changed pixels in scored rows; lower is better.",
+        visual_mean_compared_pixels:
+            "Average non-background pixel count used per scored row.",
     }
 }
 
@@ -390,12 +569,22 @@ fn main() {
         }
     };
 
-    let datasets = vec![efta00101126, efta00038617];
+    let evaluated = [efta00101126, efta00038617];
+    let datasets = evaluated
+        .iter()
+        .map(|item| item.dataset.clone())
+        .collect::<Vec<_>>();
     let overall_ranks = datasets
         .iter()
         .flat_map(|dataset| dataset.targets.iter().map(|target| target.best_rank))
         .collect::<Vec<_>>();
     let overall = summarize_ranks(&overall_ranks);
+    let visual_accumulators = evaluated
+        .iter()
+        .map(|item| item.visual_accumulator.clone())
+        .collect::<Vec<_>>();
+    let overall_visual =
+        summarize_visual_accumulator(merge_visual_accumulators(&visual_accumulators));
     let definitions = metric_definitions();
 
     println!("Guess Accuracy Benchmark");
@@ -408,15 +597,42 @@ fn main() {
     println!("  mrr: {}", definitions.mrr);
     println!("  mean_rank_found: {}", definitions.mean_rank_found);
     println!("  best_rank: {}", definitions.best_rank);
+    println!("  visual_rows_total: {}", definitions.visual_rows_total);
+    println!(
+        "  visual_rows_with_top_guess: {}",
+        definitions.visual_rows_with_top_guess
+    );
+    println!("  visual_rows_scored: {}", definitions.visual_rows_scored);
+    println!("  visual_rows_dropped: {}", definitions.visual_rows_dropped);
+    println!(
+        "  visual_mean_abs_diff: {}",
+        definitions.visual_mean_abs_diff
+    );
+    println!(
+        "  visual_median_abs_diff: {}",
+        definitions.visual_median_abs_diff
+    );
+    println!("  visual_p90_abs_diff: {}", definitions.visual_p90_abs_diff);
+    println!(
+        "  visual_mean_changed_pixel_ratio: {}",
+        definitions.visual_mean_changed_pixel_ratio
+    );
+    println!(
+        "  visual_mean_compared_pixels: {}",
+        definitions.visual_mean_compared_pixels
+    );
     for dataset in &datasets {
         print_summary(&dataset.name, &dataset.summary);
+        print_visual_summary(&format!("{} visual", dataset.name), &dataset.visual_summary);
     }
     print_summary("OVERALL", &overall);
+    print_visual_summary("OVERALL visual", &overall_visual);
 
     let payload = AccuracyBenchmark {
         definitions,
         datasets,
         overall,
+        overall_visual,
     };
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {

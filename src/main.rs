@@ -47,6 +47,18 @@ struct Args {
     max_nodes: usize,
 
     #[arg(long, default_value_t = false)]
+    no_visual_score: bool,
+
+    #[arg(long, default_value_t = 200.0_f32)]
+    visual_score_dpi: f32,
+
+    #[arg(long, default_value_t = 64_u32)]
+    visual_min_ink_pixels: u32,
+
+    #[arg(long)]
+    visual_drop_threshold: Option<f32>,
+
+    #[arg(long, default_value_t = false)]
     visualize: bool,
 
     #[arg(long, default_value_t = 1.0)]
@@ -84,6 +96,22 @@ fn run() -> Result<(), String> {
     if args.max_nodes == 0 {
         return Err("max_nodes must be > 0".to_owned());
     }
+    if !args.visual_score_dpi.is_finite() || args.visual_score_dpi <= 0.0_f32 {
+        return Err(format!(
+            "visual_score_dpi must be finite and > 0, got {}",
+            args.visual_score_dpi
+        ));
+    }
+    if args.visual_min_ink_pixels == 0 {
+        return Err("visual_min_ink_pixels must be > 0".to_owned());
+    }
+    if let Some(threshold) = args.visual_drop_threshold {
+        if !threshold.is_finite() || threshold < 0.0_f32 {
+            return Err(format!(
+                "visual_drop_threshold must be finite and >= 0, got {threshold}"
+            ));
+        }
+    }
     if !args.visualize_border.is_finite() || args.visualize_border <= 0.0 {
         return Err("visualize_border must be finite and > 0".to_owned());
     }
@@ -101,6 +129,10 @@ fn run() -> Result<(), String> {
             max_dictionary: args.max_dictionary,
             tol_pt: args.tol_pt,
             max_nodes: args.max_nodes,
+            visual_score: !args.no_visual_score,
+            visual_score_dpi: args.visual_score_dpi,
+            visual_min_ink_pixels: args.visual_min_ink_pixels,
+            visual_drop_threshold: args.visual_drop_threshold,
         },
         visualize: args.visualize,
         visualizer: VisualizerConfig {

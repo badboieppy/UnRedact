@@ -9,6 +9,14 @@ pub struct GuessConfig {
     pub max_dictionary: usize,
     pub tol_pt: f64,
     pub max_nodes: usize,
+    #[serde(default = "default_visual_score_enabled")]
+    pub visual_score: bool,
+    #[serde(default = "default_visual_score_dpi")]
+    pub visual_score_dpi: f32,
+    #[serde(default = "default_visual_min_ink_pixels")]
+    pub visual_min_ink_pixels: u32,
+    #[serde(default)]
+    pub visual_drop_threshold: Option<f32>,
 }
 
 impl Default for GuessConfig {
@@ -20,6 +28,10 @@ impl Default for GuessConfig {
             max_dictionary: 2000,
             tol_pt: 4.0,
             max_nodes: 50_000,
+            visual_score: default_visual_score_enabled(),
+            visual_score_dpi: default_visual_score_dpi(),
+            visual_min_ink_pixels: default_visual_min_ink_pixels(),
+            visual_drop_threshold: None,
         }
     }
 }
@@ -39,6 +51,16 @@ pub struct RedactionGuess {
     pub candidates: Vec<GuessCandidate>,
     pub exact_matches: Vec<String>,
     pub context: GuessContext,
+    #[serde(default)]
+    pub visual_compared_pixels: Option<u32>,
+    #[serde(default)]
+    pub visual_mean_abs_diff: Option<f32>,
+    #[serde(default)]
+    pub visual_changed_pixel_ratio: Option<f32>,
+    #[serde(default)]
+    pub visual_reason: Option<String>,
+    #[serde(default)]
+    pub visual_dropped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,4 +99,16 @@ pub struct GuessContext {
         default
     )]
     pub has_anchor_pair: bool,
+}
+
+fn default_visual_score_enabled() -> bool {
+    true
+}
+
+fn default_visual_score_dpi() -> f32 {
+    200.0_f32
+}
+
+fn default_visual_min_ink_pixels() -> u32 {
+    64_u32
 }

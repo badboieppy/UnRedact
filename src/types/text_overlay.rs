@@ -2,6 +2,7 @@ use crate::types::redaction_types::Rect;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextOverlay {
+    pub redaction_index: Option<usize>,
     pub page_index: u32,
     pub text: String,
     pub font_key: String,

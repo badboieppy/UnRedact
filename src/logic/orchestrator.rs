@@ -137,6 +137,7 @@ mod guess_impl {
     use std::sync::OnceLock;
 
     use crate::data::{DictionaryDataSource, FontRunDataSource, ReportDataSource};
+    use crate::logic::visual_guess_score::{apply_visual_scores, VisualGuessScoreConfig};
     use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
     use crate::types::guess_types::{
         GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
@@ -167,6 +168,7 @@ mod guess_impl {
         let mut diagnostics = reports.diagnostics;
         diagnostics.extend(dictionary.diagnostics);
         let inputs = BuildReportWithFontsInputs {
+            pdf_path: req.pdf_path,
             redactions_path: req.redactions_path,
             fonts_path: req.fonts_path,
             redactions: reports.redactions,
@@ -179,6 +181,7 @@ mod guess_impl {
     }
 
     struct BuildReportWithFontsInputs<'a> {
+        pdf_path: &'a Path,
         redactions_path: &'a Path,
         fonts_path: &'a Path,
         redactions: RedactionReport,
@@ -192,7 +195,7 @@ mod guess_impl {
         inputs: BuildReportWithFontsInputs<'_>,
         cfg: &GuessConfig,
     ) -> GuessReport {
-        let (guesses, guess_diagnostics) = build_anchor_validated_guesses(
+        let (mut guesses, guess_diagnostics) = build_anchor_validated_guesses(
             &inputs.redactions.redactions,
             &inputs.dictionary,
             &inputs.font_runs,
@@ -201,6 +204,26 @@ mod guess_impl {
         );
         let mut all_diagnostics = inputs.diagnostics;
         all_diagnostics.extend(guess_diagnostics);
+        if cfg.visual_score {
+            let visual_cfg = VisualGuessScoreConfig {
+                enabled: cfg.visual_score,
+                dpi: cfg.visual_score_dpi,
+                min_ink_pixels: cfg.visual_min_ink_pixels,
+                drop_threshold: cfg.visual_drop_threshold,
+            };
+            match apply_visual_scores(
+                inputs.pdf_path,
+                &inputs.redactions,
+                &inputs.font_runs,
+                &mut guesses,
+                visual_cfg,
+            ) {
+                Ok(visual_diagnostics) => all_diagnostics.extend(visual_diagnostics),
+                Err(error) => all_diagnostics.push(format!("visual_score_failed:{error}")),
+            }
+        } else {
+            all_diagnostics.push("visual_score=disabled".to_owned());
+        }
         GuessReport {
             input_redactions: inputs.redactions_path.to_string_lossy().to_string(),
             input_fonts: inputs.fonts_path.to_string_lossy().to_string(),
@@ -401,6 +424,11 @@ mod guess_impl {
                         anchor_row_bias_pt: None,
                         has_anchor_pair: false,
                     },
+                    visual_compared_pixels: None,
+                    visual_mean_abs_diff: None,
+                    visual_changed_pixel_ratio: None,
+                    visual_reason: None,
+                    visual_dropped: false,
                 });
                 continue;
             };
@@ -777,6 +805,11 @@ mod guess_impl {
                     anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
                     has_anchor_pair: true,
                 },
+                visual_compared_pixels: None,
+                visual_mean_abs_diff: None,
+                visual_changed_pixel_ratio: None,
+                visual_reason: None,
+                visual_dropped: false,
             };
         };
 
@@ -889,6 +922,11 @@ mod guess_impl {
                 anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
                 has_anchor_pair: true,
             },
+            visual_compared_pixels: None,
+            visual_mean_abs_diff: None,
+            visual_changed_pixel_ratio: None,
+            visual_reason: None,
+            visual_dropped: false,
         }
     }
 

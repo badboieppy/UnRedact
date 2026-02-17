@@ -533,6 +533,10 @@ fn additional_epstein_files_run_without_file_specific_tuning() {
             max_dictionary: 5_000,
             tol_pt: 100.0,
             max_nodes: 200_000,
+            visual_score: true,
+            visual_score_dpi: 200.0_f32,
+            visual_min_ink_pixels: 64_u32,
+            visual_drop_threshold: None,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),
@@ -662,6 +666,10 @@ fn synthetic_redactions_are_guessed_from_noisy_dictionary() {
         max_dictionary: 5_000,
         tol_pt: 100.0,
         max_nodes: 200_000,
+        visual_score: true,
+        visual_score_dpi: 200.0_f32,
+        visual_min_ink_pixels: 64_u32,
+        visual_drop_threshold: None,
     };
     let guess_data = GuessValidationData::new();
     let dictionary_data = DictionaryData::new();

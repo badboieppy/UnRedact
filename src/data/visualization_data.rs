@@ -190,6 +190,7 @@ fn build_overlays(
             );
             let layout = raster_overlay_layout(redaction.bbox, fitted_font_size_pt, guess_width);
             out.push(TextOverlay {
+                redaction_index: Some(idx),
                 page_index: redaction.page_index,
                 text: selected.trim().to_owned(),
                 font_key,
@@ -294,6 +295,7 @@ fn build_overlays(
                         y1.max(redaction.bbox.y1),
                     );
                     out.push(TextOverlay {
+                        redaction_index: Some(idx),
                         page_index: redaction.page_index,
                         text: context_left.to_owned(),
                         font_key: font_key.to_owned(),
@@ -304,6 +306,7 @@ fn build_overlays(
                         bbox: overlay_bbox,
                     });
                     out.push(TextOverlay {
+                        redaction_index: Some(idx),
                         page_index: redaction.page_index,
                         text: selected.trim().to_owned(),
                         font_key: font_key.to_owned(),
@@ -314,6 +317,7 @@ fn build_overlays(
                         bbox: overlay_bbox,
                     });
                     out.push(TextOverlay {
+                        redaction_index: Some(idx),
                         page_index: redaction.page_index,
                         text: context_right.to_owned(),
                         font_key: font_key.to_owned(),
@@ -424,6 +428,7 @@ fn build_overlays(
         );
 
         out.push(TextOverlay {
+            redaction_index: Some(idx),
             page_index: redaction.page_index,
             text: left_text.to_owned(),
             font_key: left_run.font_key.clone(),
@@ -434,6 +439,7 @@ fn build_overlays(
             bbox: overlay_bbox,
         });
         out.push(TextOverlay {
+            redaction_index: Some(idx),
             page_index: redaction.page_index,
             text: selected.trim().to_owned(),
             font_key: guess_font.font_key.clone(),
@@ -444,6 +450,7 @@ fn build_overlays(
             bbox: overlay_bbox,
         });
         out.push(TextOverlay {
+            redaction_index: Some(idx),
             page_index: redaction.page_index,
             text: right_text.to_owned(),
             font_key: right_run.font_key.clone(),

@@ -7,7 +7,16 @@
     "recall_at_20": "Fraction of targets with best_rank <= 20. Higher is better.",
     "mrr": "Mean reciprocal rank across all targets: avg(1/rank), with 0 for not-found.",
     "mean_rank_found": "Average rank among found targets only. Lower is better.",
-    "best_rank": "Per-target best observed rank (1 is top candidate). Null means the target was not found."
+    "best_rank": "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
+    "visual_rows_total": "Total redaction rows in guesses for the dataset.",
+    "visual_rows_with_top_guess": "Rows where a top guess exists (either first exact_match or first candidate).",
+    "visual_rows_scored": "Rows with computed visual score (visual_mean_abs_diff present).",
+    "visual_rows_dropped": "Rows removed by visual thresholding (visual_dropped=true).",
+    "visual_mean_abs_diff": "Mean absolute grayscale delta in the non-redaction overlay window; lower is better.",
+    "visual_median_abs_diff": "Median of visual_mean_abs_diff across scored rows; lower is better.",
+    "visual_p90_abs_diff": "90th percentile of visual_mean_abs_diff across scored rows; lower is better.",
+    "visual_mean_changed_pixel_ratio": "Average fraction of significantly changed pixels in scored rows; lower is better.",
+    "visual_mean_compared_pixels": "Average non-background pixel count used per scored row."
   },
   "datasets": [
     {
@@ -20,6 +29,17 @@
         "recall_at_20": 1.0,
         "mrr": 1.0,
         "mean_rank_found": 1.0
+      },
+      "visual_summary": {
+        "rows_total": 17,
+        "rows_with_top_guess": 13,
+        "rows_scored": 13,
+        "rows_dropped": 0,
+        "mean_abs_diff": 0.21799979645472306,
+        "median_abs_diff": 0.12927643954753876,
+        "p90_abs_diff": 0.37094923853874207,
+        "mean_changed_pixel_ratio": 0.3501724297037491,
+        "mean_compared_pixels": 415.0769230769231
       },
       "targets": [
         {
@@ -44,6 +64,17 @@
         "recall_at_20": 0.4,
         "mrr": 0.03846838701548008,
         "mean_rank_found": 69.9
+      },
+      "visual_summary": {
+        "rows_total": 32,
+        "rows_with_top_guess": 28,
+        "rows_scored": 28,
+        "rows_dropped": 0,
+        "mean_abs_diff": 0.139886920007744,
+        "median_abs_diff": 0.06929800659418106,
+        "p90_abs_diff": 0.40058231353759766,
+        "mean_changed_pixel_ratio": 0.20026776427403092,
+        "mean_compared_pixels": 797.5357142857143
       },
       "targets": [
         {
@@ -107,5 +138,16 @@
     "recall_at_20": 0.5,
     "mrr": 0.1987236558462334,
     "mean_rank_found": 58.416666666666664
+  },
+  "overall_visual": {
+    "rows_total": 49,
+    "rows_with_top_guess": 41,
+    "rows_scored": 41,
+    "rows_dropped": 0,
+    "mean_abs_diff": 0.16465441741776177,
+    "median_abs_diff": 0.1051204651594162,
+    "p90_abs_diff": 0.40058231353759766,
+    "mean_changed_pixel_ratio": 0.24779851184930743,
+    "mean_compared_pixels": 676.2682926829268
   }
 }
