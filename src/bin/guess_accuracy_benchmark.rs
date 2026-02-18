@@ -1,4 +1,6 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use unredact::service::unredact_entry::{run_from_paths, UnredactServiceConfig};
@@ -47,6 +49,7 @@ struct DatasetResult {
     name: String,
     summary: BenchmarkSummary,
     visual_summary: VisualSummary,
+    timing_summary: TimingSummary,
     targets: Vec<RankedTarget>,
 }
 
@@ -56,6 +59,8 @@ struct AccuracyBenchmark {
     datasets: Vec<DatasetResult>,
     overall: BenchmarkSummary,
     overall_visual: VisualSummary,
+    overall_timing: TimingSummary,
+    consistency: ConsistencySummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +82,19 @@ struct MetricDefinitions {
     visual_p90_abs_diff: &'static str,
     visual_mean_changed_pixel_ratio: &'static str,
     visual_mean_compared_pixels: &'static str,
+    timing_redactions_ms: &'static str,
+    timing_fonts_ms: &'static str,
+    timing_guess_ms: &'static str,
+    timing_visualize_ms: &'static str,
+    timing_orchestrator_total_ms: &'static str,
+    consistency_repeats: &'static str,
+    consistency_all_hashes_identical: &'static str,
+    consistency_hash_match_ratio: &'static str,
+    consistency_top1_agreement_ratio: &'static str,
+    consistency_top5_jaccard_mean: &'static str,
+    consistency_mean_rank_stddev: &'static str,
+    consistency_unstable_rows_count: &'static str,
+    consistency_unstable_rows_ratio: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +110,15 @@ struct VisualSummary {
     mean_compared_pixels: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct TimingSummary {
+    redactions_ms: Option<f64>,
+    fonts_ms: Option<f64>,
+    guess_ms: Option<f64>,
+    visualize_ms: Option<f64>,
+    orchestrator_total_ms: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct VisualAccumulator {
     rows_total: usize,
@@ -102,14 +129,82 @@ struct VisualAccumulator {
     compared_pixels: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TimingAccumulator {
+    redactions_ms: Vec<f64>,
+    fonts_ms: Vec<f64>,
+    guess_ms: Vec<f64>,
+    visualize_ms: Vec<f64>,
+    orchestrator_total_ms: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DatasetConsistencySummary {
+    dataset: String,
+    repeats: usize,
+    all_hashes_identical: bool,
+    hash_match_ratio: f64,
+    top1_agreement_ratio: f64,
+    top5_jaccard_mean: f64,
+    mean_rank_stddev: Option<f64>,
+    unstable_rows_count: usize,
+    unstable_rows_ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConsistencySummary {
+    repeats: usize,
+    all_hashes_identical: bool,
+    hash_match_ratio: f64,
+    top1_agreement_ratio: f64,
+    top5_jaccard_mean: f64,
+    mean_rank_stddev: Option<f64>,
+    unstable_rows_count: usize,
+    unstable_rows_ratio: f64,
+    run_hashes: Vec<String>,
+    per_dataset: Vec<DatasetConsistencySummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RowSnapshot {
+    key: String,
+    top1: Option<String>,
+    top5: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DatasetRunSnapshot {
+    name: String,
+    dataset_hash: String,
+    rows: Vec<RowSnapshot>,
+    target_ranks: Vec<(String, Option<usize>)>,
+}
+
+#[derive(Debug, Clone)]
+struct BenchmarkRunSnapshot {
+    hash: String,
+    dataset_runs: Vec<DatasetRunSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 struct EvaluatedDataset {
     dataset: DatasetResult,
     visual_accumulator: VisualAccumulator,
+    timing_accumulator: TimingAccumulator,
+    run_snapshot: DatasetRunSnapshot,
 }
 
-fn parse_out_path() -> Result<PathBuf, String> {
+#[derive(Debug, Clone)]
+struct CliOptions {
+    out_path: PathBuf,
+    repeats: usize,
+    consistency_out: Option<PathBuf>,
+}
+
+fn parse_options() -> Result<CliOptions, String> {
     let mut out_path = PathBuf::from("benchmark/guess_accuracy.json");
+    let mut repeats = 1_usize;
+    let mut consistency_out = None::<PathBuf>;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -119,14 +214,38 @@ fn parse_out_path() -> Result<PathBuf, String> {
                 };
                 out_path = PathBuf::from(path_value);
             }
+            "--repeats" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value for --repeats".to_owned());
+                };
+                repeats = value
+                    .parse::<usize>()
+                    .map_err(|error| format!("invalid --repeats value '{value}': {error}"))?;
+                if repeats == 0 {
+                    return Err("--repeats must be > 0".to_owned());
+                }
+            }
+            "--determinism" => repeats = 3_usize,
+            "--consistency-out" => {
+                let Some(path_value) = args.next() else {
+                    return Err("missing value for --consistency-out".to_owned());
+                };
+                consistency_out = Some(PathBuf::from(path_value));
+            }
             "--help" | "-h" => {
-                println!("Usage: cargo run --bin guess_accuracy_benchmark -- [--out <path>]");
+                println!(
+                    "Usage: cargo run --bin guess_accuracy_benchmark -- [--out <path>] [--repeats <n>] [--determinism] [--consistency-out <path>]"
+                );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
-    Ok(out_path)
+    Ok(CliOptions {
+        out_path,
+        repeats,
+        consistency_out,
+    })
 }
 
 fn benchmark_config() -> UnredactServiceConfig {
@@ -184,6 +303,17 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
         }
     }
     out
+}
+
+fn top1_guess_text(guess: &RedactionGuess) -> Option<String> {
+    ordered_guess_texts_upper(guess).into_iter().next()
+}
+
+fn top5_guess_texts(guess: &RedactionGuess) -> Vec<String> {
+    ordered_guess_texts_upper(guess)
+        .into_iter()
+        .take(5)
+        .collect::<Vec<_>>()
 }
 
 fn rank_in_guess(guess: &RedactionGuess, target: &str) -> Option<usize> {
@@ -266,6 +396,22 @@ fn mean(values: &[f64]) -> Option<f64> {
     Some(values.iter().sum::<f64>() / values.len() as f64)
 }
 
+fn stddev(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let center = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let delta = *value - center;
+            delta * delta
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    Some(variance.sqrt())
+}
+
 fn visual_accumulator_from_guesses(guesses: &[RedactionGuess]) -> VisualAccumulator {
     let mut acc = VisualAccumulator {
         rows_total: guesses.len(),
@@ -322,6 +468,60 @@ fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumu
     merged
 }
 
+fn timing_accumulator_from_diagnostics(diagnostics: &[String]) -> TimingAccumulator {
+    let mut acc = TimingAccumulator::default();
+    for line in diagnostics {
+        if !line.starts_with("timing_ms stage=") {
+            continue;
+        }
+        let mut stage = None::<String>;
+        let mut value = None::<f64>;
+        for token in line.split_whitespace() {
+            if let Some(rest) = token.strip_prefix("stage=") {
+                stage = Some(rest.to_owned());
+            } else if let Some(rest) = token.strip_prefix("value=") {
+                value = rest.parse::<f64>().ok();
+            }
+        }
+        let (Some(stage), Some(value)) = (stage, value) else {
+            continue;
+        };
+        match stage.as_str() {
+            "redactions" => acc.redactions_ms.push(value),
+            "fonts" => acc.fonts_ms.push(value),
+            "guess" => acc.guess_ms.push(value),
+            "visualize" => acc.visualize_ms.push(value),
+            "orchestrator_total" => acc.orchestrator_total_ms.push(value),
+            _ => {}
+        }
+    }
+    acc
+}
+
+fn summarize_timing_accumulator(acc: &TimingAccumulator) -> TimingSummary {
+    TimingSummary {
+        redactions_ms: mean(&acc.redactions_ms),
+        fonts_ms: mean(&acc.fonts_ms),
+        guess_ms: mean(&acc.guess_ms),
+        visualize_ms: mean(&acc.visualize_ms),
+        orchestrator_total_ms: mean(&acc.orchestrator_total_ms),
+    }
+}
+
+fn merge_timing_accumulators(accumulators: &[TimingAccumulator]) -> TimingAccumulator {
+    let mut merged = TimingAccumulator::default();
+    for acc in accumulators {
+        merged.redactions_ms.extend_from_slice(&acc.redactions_ms);
+        merged.fonts_ms.extend_from_slice(&acc.fonts_ms);
+        merged.guess_ms.extend_from_slice(&acc.guess_ms);
+        merged.visualize_ms.extend_from_slice(&acc.visualize_ms);
+        merged
+            .orchestrator_total_ms
+            .extend_from_slice(&acc.orchestrator_total_ms);
+    }
+    merged
+}
+
 fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
     let mut lines = targets
         .iter()
@@ -348,6 +548,130 @@ fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
     lines.extend(NOISE_WORDS.into_iter().map(str::to_owned));
     std::fs::write(path, lines.join("\n"))
         .map_err(|error| format!("failed to write dictionary {}: {error}", path.display()))
+}
+
+fn hash_json<T: Serialize>(value: &T) -> Result<String, String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = hasher.finalize();
+    Ok(format!("{hash:x}"))
+}
+
+fn build_row_snapshots(dataset: &str, guesses: &[RedactionGuess]) -> Vec<RowSnapshot> {
+    guesses
+        .iter()
+        .enumerate()
+        .map(|(index, guess)| RowSnapshot {
+            key: format!(
+                "{}:{}:{}:{:.2}:{:.2}:{:.2}:{:.2}",
+                dataset,
+                index,
+                guess.page_index,
+                guess.bbox.x0,
+                guess.bbox.y0,
+                guess.bbox.x1,
+                guess.bbox.y1
+            ),
+            top1: top1_guess_text(guess),
+            top5: top5_guess_texts(guess),
+        })
+        .collect::<Vec<_>>()
+}
+
+fn jaccard(left: &[String], right: &[String]) -> f64 {
+    let left_set = left.iter().cloned().collect::<BTreeSet<_>>();
+    let right_set = right.iter().cloned().collect::<BTreeSet<_>>();
+    if left_set.is_empty() && right_set.is_empty() {
+        return 1.0_f64;
+    }
+    let inter = left_set.intersection(&right_set).count() as f64;
+    let union = left_set.union(&right_set).count() as f64;
+    if union <= 0.0_f64 {
+        0.0_f64
+    } else {
+        inter / union
+    }
+}
+
+fn compute_row_consistency(row_sets: &[Vec<RowSnapshot>]) -> (f64, f64, usize, f64) {
+    if row_sets.is_empty() || row_sets[0].is_empty() {
+        return (1.0_f64, 1.0_f64, 0_usize, 0.0_f64);
+    }
+    let base = &row_sets[0];
+    let maps = row_sets
+        .iter()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| (row.key.clone(), row.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut top1_same = 0_usize;
+    let mut unstable = 0_usize;
+    let mut jaccards = Vec::<f64>::new();
+
+    for row in base {
+        let aligned = maps
+            .iter()
+            .map(|map| map.get(&row.key).cloned())
+            .collect::<Vec<_>>();
+        let first_top1 = aligned
+            .first()
+            .and_then(|value| value.as_ref())
+            .and_then(|row| row.top1.clone());
+        let same_top1 = aligned
+            .iter()
+            .all(|entry| entry.as_ref().and_then(|row| row.top1.clone()) == first_top1);
+        if same_top1 {
+            top1_same += 1;
+        } else {
+            unstable += 1;
+        }
+        for left_idx in 0..aligned.len() {
+            for right_idx in (left_idx + 1)..aligned.len() {
+                let left = aligned[left_idx]
+                    .as_ref()
+                    .map(|value| value.top5.clone())
+                    .unwrap_or_default();
+                let right = aligned[right_idx]
+                    .as_ref()
+                    .map(|value| value.top5.clone())
+                    .unwrap_or_default();
+                jaccards.push(jaccard(&left, &right));
+            }
+        }
+    }
+
+    let row_count = base.len() as f64;
+    (
+        top1_same as f64 / row_count,
+        mean(&jaccards).unwrap_or(1.0_f64),
+        unstable,
+        unstable as f64 / row_count,
+    )
+}
+
+fn compute_rank_stddev(rank_sets: &[Vec<(String, Option<usize>)>]) -> Option<f64> {
+    if rank_sets.is_empty() || rank_sets[0].is_empty() {
+        return None;
+    }
+    let maps = rank_sets
+        .iter()
+        .map(|values| values.iter().cloned().collect::<BTreeMap<_, _>>())
+        .collect::<Vec<_>>();
+    let mut deviations = Vec::<f64>::new();
+    for (label, _) in &rank_sets[0] {
+        let series = maps
+            .iter()
+            .map(|map| map.get(label).copied().flatten().unwrap_or(10_000_usize) as f64)
+            .collect::<Vec<_>>();
+        if let Some(value) = stddev(&series) {
+            deviations.push(value);
+        }
+    }
+    mean(&deviations)
 }
 
 fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
@@ -393,15 +717,35 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    let dataset = DatasetResult {
+        name: "EFTA00101126".to_owned(),
+        summary: summarize_ranks(&ranks),
+        visual_summary,
+        timing_summary,
+        targets: targets.clone(),
+    };
+    let run_snapshot = DatasetRunSnapshot {
+        name: "EFTA00101126".to_owned(),
+        dataset_hash: hash_json(&(
+            dataset.name.clone(),
+            dataset.summary.clone(),
+            dataset.visual_summary.clone(),
+            dataset.targets.clone(),
+        ))?,
+        rows: build_row_snapshots("EFTA00101126", &report.guesses),
+        target_ranks: targets
+            .iter()
+            .map(|target| (target.label.clone(), target.best_rank))
+            .collect::<Vec<_>>(),
+    };
     Ok(EvaluatedDataset {
-        dataset: DatasetResult {
-            name: "EFTA00101126".to_owned(),
-            summary: summarize_ranks(&ranks),
-            visual_summary,
-            targets,
-        },
+        dataset,
         visual_accumulator,
+        timing_accumulator,
+        run_snapshot,
     })
 }
 
@@ -439,15 +783,35 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    let dataset = DatasetResult {
+        name: "EFTA00038617".to_owned(),
+        summary: summarize_ranks(&ranks),
+        visual_summary,
+        timing_summary,
+        targets: targets.clone(),
+    };
+    let run_snapshot = DatasetRunSnapshot {
+        name: "EFTA00038617".to_owned(),
+        dataset_hash: hash_json(&(
+            dataset.name.clone(),
+            dataset.summary.clone(),
+            dataset.visual_summary.clone(),
+            dataset.targets.clone(),
+        ))?,
+        rows: build_row_snapshots("EFTA00038617", &report.guesses),
+        target_ranks: targets
+            .iter()
+            .map(|target| (target.label.clone(), target.best_rank))
+            .collect::<Vec<_>>(),
+    };
     Ok(EvaluatedDataset {
-        dataset: DatasetResult {
-            name: "EFTA00038617".to_owned(),
-            summary: summarize_ranks(&ranks),
-            visual_summary,
-            targets,
-        },
+        dataset,
         visual_accumulator,
+        timing_accumulator,
+        run_snapshot,
     })
 }
 
@@ -497,6 +861,32 @@ fn print_visual_summary(label: &str, summary: &VisualSummary) {
     );
 }
 
+fn print_timing_summary(label: &str, summary: &TimingSummary) {
+    println!(
+        "{label:16} redactions_ms={} fonts_ms={} guess_ms={} visualize_ms={} total_ms={}",
+        summary
+            .redactions_ms
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .fonts_ms
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .guess_ms
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .visualize_ms
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .orchestrator_total_ms
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+}
+
 fn metric_definitions() -> MetricDefinitions {
     MetricDefinitions {
         evaluated_items: "Number of target strings evaluated in this dataset.",
@@ -526,115 +916,402 @@ fn metric_definitions() -> MetricDefinitions {
             "Average fraction of significantly changed pixels in scored rows; lower is better.",
         visual_mean_compared_pixels:
             "Average non-background pixel count used per scored row.",
+        timing_redactions_ms: "Average redaction stage runtime in milliseconds.",
+        timing_fonts_ms: "Average font extraction stage runtime in milliseconds.",
+        timing_guess_ms: "Average guessing stage runtime in milliseconds.",
+        timing_visualize_ms: "Average visualization stage runtime in milliseconds.",
+        timing_orchestrator_total_ms: "Average total orchestrator runtime in milliseconds.",
+        consistency_repeats: "Number of repeated benchmark runs with the same code/config.",
+        consistency_all_hashes_identical:
+            "True when every repeated run produced the same benchmark hash.",
+        consistency_hash_match_ratio: "Fraction of runs whose hash matches run #1.",
+        consistency_top1_agreement_ratio:
+            "Fraction of rows whose top1 guess is identical across repeated runs.",
+        consistency_top5_jaccard_mean:
+            "Mean pairwise Jaccard similarity of top5 guess sets across repeated runs.",
+        consistency_mean_rank_stddev:
+            "Average per-target standard deviation of rank across repeats.",
+        consistency_unstable_rows_count:
+            "Number of rows that changed top1 guess across repeated runs.",
+        consistency_unstable_rows_ratio:
+            "Unstable row count divided by total compared rows.",
+    }
+}
+
+fn compute_consistency(run_snapshots: &[BenchmarkRunSnapshot]) -> ConsistencySummary {
+    if run_snapshots.is_empty() {
+        return ConsistencySummary {
+            repeats: 0,
+            all_hashes_identical: true,
+            hash_match_ratio: 1.0_f64,
+            top1_agreement_ratio: 1.0_f64,
+            top5_jaccard_mean: 1.0_f64,
+            mean_rank_stddev: None,
+            unstable_rows_count: 0,
+            unstable_rows_ratio: 0.0_f64,
+            run_hashes: Vec::new(),
+            per_dataset: Vec::new(),
+        };
+    }
+
+    let run_hashes = run_snapshots
+        .iter()
+        .map(|snapshot| snapshot.hash.clone())
+        .collect::<Vec<_>>();
+    let first_hash = run_hashes.first().cloned().unwrap_or_default();
+    let hash_matches = run_hashes
+        .iter()
+        .filter(|value| *value == &first_hash)
+        .count();
+    let repeats = run_snapshots.len();
+    let hash_match_ratio = hash_matches as f64 / repeats as f64;
+    let all_hashes_identical = hash_matches == repeats;
+
+    let dataset_names = run_snapshots
+        .iter()
+        .flat_map(|snapshot| {
+            snapshot
+                .dataset_runs
+                .iter()
+                .map(|dataset| dataset.name.clone())
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut per_dataset = Vec::<DatasetConsistencySummary>::new();
+    for dataset_name in dataset_names {
+        let dataset_runs = run_snapshots
+            .iter()
+            .map(|snapshot| {
+                snapshot
+                    .dataset_runs
+                    .iter()
+                    .find(|dataset| dataset.name == dataset_name)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let dataset_hashes = dataset_runs
+            .iter()
+            .map(|entry| entry.as_ref().map(|value| value.dataset_hash.clone()))
+            .collect::<Vec<_>>();
+        let dataset_first_hash = dataset_hashes.first().cloned().unwrap_or(None);
+        let dataset_hash_matches = dataset_hashes
+            .iter()
+            .filter(|value| **value == dataset_first_hash)
+            .count();
+        let dataset_rows = dataset_runs
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map(|value| value.rows.clone())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let (top1, top5, unstable_count, unstable_ratio) = compute_row_consistency(&dataset_rows);
+        let rank_sets = dataset_runs
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map(|value| value.target_ranks.clone())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        per_dataset.push(DatasetConsistencySummary {
+            dataset: dataset_name,
+            repeats,
+            all_hashes_identical: dataset_hash_matches == repeats,
+            hash_match_ratio: dataset_hash_matches as f64 / repeats as f64,
+            top1_agreement_ratio: top1,
+            top5_jaccard_mean: top5,
+            mean_rank_stddev: compute_rank_stddev(&rank_sets),
+            unstable_rows_count: unstable_count,
+            unstable_rows_ratio: unstable_ratio,
+        });
+    }
+
+    let overall_rows = run_snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .dataset_runs
+                .iter()
+                .flat_map(|dataset| {
+                    dataset.rows.iter().map(|row| RowSnapshot {
+                        key: format!("{}::{}", dataset.name, row.key),
+                        top1: row.top1.clone(),
+                        top5: row.top5.clone(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let (top1_agreement_ratio, top5_jaccard_mean, unstable_rows_count, unstable_rows_ratio) =
+        compute_row_consistency(&overall_rows);
+
+    let overall_ranks = run_snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .dataset_runs
+                .iter()
+                .flat_map(|dataset| {
+                    dataset
+                        .target_ranks
+                        .iter()
+                        .map(|(label, rank)| (format!("{}::{}", dataset.name, label), *rank))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    ConsistencySummary {
+        repeats,
+        all_hashes_identical,
+        hash_match_ratio,
+        top1_agreement_ratio,
+        top5_jaccard_mean,
+        mean_rank_stddev: compute_rank_stddev(&overall_ranks),
+        unstable_rows_count,
+        unstable_rows_ratio,
+        run_hashes,
+        per_dataset,
     }
 }
 
 fn main() {
-    let out_path = match parse_out_path() {
-        Ok(path) => path,
+    let options = match parse_options() {
+        Ok(value) => value,
         Err(error) => {
             eprintln!("argument error: {error}");
             std::process::exit(2);
         }
     };
+    let mut run_snapshots = Vec::<BenchmarkRunSnapshot>::new();
+    let mut selected_payload = None::<AccuracyBenchmark>;
 
-    let benchmark_root = std::env::temp_dir().join(format!(
-        "unredact_accuracy_benchmark_{}",
-        std::process::id()
-    ));
-    if benchmark_root.exists() {
-        let remove_result = std::fs::remove_dir_all(&benchmark_root);
-        if let Err(error) = remove_result {
-            eprintln!("failed to clean benchmark temp dir: {error}");
+    for repeat in 0..options.repeats {
+        let benchmark_root = std::env::temp_dir().join(format!(
+            "unredact_accuracy_benchmark_{}_{}",
+            std::process::id(),
+            repeat
+        ));
+        if benchmark_root.exists() {
+            let remove_result = std::fs::remove_dir_all(&benchmark_root);
+            if let Err(error) = remove_result {
+                eprintln!("failed to clean benchmark temp dir: {error}");
+                std::process::exit(1);
+            }
+        }
+        if let Err(error) = std::fs::create_dir_all(&benchmark_root) {
+            eprintln!("failed to create benchmark temp dir: {error}");
             std::process::exit(1);
         }
-    }
-    if let Err(error) = std::fs::create_dir_all(&benchmark_root) {
-        eprintln!("failed to create benchmark temp dir: {error}");
-        std::process::exit(1);
+
+        let efta00101126 = match evaluate_efta00101126(&benchmark_root) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!(
+                    "benchmark failed for EFTA00101126 on repeat {}: {error}",
+                    repeat + 1
+                );
+                std::process::exit(1);
+            }
+        };
+        let efta00038617 = match evaluate_efta00038617(&benchmark_root) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!(
+                    "benchmark failed for EFTA00038617 on repeat {}: {error}",
+                    repeat + 1
+                );
+                std::process::exit(1);
+            }
+        };
+
+        let evaluated = [efta00101126, efta00038617];
+        let datasets = evaluated
+            .iter()
+            .map(|item| item.dataset.clone())
+            .collect::<Vec<_>>();
+        let overall_ranks = datasets
+            .iter()
+            .flat_map(|dataset| dataset.targets.iter().map(|target| target.best_rank))
+            .collect::<Vec<_>>();
+        let overall = summarize_ranks(&overall_ranks);
+        let visual_accumulators = evaluated
+            .iter()
+            .map(|item| item.visual_accumulator.clone())
+            .collect::<Vec<_>>();
+        let overall_visual =
+            summarize_visual_accumulator(merge_visual_accumulators(&visual_accumulators));
+        let timing_accumulators = evaluated
+            .iter()
+            .map(|item| item.timing_accumulator.clone())
+            .collect::<Vec<_>>();
+        let overall_timing =
+            summarize_timing_accumulator(&merge_timing_accumulators(&timing_accumulators));
+        let definitions = metric_definitions();
+
+        let provisional = AccuracyBenchmark {
+            definitions,
+            datasets,
+            overall,
+            overall_visual,
+            overall_timing,
+            consistency: ConsistencySummary {
+                repeats: 1,
+                all_hashes_identical: true,
+                hash_match_ratio: 1.0_f64,
+                top1_agreement_ratio: 1.0_f64,
+                top5_jaccard_mean: 1.0_f64,
+                mean_rank_stddev: None,
+                unstable_rows_count: 0,
+                unstable_rows_ratio: 0.0_f64,
+                run_hashes: Vec::new(),
+                per_dataset: Vec::new(),
+            },
+        };
+        let dataset_runs = evaluated
+            .iter()
+            .map(|item| item.run_snapshot.clone())
+            .collect::<Vec<_>>();
+        let hash = match hash_json(&dataset_runs) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("failed to hash benchmark payload: {error}");
+                std::process::exit(1);
+            }
+        };
+        run_snapshots.push(BenchmarkRunSnapshot { hash, dataset_runs });
+
+        if selected_payload.is_none() {
+            selected_payload = Some(provisional);
+        }
     }
 
-    let efta00101126 = match evaluate_efta00101126(&benchmark_root) {
-        Ok(result) => result,
-        Err(error) => {
-            eprintln!("benchmark failed for EFTA00101126: {error}");
+    let consistency = compute_consistency(&run_snapshots);
+    let mut payload = match selected_payload {
+        Some(value) => value,
+        None => {
+            eprintln!("no benchmark run payload generated");
             std::process::exit(1);
         }
     };
-    let efta00038617 = match evaluate_efta00038617(&benchmark_root) {
-        Ok(result) => result,
-        Err(error) => {
-            eprintln!("benchmark failed for EFTA00038617: {error}");
-            std::process::exit(1);
-        }
-    };
-
-    let evaluated = [efta00101126, efta00038617];
-    let datasets = evaluated
-        .iter()
-        .map(|item| item.dataset.clone())
-        .collect::<Vec<_>>();
-    let overall_ranks = datasets
-        .iter()
-        .flat_map(|dataset| dataset.targets.iter().map(|target| target.best_rank))
-        .collect::<Vec<_>>();
-    let overall = summarize_ranks(&overall_ranks);
-    let visual_accumulators = evaluated
-        .iter()
-        .map(|item| item.visual_accumulator.clone())
-        .collect::<Vec<_>>();
-    let overall_visual =
-        summarize_visual_accumulator(merge_visual_accumulators(&visual_accumulators));
-    let definitions = metric_definitions();
+    payload.consistency = consistency.clone();
 
     println!("Guess Accuracy Benchmark");
     println!("Metric definitions:");
-    println!("  evaluated_items: {}", definitions.evaluated_items);
-    println!("  found_items: {}", definitions.found_items);
-    println!("  recall_at_1: {}", definitions.recall_at_1);
-    println!("  recall_at_5: {}", definitions.recall_at_5);
-    println!("  recall_at_20: {}", definitions.recall_at_20);
-    println!("  mrr: {}", definitions.mrr);
-    println!("  mean_rank_found: {}", definitions.mean_rank_found);
-    println!("  best_rank: {}", definitions.best_rank);
-    println!("  visual_rows_total: {}", definitions.visual_rows_total);
+    println!("  evaluated_items: {}", payload.definitions.evaluated_items);
+    println!("  found_items: {}", payload.definitions.found_items);
+    println!("  recall_at_1: {}", payload.definitions.recall_at_1);
+    println!("  recall_at_5: {}", payload.definitions.recall_at_5);
+    println!("  recall_at_20: {}", payload.definitions.recall_at_20);
+    println!("  mrr: {}", payload.definitions.mrr);
+    println!("  mean_rank_found: {}", payload.definitions.mean_rank_found);
+    println!("  best_rank: {}", payload.definitions.best_rank);
+    println!(
+        "  visual_rows_total: {}",
+        payload.definitions.visual_rows_total
+    );
     println!(
         "  visual_rows_with_top_guess: {}",
-        definitions.visual_rows_with_top_guess
+        payload.definitions.visual_rows_with_top_guess
     );
-    println!("  visual_rows_scored: {}", definitions.visual_rows_scored);
-    println!("  visual_rows_dropped: {}", definitions.visual_rows_dropped);
+    println!(
+        "  visual_rows_scored: {}",
+        payload.definitions.visual_rows_scored
+    );
+    println!(
+        "  visual_rows_dropped: {}",
+        payload.definitions.visual_rows_dropped
+    );
     println!(
         "  visual_mean_abs_diff: {}",
-        definitions.visual_mean_abs_diff
+        payload.definitions.visual_mean_abs_diff
     );
     println!(
         "  visual_median_abs_diff: {}",
-        definitions.visual_median_abs_diff
+        payload.definitions.visual_median_abs_diff
     );
-    println!("  visual_p90_abs_diff: {}", definitions.visual_p90_abs_diff);
+    println!(
+        "  visual_p90_abs_diff: {}",
+        payload.definitions.visual_p90_abs_diff
+    );
     println!(
         "  visual_mean_changed_pixel_ratio: {}",
-        definitions.visual_mean_changed_pixel_ratio
+        payload.definitions.visual_mean_changed_pixel_ratio
     );
     println!(
         "  visual_mean_compared_pixels: {}",
-        definitions.visual_mean_compared_pixels
+        payload.definitions.visual_mean_compared_pixels
     );
-    for dataset in &datasets {
+    println!(
+        "  timing_redactions_ms: {}",
+        payload.definitions.timing_redactions_ms
+    );
+    println!("  timing_fonts_ms: {}", payload.definitions.timing_fonts_ms);
+    println!("  timing_guess_ms: {}", payload.definitions.timing_guess_ms);
+    println!(
+        "  timing_visualize_ms: {}",
+        payload.definitions.timing_visualize_ms
+    );
+    println!(
+        "  timing_orchestrator_total_ms: {}",
+        payload.definitions.timing_orchestrator_total_ms
+    );
+    println!(
+        "  consistency_repeats: {}",
+        payload.definitions.consistency_repeats
+    );
+    println!(
+        "  consistency_all_hashes_identical: {}",
+        payload.definitions.consistency_all_hashes_identical
+    );
+    println!(
+        "  consistency_hash_match_ratio: {}",
+        payload.definitions.consistency_hash_match_ratio
+    );
+    println!(
+        "  consistency_top1_agreement_ratio: {}",
+        payload.definitions.consistency_top1_agreement_ratio
+    );
+    println!(
+        "  consistency_top5_jaccard_mean: {}",
+        payload.definitions.consistency_top5_jaccard_mean
+    );
+    println!(
+        "  consistency_mean_rank_stddev: {}",
+        payload.definitions.consistency_mean_rank_stddev
+    );
+    println!(
+        "  consistency_unstable_rows_count: {}",
+        payload.definitions.consistency_unstable_rows_count
+    );
+    println!(
+        "  consistency_unstable_rows_ratio: {}",
+        payload.definitions.consistency_unstable_rows_ratio
+    );
+    for dataset in &payload.datasets {
         print_summary(&dataset.name, &dataset.summary);
         print_visual_summary(&format!("{} visual", dataset.name), &dataset.visual_summary);
+        print_timing_summary(&format!("{} timing", dataset.name), &dataset.timing_summary);
     }
-    print_summary("OVERALL", &overall);
-    print_visual_summary("OVERALL visual", &overall_visual);
+    print_summary("OVERALL", &payload.overall);
+    print_visual_summary("OVERALL visual", &payload.overall_visual);
+    print_timing_summary("OVERALL timing", &payload.overall_timing);
+    println!(
+        "CONSISTENCY      repeats={} hashes_identical={} hash_match={:.3} top1_agree={:.3} top5_jaccard={:.3} unstable_rows={} unstable_ratio={:.3}",
+        payload.consistency.repeats,
+        payload.consistency.all_hashes_identical,
+        payload.consistency.hash_match_ratio,
+        payload.consistency.top1_agreement_ratio,
+        payload.consistency.top5_jaccard_mean,
+        payload.consistency.unstable_rows_count,
+        payload.consistency.unstable_rows_ratio
+    );
 
-    let payload = AccuracyBenchmark {
-        definitions,
-        datasets,
-        overall,
-        overall_visual,
-    };
-    if let Some(parent) = out_path.parent() {
+    if let Some(parent) = options.out_path.parent() {
         if !parent.as_os_str().is_empty() {
             let create_result = std::fs::create_dir_all(parent);
             if let Err(error) = create_result {
@@ -653,9 +1330,36 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(error) = std::fs::write(&out_path, encoded) {
-        eprintln!("failed to write {}: {error}", out_path.display());
+    if let Err(error) = std::fs::write(&options.out_path, encoded) {
+        eprintln!("failed to write {}: {error}", options.out_path.display());
         std::process::exit(1);
     }
-    println!("wrote {}", out_path.display());
+    println!("wrote {}", options.out_path.display());
+
+    if let Some(path) = options.consistency_out.as_deref() {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let create_result = std::fs::create_dir_all(parent);
+                if let Err(error) = create_result {
+                    eprintln!(
+                        "failed to create output directory {}: {error}",
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        let encoded = match serde_json::to_vec_pretty(&payload.consistency) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("failed to encode consistency json: {error}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(error) = std::fs::write(path, encoded) {
+            eprintln!("failed to write {}: {error}", path.display());
+            std::process::exit(1);
+        }
+        println!("wrote {}", path.display());
+    }
 }

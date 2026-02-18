@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::data::dictionary_data::DictionaryData;
 use crate::data::fonts_data::FontRunDataSource as _;
@@ -54,6 +55,7 @@ pub struct OrchestratorOutputs {
 
 #[inline]
 pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs, String> {
+    let orchestrator_started = Instant::now();
     let outputs = build_output_paths(&req.input, &req.output_dir)?;
 
     let redactions_data = RedactionsData::new();
@@ -62,6 +64,7 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
     let dictionary_data = DictionaryData::new();
     let visualization_data = VisualizationData::new();
 
+    let redactions_started = Instant::now();
     let bytes = redactions_data.read_input_bytes(&req.input)?;
     let redaction_cfg = RedactionFinderConfig {
         include_details: req.cfg.include_details,
@@ -78,11 +81,15 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
     };
     let redactions = build_report(&req.input, output);
     redactions_data.write_redactions(&outputs.redactions_path, &redactions)?;
+    let redactions_ms = redactions_started.elapsed().as_millis();
 
+    let fonts_started = Instant::now();
     let fonts = fonts_data.detect_fonts(&req.input, req.cfg.include_details)?;
     fonts_data.write_fonts(&outputs.fonts_path, &fonts)?;
+    let fonts_ms = fonts_started.elapsed().as_millis();
 
-    let guess_report = run_guess_from_paths(RunGuessRequest {
+    let guess_started = Instant::now();
+    let mut guess_report = run_guess_from_paths(RunGuessRequest {
         report_data: &guess_validation_data,
         dictionary_data: &dictionary_data,
         font_run_data: &fonts_data,
@@ -92,9 +99,20 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
         dictionary_path: req.dictionary_path.as_deref(),
         cfg: &req.cfg.guess,
     })?;
-    guess_validation_data.write_guesses(&outputs.guesses_path, &guess_report)?;
+    let guess_ms = guess_started.elapsed().as_millis();
+    guess_report
+        .diagnostics
+        .push(format!("timing_ms stage=redactions value={redactions_ms}"));
+    guess_report
+        .diagnostics
+        .push(format!("timing_ms stage=fonts value={fonts_ms}"));
+    guess_report
+        .diagnostics
+        .push(format!("timing_ms stage=guess value={guess_ms}"));
 
+    let mut visualize_ms = 0_u128;
     if req.cfg.visualize {
+        let visualize_started = Instant::now();
         let output_path = outputs
             .visualized_pdf_path
             .clone()
@@ -108,7 +126,16 @@ pub fn run_orchestrator(req: OrchestratorRequest) -> Result<OrchestratorOutputs,
             &output_path,
             req.cfg.visualizer,
         )?;
+        visualize_ms = visualize_started.elapsed().as_millis();
     }
+    guess_report
+        .diagnostics
+        .push(format!("timing_ms stage=visualize value={visualize_ms}"));
+    guess_report.diagnostics.push(format!(
+        "timing_ms stage=orchestrator_total value={}",
+        orchestrator_started.elapsed().as_millis()
+    ));
+    guess_validation_data.write_guesses(&outputs.guesses_path, &guess_report)?;
 
     Ok(outputs)
 }
@@ -814,6 +841,8 @@ mod guess_impl {
         };
 
         let mut scored = Vec::new();
+        let width_filter_limit_pt =
+            (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(cfg.tol_pt.max(4.0_f64));
         for word in dictionary {
             let trimmed = word.trim();
             if trimmed.is_empty() {
@@ -829,6 +858,9 @@ mod guess_impl {
             let _prefix_width_px = prefix_width.px;
             let predicted_right = anchor.left_x + prefix_width.pt + anchor.row_bias_pt;
             let raw_err = (predicted_right - anchor.right_x).abs();
+            if raw_err > width_filter_limit_pt {
+                continue;
+            }
             let context_penalty = punctuation_context_penalty(
                 &anchor.left_anchor_text,
                 &anchor.right_anchor_text,

@@ -1,7 +1,9 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use unredact::service::unredact_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::service::unredact_entry::{
+    run_batch_from_paths, run_from_paths, UnredactServiceConfig,
+};
 use unredact::types::guess_types::GuessConfig;
 use unredact::types::visualizer_config::VisualizerConfig;
 
@@ -18,6 +20,21 @@ struct Args {
 
     #[arg(long)]
     dictionary: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    recursive: bool,
+
+    #[arg(long, default_value = "*.pdf")]
+    glob: String,
+
+    #[arg(long)]
+    jobs: Option<usize>,
+
+    #[arg(long, default_value_t = false)]
+    fail_fast: bool,
+
+    #[arg(long)]
+    batch_manifest: Option<PathBuf>,
 
     #[arg(long)]
     details: bool,
@@ -96,6 +113,14 @@ fn run() -> Result<(), String> {
     if args.max_nodes == 0 {
         return Err("max_nodes must be > 0".to_owned());
     }
+    if args.glob.trim().is_empty() {
+        return Err("glob must not be empty".to_owned());
+    }
+    if let Some(jobs) = args.jobs {
+        if jobs == 0 {
+            return Err("jobs must be > 0".to_owned());
+        }
+    }
     if !args.visual_score_dpi.is_finite() || args.visual_score_dpi <= 0.0_f32 {
         return Err(format!(
             "visual_score_dpi must be finite and > 0, got {}",
@@ -117,6 +142,11 @@ fn run() -> Result<(), String> {
     }
 
     let output_dir = args.output_dir.clone().unwrap_or_else(default_output_dir);
+    let jobs = args.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1)
+    });
 
     let cfg = UnredactServiceConfig {
         include_details: args.details,
@@ -142,15 +172,43 @@ fn run() -> Result<(), String> {
         },
     };
 
-    let outputs = run_from_paths(&args.input, &output_dir, args.dictionary.as_deref(), cfg)?;
-    println!(
-        "{}",
-        outputs
-            .guesses_path
-            .parent()
-            .unwrap_or(&output_dir)
-            .display()
-    );
+    if args.input.is_dir() {
+        let default_manifest = output_dir.join("batch_manifest.json");
+        let manifest = args.batch_manifest.as_deref().or(Some(&default_manifest));
+        let batch = run_batch_from_paths(
+            &args.input,
+            &output_dir,
+            args.dictionary.as_deref(),
+            cfg,
+            args.recursive,
+            args.glob.trim(),
+            jobs,
+            args.fail_fast,
+            manifest,
+        )?;
+        println!(
+            "processed={} success={} failed={} elapsed_ms={} manifest={}",
+            batch.results.len(),
+            batch.success_count,
+            batch.failure_count,
+            batch.elapsed_ms,
+            batch
+                .manifest_path
+                .as_deref()
+                .map(|value| value.display().to_string())
+                .unwrap_or_else(|| "-".to_owned())
+        );
+    } else {
+        let outputs = run_from_paths(&args.input, &output_dir, args.dictionary.as_deref(), cfg)?;
+        println!(
+            "{}",
+            outputs
+                .guesses_path
+                .parent()
+                .unwrap_or(&output_dir)
+                .display()
+        );
+    }
 
     Ok(())
 }

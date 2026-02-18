@@ -16,6 +16,7 @@ const CHANGED_LUMA_DELTA: u8 = 24_u8;
 const WINDOW_PADDING_PT: f32 = 1.0_f32;
 const OVERLAY_TEXT_COLOR: [f32; 3] = [0.0_f32, 0.0_f32, 0.0_f32];
 const OVERLAY_BORDER_WIDTH: f32 = 1.0_f32;
+const CONTEXT_ALIGNMENT_MAX_DIFF: f32 = 0.22_f32;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VisualGuessScoreConfig {
@@ -98,6 +99,11 @@ pub fn apply_visual_scores(
     }
 
     let annotator = PdfAnnotator;
+    let context_overlays_by_redaction = build_context_overlays_by_redaction(&overlays_by_redaction);
+    let context_overlays = context_overlays_by_redaction
+        .values()
+        .flat_map(|items| items.iter().cloned())
+        .collect::<Vec<_>>();
     let annotated_bytes = annotator.annotate(
         &inputs.pdf_bytes,
         &[],
@@ -106,9 +112,25 @@ pub fn apply_visual_scores(
         OVERLAY_TEXT_COLOR,
         OVERLAY_BORDER_WIDTH,
     )?;
+    let context_annotated_bytes = if context_overlays.is_empty() {
+        None
+    } else {
+        Some(annotator.annotate(
+            &inputs.pdf_bytes,
+            &[],
+            &context_overlays,
+            OVERLAY_TEXT_COLOR,
+            OVERLAY_TEXT_COLOR,
+            OVERLAY_BORDER_WIDTH,
+        )?)
+    };
 
     let base_renderer = HayroRenderer::new_from_bytes(&inputs.pdf_bytes)?;
     let overlay_renderer = HayroRenderer::new_from_bytes(&annotated_bytes)?;
+    let context_renderer = match context_annotated_bytes.as_deref() {
+        Some(bytes) => Some(HayroRenderer::new_from_bytes(bytes)?),
+        None => None,
+    };
     let mut pages_to_render = BTreeSet::<u32>::new();
     for overlays in overlays_by_redaction.values() {
         if let Some(first) = overlays.first() {
@@ -117,14 +139,21 @@ pub fn apply_visual_scores(
     }
     let mut base_pages = BTreeMap::<u32, RenderedPage>::new();
     let mut overlay_pages = BTreeMap::<u32, RenderedPage>::new();
+    let mut context_pages = BTreeMap::<u32, RenderedPage>::new();
     for page_index in pages_to_render {
         let base = base_renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
         let overlay = overlay_renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
         base_pages.insert(page_index, base);
         overlay_pages.insert(page_index, overlay);
+        if let Some(renderer) = &context_renderer {
+            let context = renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
+            context_pages.insert(page_index, context);
+        }
     }
 
     let mut rows_with_top_guess = 0_usize;
+    let mut context_rows_scored = 0_usize;
+    let mut context_rows_rejected = 0_usize;
     let mut rows_scored = 0_usize;
     let mut rows_dropped = 0_usize;
     for (index, (guess, redaction)) in guesses
@@ -173,6 +202,30 @@ pub fn apply_visual_scores(
             continue;
         };
 
+        if let Some(context_overlays) = context_overlays_by_redaction.get(&index) {
+            if let Some(context_page) = context_pages.get(&redaction.page_index) {
+                if let Some(context_window_bbox) =
+                    union_overlay_bbox(context_overlays).map(|bbox| pad_rect(bbox, page_box))
+                {
+                    if let Some(context_score) = score_row_overlay(
+                        base_page,
+                        context_page,
+                        page_box,
+                        context_window_bbox,
+                        redaction.bbox,
+                        cfg.min_ink_pixels,
+                    ) {
+                        context_rows_scored += 1;
+                        if context_score.mean_abs_diff > CONTEXT_ALIGNMENT_MAX_DIFF {
+                            context_rows_rejected += 1;
+                            guess.visual_reason = Some("context_alignment_failed".to_owned());
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         let score = score_row_overlay(
             base_page,
             overlay_page,
@@ -202,16 +255,19 @@ pub fn apply_visual_scores(
     }
 
     diagnostics.push(format!(
-        "visual_score=enabled rows_total={} rows_with_top_guess={} rows_scored={} rows_dropped={} dpi={} min_ink_pixels={} drop_threshold={}",
+        "visual_score=enabled rows_total={} rows_with_top_guess={} context_rows_scored={} context_rows_rejected={} rows_scored={} rows_dropped={} dpi={} min_ink_pixels={} drop_threshold={} context_max_diff={}",
         max_items,
         rows_with_top_guess,
+        context_rows_scored,
+        context_rows_rejected,
         rows_scored,
         rows_dropped,
         cfg.dpi,
         cfg.min_ink_pixels,
         cfg.drop_threshold
             .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "none".to_owned())
+            .unwrap_or_else(|| "none".to_owned()),
+        CONTEXT_ALIGNMENT_MAX_DIFF
     ));
     Ok(diagnostics)
 }
@@ -225,6 +281,25 @@ fn group_overlays_by_redaction(overlays: &[TextOverlay]) -> BTreeMap<usize, Vec<
         by_index.entry(index).or_default().push(overlay.clone());
     }
     by_index
+}
+
+fn build_context_overlays_by_redaction(
+    overlays_by_redaction: &BTreeMap<usize, Vec<TextOverlay>>,
+) -> BTreeMap<usize, Vec<TextOverlay>> {
+    let mut out = BTreeMap::<usize, Vec<TextOverlay>>::new();
+    for (index, overlays) in overlays_by_redaction {
+        if overlays.len() < 3 {
+            continue;
+        }
+        let Some(first) = overlays.first().cloned() else {
+            continue;
+        };
+        let Some(last) = overlays.last().cloned() else {
+            continue;
+        };
+        out.insert(*index, vec![first, last]);
+    }
+    out
 }
 
 fn top_guess_text(guess: &RedactionGuess) -> Option<&str> {
