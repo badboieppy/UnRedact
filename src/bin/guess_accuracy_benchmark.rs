@@ -53,6 +53,7 @@ struct DatasetResult {
     visual_summary: VisualSummary,
     timing_summary: TimingSummary,
     candidate_summary: CandidateSummary,
+    quality_summary: QualitySummary,
     targets: Vec<RankedTarget>,
 }
 
@@ -64,6 +65,7 @@ struct AccuracyBenchmark {
     overall_visual: VisualSummary,
     overall_timing: TimingSummary,
     overall_candidates: CandidateSummary,
+    overall_quality: QualitySummary,
     consistency: ConsistencySummary,
 }
 
@@ -101,6 +103,15 @@ struct MetricDefinitions {
     candidate_multi_span_p90_count: &'static str,
     candidate_single_span_rows: &'static str,
     candidate_single_span_mean_count: &'static str,
+    quality_rows_total: &'static str,
+    quality_anchored_rows: &'static str,
+    quality_anchor_two_sided_rows: &'static str,
+    quality_anchor_one_sided_rows: &'static str,
+    quality_width_asset_rows: &'static str,
+    quality_width_table_rows: &'static str,
+    quality_width_core_rows: &'static str,
+    quality_width_fallback_rows: &'static str,
+    quality_width_fallback_reason_rows: &'static str,
     consistency_repeats: &'static str,
     consistency_all_hashes_identical: &'static str,
     consistency_hash_match_ratio: &'static str,
@@ -145,6 +156,19 @@ struct CandidateSummary {
     multi_span_p90_count: Option<f64>,
     single_span_rows: usize,
     single_span_mean_count: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct QualitySummary {
+    rows_total: usize,
+    anchored_rows: usize,
+    anchor_two_sided_rows: usize,
+    anchor_one_sided_rows: usize,
+    width_asset_rows: usize,
+    width_table_rows: usize,
+    width_core_rows: usize,
+    width_fallback_rows: usize,
+    width_fallback_reason_rows: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -237,12 +261,14 @@ struct CliOptions {
     out_path: PathBuf,
     repeats: usize,
     consistency_out: Option<PathBuf>,
+    require_deterministic: bool,
 }
 
 fn parse_options() -> Result<CliOptions, String> {
     let mut out_path = PathBuf::from("benchmark/guess_accuracy.json");
-    let mut repeats = 1_usize;
+    let mut repeats = 2_usize;
     let mut consistency_out = None::<PathBuf>;
+    let mut require_deterministic = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -264,6 +290,8 @@ fn parse_options() -> Result<CliOptions, String> {
                 }
             }
             "--determinism" => repeats = 3_usize,
+            "--single-run" => repeats = 1_usize,
+            "--require-deterministic" => require_deterministic = true,
             "--consistency-out" => {
                 let Some(path_value) = args.next() else {
                     return Err("missing value for --consistency-out".to_owned());
@@ -272,7 +300,7 @@ fn parse_options() -> Result<CliOptions, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --bin guess_accuracy_benchmark -- [--out <path>] [--repeats <n>] [--determinism] [--consistency-out <path>]"
+                    "Usage: cargo run --bin guess_accuracy_benchmark -- [--out <path>] [--repeats <n>] [--single-run] [--determinism] [--require-deterministic] [--consistency-out <path>]"
                 );
                 std::process::exit(0);
             }
@@ -283,6 +311,7 @@ fn parse_options() -> Result<CliOptions, String> {
         out_path,
         repeats,
         consistency_out,
+        require_deterministic,
     })
 }
 
@@ -574,6 +603,55 @@ fn merge_candidate_accumulators(accumulators: &[CandidateAccumulator]) -> Candid
     merged
 }
 
+fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
+    let mut out = QualitySummary {
+        rows_total: guesses.len(),
+        ..QualitySummary::default()
+    };
+    for guess in guesses {
+        if guess.context.has_anchor_pair {
+            out.anchored_rows += 1;
+        }
+        match guess.context.anchor_mode.as_deref() {
+            Some("two_sided") => out.anchor_two_sided_rows += 1,
+            Some("left_only") | Some("right_only") => out.anchor_one_sided_rows += 1,
+            _ => {}
+        }
+        let width_source = guess
+            .context
+            .candidate_width_source
+            .as_deref()
+            .or(guess.context.anchor_width_source.as_deref());
+        match width_source {
+            Some("asset") => out.width_asset_rows += 1,
+            Some("pdf_width_table") => out.width_table_rows += 1,
+            Some("core_font") => out.width_core_rows += 1,
+            Some("fallback") => out.width_fallback_rows += 1,
+            _ => {}
+        }
+        if guess.context.width_fallback_reason.is_some() {
+            out.width_fallback_reason_rows += 1;
+        }
+    }
+    out
+}
+
+fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
+    let mut merged = QualitySummary::default();
+    for summary in summaries {
+        merged.rows_total += summary.rows_total;
+        merged.anchored_rows += summary.anchored_rows;
+        merged.anchor_two_sided_rows += summary.anchor_two_sided_rows;
+        merged.anchor_one_sided_rows += summary.anchor_one_sided_rows;
+        merged.width_asset_rows += summary.width_asset_rows;
+        merged.width_table_rows += summary.width_table_rows;
+        merged.width_core_rows += summary.width_core_rows;
+        merged.width_fallback_rows += summary.width_fallback_rows;
+        merged.width_fallback_reason_rows += summary.width_fallback_reason_rows;
+    }
+    merged
+}
+
 fn timing_accumulator_from_diagnostics(diagnostics: &[String]) -> TimingAccumulator {
     let mut acc = TimingAccumulator::default();
     for line in diagnostics {
@@ -825,6 +903,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
+    let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
@@ -834,6 +913,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         visual_summary,
         timing_summary,
         candidate_summary,
+        quality_summary: quality_summary.clone(),
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
@@ -843,6 +923,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
             dataset.candidate_summary.clone(),
+            dataset.quality_summary.clone(),
             dataset.targets.clone(),
         ))?,
         rows: build_row_snapshots("EFTA00101126", &report.guesses),
@@ -896,6 +977,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
+    let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
@@ -905,6 +987,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         visual_summary,
         timing_summary,
         candidate_summary,
+        quality_summary: quality_summary.clone(),
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
@@ -914,6 +997,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
             dataset.candidate_summary.clone(),
+            dataset.quality_summary.clone(),
             dataset.targets.clone(),
         ))?,
         rows: build_row_snapshots("EFTA00038617", &report.guesses),
@@ -1037,6 +1121,21 @@ fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
     );
 }
 
+fn print_quality_summary(label: &str, summary: &QualitySummary) {
+    println!(
+        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_asset={} width_table={} width_core={} width_fallback={} fallback_reason_rows={}",
+        summary.rows_total,
+        summary.anchored_rows,
+        summary.anchor_two_sided_rows,
+        summary.anchor_one_sided_rows,
+        summary.width_asset_rows,
+        summary.width_table_rows,
+        summary.width_core_rows,
+        summary.width_fallback_rows,
+        summary.width_fallback_reason_rows
+    );
+}
+
 fn metric_definitions() -> MetricDefinitions {
     MetricDefinitions {
         evaluated_items: "Number of target strings evaluated in this dataset.",
@@ -1081,6 +1180,22 @@ fn metric_definitions() -> MetricDefinitions {
         candidate_multi_span_p90_count: "90th percentile candidate count for multi-span rows.",
         candidate_single_span_rows: "Rows classified as non-multi-span rows.",
         candidate_single_span_mean_count: "Mean candidate count for non-multi-span rows.",
+        quality_rows_total: "Total rows in the guess report for anchor/width quality accounting.",
+        quality_anchored_rows: "Rows that have an anchor pair or one-sided recovered anchor.",
+        quality_anchor_two_sided_rows:
+            "Rows where anchor_mode is two_sided (full left/right anchor).",
+        quality_anchor_one_sided_rows:
+            "Rows where anchor_mode is left_only or right_only.",
+        quality_width_asset_rows:
+            "Rows whose primary candidate width source is embedded font asset shaping.",
+        quality_width_table_rows:
+            "Rows whose primary candidate width source is PDF width table lookup.",
+        quality_width_core_rows:
+            "Rows whose primary candidate width source is core-font width table fallback.",
+        quality_width_fallback_rows:
+            "Rows whose primary candidate width source is heuristic fallback.",
+        quality_width_fallback_reason_rows:
+            "Rows carrying explicit width_fallback_reason diagnostics.",
         consistency_repeats: "Number of repeated benchmark runs with the same code/config.",
         consistency_all_hashes_identical:
             "True when every repeated run produced the same benchmark hash.",
@@ -1317,6 +1432,11 @@ fn main() {
             .collect::<Vec<_>>();
         let overall_candidates =
             summarize_candidate_accumulator(merge_candidate_accumulators(&candidate_accumulators));
+        let quality_summaries = evaluated
+            .iter()
+            .map(|item| item.dataset.quality_summary.clone())
+            .collect::<Vec<_>>();
+        let overall_quality = merge_quality_summaries(&quality_summaries);
         let definitions = metric_definitions();
 
         let provisional = AccuracyBenchmark {
@@ -1326,6 +1446,7 @@ fn main() {
             overall_visual,
             overall_timing,
             overall_candidates,
+            overall_quality,
             consistency: ConsistencySummary {
                 repeats: 1,
                 all_hashes_identical: true,
@@ -1366,6 +1487,13 @@ fn main() {
         }
     };
     payload.consistency = consistency.clone();
+    if options.require_deterministic && !payload.consistency.all_hashes_identical {
+        eprintln!(
+            "determinism gate failed: hashes_identical={} hash_match_ratio={:.3}",
+            payload.consistency.all_hashes_identical, payload.consistency.hash_match_ratio
+        );
+        std::process::exit(3);
+    }
 
     println!("Guess Accuracy Benchmark");
     println!("Metric definitions:");
@@ -1468,6 +1596,42 @@ fn main() {
         payload.definitions.candidate_single_span_mean_count
     );
     println!(
+        "  quality_rows_total: {}",
+        payload.definitions.quality_rows_total
+    );
+    println!(
+        "  quality_anchored_rows: {}",
+        payload.definitions.quality_anchored_rows
+    );
+    println!(
+        "  quality_anchor_two_sided_rows: {}",
+        payload.definitions.quality_anchor_two_sided_rows
+    );
+    println!(
+        "  quality_anchor_one_sided_rows: {}",
+        payload.definitions.quality_anchor_one_sided_rows
+    );
+    println!(
+        "  quality_width_asset_rows: {}",
+        payload.definitions.quality_width_asset_rows
+    );
+    println!(
+        "  quality_width_table_rows: {}",
+        payload.definitions.quality_width_table_rows
+    );
+    println!(
+        "  quality_width_core_rows: {}",
+        payload.definitions.quality_width_core_rows
+    );
+    println!(
+        "  quality_width_fallback_rows: {}",
+        payload.definitions.quality_width_fallback_rows
+    );
+    println!(
+        "  quality_width_fallback_reason_rows: {}",
+        payload.definitions.quality_width_fallback_reason_rows
+    );
+    println!(
         "  consistency_repeats: {}",
         payload.definitions.consistency_repeats
     );
@@ -1507,11 +1671,16 @@ fn main() {
             &format!("{} candidates", dataset.name),
             &dataset.candidate_summary,
         );
+        print_quality_summary(
+            &format!("{} quality", dataset.name),
+            &dataset.quality_summary,
+        );
     }
     print_summary("OVERALL", &payload.overall);
     print_visual_summary("OVERALL visual", &payload.overall_visual);
     print_timing_summary("OVERALL timing", &payload.overall_timing);
     print_candidate_summary("OVERALL candidates", &payload.overall_candidates);
+    print_quality_summary("OVERALL quality", &payload.overall_quality);
     println!(
         "CONSISTENCY      repeats={} hashes_identical={} hash_match={:.3} top1_agree={:.3} top5_jaccard={:.3} unstable_rows={} unstable_ratio={:.3}",
         payload.consistency.repeats,

@@ -253,6 +253,12 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         .filter(|rank| *rank <= 5)
         .count() as f64
         / TARGET_NAMES.len() as f64;
+    let recall_at_1 = ranks
+        .iter()
+        .filter_map(|rank| *rank)
+        .filter(|rank| *rank <= 1)
+        .count() as f64
+        / TARGET_NAMES.len() as f64;
     let recall_at_20 = ranks
         .iter()
         .filter_map(|rank| *rank)
@@ -272,8 +278,14 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         ranks
     );
     assert!(
-        recall_at_20 >= 0.6_f64,
-        "expected recall@20 >= 0.6 for noisy dictionary, got {:.3} (ranks={:?})",
+        recall_at_1 >= 0.2_f64,
+        "expected recall@1 >= 0.2 for noisy dictionary, got {:.3} (ranks={:?})",
+        recall_at_1,
+        ranks
+    );
+    assert!(
+        recall_at_20 >= 0.8_f64,
+        "expected recall@20 >= 0.8 for noisy dictionary, got {:.3} (ranks={:?})",
         recall_at_20,
         ranks
     );

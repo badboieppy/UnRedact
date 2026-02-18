@@ -102,6 +102,7 @@ mod guess_impl {
     use lopdf::{Dictionary, Document, Object};
     use std::path::Path;
     use std::sync::OnceLock;
+    use std::time::Instant;
 
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
     use crate::data::{DictionaryDataSource, FontRunDataSource, ReportDataSource};
@@ -160,19 +161,36 @@ mod guess_impl {
 
     #[inline]
     pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<GuessReport, String> {
+        let started = Instant::now();
+        let font_runs_started = Instant::now();
         let font_runs = build_font_run_report(Path::new(req.pdf_name), req.pdf_bytes)?;
+        let font_runs_ms = font_runs_started.elapsed().as_millis();
+        let width_tables_started = Instant::now();
         let width_tables = build_pdf_width_table_map_from_bytes(req.pdf_bytes).unwrap_or_default();
+        let width_tables_ms = width_tables_started.elapsed().as_millis();
+        let mut diagnostics = req.diagnostics.to_vec();
+        diagnostics.push(format!(
+            "timing_ms stage=guess_font_runs value={font_runs_ms}"
+        ));
+        diagnostics.push(format!(
+            "timing_ms stage=guess_width_tables value={width_tables_ms}"
+        ));
         let inputs = BuildReportWithFontsInputs {
             input_redactions_label: format!("memory://{}.redactions.json", req.pdf_name),
             input_fonts_label: format!("memory://{}.fonts.json", req.pdf_name),
             redactions: req.redactions.clone(),
             dictionary: req.dictionary.to_vec(),
-            diagnostics: req.diagnostics.to_vec(),
+            diagnostics,
             font_runs,
             width_tables,
             pdf_bytes: Some(req.pdf_bytes),
         };
-        Ok(build_report_from_parts_with_fonts_inputs(inputs, req.cfg))
+        let mut report = build_report_from_parts_with_fonts_inputs(inputs, req.cfg);
+        report.diagnostics.push(format!(
+            "timing_ms stage=guess_run_from_bytes_total value={}",
+            started.elapsed().as_millis()
+        ));
+        Ok(report)
     }
 
     struct BuildReportWithFontsInputs<'a> {
@@ -190,6 +208,7 @@ mod guess_impl {
         inputs: BuildReportWithFontsInputs<'_>,
         cfg: &GuessConfig,
     ) -> GuessReport {
+        let guess_anchor_started = Instant::now();
         let (mut guesses, guess_diagnostics) = build_anchor_validated_guesses(
             &inputs.redactions.redactions,
             &inputs.dictionary,
@@ -197,9 +216,14 @@ mod guess_impl {
             &inputs.width_tables,
             cfg,
         );
+        let guess_anchor_ms = guess_anchor_started.elapsed().as_millis();
         let mut all_diagnostics = inputs.diagnostics;
         all_diagnostics.extend(guess_diagnostics);
+        all_diagnostics.push(format!(
+            "timing_ms stage=guess_anchor_rows value={guess_anchor_ms}"
+        ));
         if cfg.visual_score {
+            let visual_started = Instant::now();
             let visual_cfg = VisualGuessScoreConfig {
                 enabled: cfg.visual_score,
                 dpi: cfg.visual_score_dpi,
@@ -224,14 +248,86 @@ mod guess_impl {
                     all_diagnostics.push(format!("visual_score_failed:{error}"));
                 }
             }
+            all_diagnostics.push(format!(
+                "timing_ms stage=guess_visual_score value={}",
+                visual_started.elapsed().as_millis()
+            ));
         } else {
             all_diagnostics.push("visual_score=disabled".to_owned());
         }
+        annotate_guess_confidence(&mut guesses);
         GuessReport {
             input_redactions: inputs.input_redactions_label,
             input_fonts: inputs.input_fonts_label,
             guesses,
             diagnostics: all_diagnostics,
+        }
+    }
+
+    fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
+        for guess in guesses {
+            let base = if !guess.exact_matches.is_empty() {
+                1.0_f64
+            } else {
+                guess
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.score as f64)
+                    .unwrap_or(0.0_f64)
+            };
+            let anchor = if !guess.context.has_anchor_pair {
+                0.35_f64
+            } else if guess.context.anchor_mode.as_deref() == Some("two_sided") {
+                1.0_f64
+            } else {
+                0.78_f64
+            };
+            let width = match guess
+                .context
+                .candidate_width_source
+                .as_deref()
+                .or(guess.context.anchor_width_source.as_deref())
+            {
+                Some("asset") => 1.0_f64,
+                Some("pdf_width_table") => 0.93_f64,
+                Some("core_font") => 0.82_f64,
+                Some("fallback") => 0.64_f64,
+                _ => 0.75_f64,
+            };
+            let visual = guess
+                .visual_mean_abs_diff
+                .map(|value| (1.0_f64 - (value as f64 / 0.28_f64)).clamp(0.30_f64, 1.0_f64))
+                .unwrap_or(0.78_f64);
+            let fallback_penalty = if guess.context.width_fallback_reason.is_some() {
+                0.06_f64
+            } else {
+                0.0_f64
+            };
+            let confidence =
+                (base * 0.50_f64 + anchor * 0.20_f64 + width * 0.20_f64 + visual * 0.10_f64
+                    - fallback_penalty)
+                    .clamp(0.0_f64, 1.0_f64);
+            guess.context.confidence_score = Some(confidence as f32);
+            guess.context.confidence_factors = Some(format!(
+                "base={base:.3};anchor={anchor:.3};width={width:.3};visual={visual:.3};fallback_penalty={fallback_penalty:.3}"
+            ));
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum AnchorMode {
+        TwoSided,
+        LeftOnly,
+        RightOnly,
+    }
+
+    impl AnchorMode {
+        fn as_str(&self) -> &'static str {
+            match self {
+                AnchorMode::TwoSided => "two_sided",
+                AnchorMode::LeftOnly => "left_only",
+                AnchorMode::RightOnly => "right_only",
+            }
         }
     }
 
@@ -249,6 +345,7 @@ mod guess_impl {
         right_bbox: FontRect,
         epsilon_pt: f64,
         row_bias_pt: f64,
+        mode: AnchorMode,
     }
 
     #[derive(Debug, Clone)]
@@ -257,6 +354,19 @@ mod guess_impl {
         raw_error_pt: f64,
         effective_error_pt: f64,
         word_count: u32,
+        width_pt: f64,
+        width_source: WidthSource,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct CandidateFunnelMetrics {
+        scanned: usize,
+        after_char_units: usize,
+        after_context: usize,
+        after_shape: usize,
+        after_anchor: usize,
+        after_box: usize,
+        scored: usize,
     }
 
     #[derive(Debug, Clone)]
@@ -271,7 +381,7 @@ mod guess_impl {
     #[derive(Debug, Clone)]
     struct JointAssignmentBeamState {
         cost: f64,
-        selected: Vec<String>,
+        selected: Vec<Option<String>>,
         used_keys: Vec<String>,
         prev_start_x_pt: f64,
         prev_end_x_pt: f64,
@@ -311,6 +421,7 @@ mod guess_impl {
     const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
     const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
     const MULTI_SPAN_WIDTH_BAND_LIMIT: usize = 900;
+    const SINGLE_SPAN_WIDTH_BAND_LIMIT: usize = 700;
     const JOINT_ASSIGNMENT_MIN_GROUP_ROWS: usize = 2;
     const JOINT_ASSIGNMENT_MAX_ROWS: usize = 14;
     const JOINT_ASSIGNMENT_MAX_OPTIONS_PER_ROW: usize = 24;
@@ -321,10 +432,32 @@ mod guess_impl {
     const JOINT_ASSIGNMENT_OVERLAP_PENALTY: f64 = 2.8_f64;
     const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 140.0_f64;
     const JOINT_ASSIGNMENT_NAME_SHAPE_PENALTY: f64 = 1.25_f64;
+    const JOINT_ASSIGNMENT_NULL_DELTA: f64 = 0.75_f64;
+    const JOINT_ASSIGNMENT_NULL_MIN_BEST_COST: f64 = 1.4_f64;
 
     #[derive(Debug, Clone, Copy)]
     struct MeasuredWidth {
         pt: f64,
+        source: WidthSource,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WidthSource {
+        Asset,
+        PdfWidthTable,
+        CoreFont,
+        Fallback,
+    }
+
+    impl WidthSource {
+        fn as_str(self) -> &'static str {
+            match self {
+                WidthSource::Asset => "asset",
+                WidthSource::PdfWidthTable => "pdf_width_table",
+                WidthSource::CoreFont => "core_font",
+                WidthSource::Fallback => "fallback",
+            }
+        }
     }
 
     struct WidthMeasureContext<'a> {
@@ -347,6 +480,13 @@ mod guess_impl {
     struct RowCalibration {
         epsilon_pt: f64,
         bias_pt: f64,
+    }
+
+    struct AnchorHints<'a> {
+        left_text: Option<&'a str>,
+        left_x: Option<f64>,
+        right_text: Option<&'a str>,
+        right_x: Option<f64>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -459,6 +599,13 @@ mod guess_impl {
                         anchor_font_size_pt: None,
                         anchor_h_scale_pct: None,
                         anchor_row_bias_pt: None,
+                        anchor_mode: None,
+                        anchor_width_source: None,
+                        space_width_source: None,
+                        candidate_width_source: None,
+                        width_fallback_reason: None,
+                        confidence_score: None,
+                        confidence_factors: None,
                         has_anchor_pair: false,
                     },
                     visual_compared_pixels: None,
@@ -470,7 +617,7 @@ mod guess_impl {
                 continue;
             };
 
-            let guess = build_guess_for_anchor(
+            let (guess, funnel) = build_guess_for_anchor(
                 redaction,
                 dictionary,
                 cfg,
@@ -479,6 +626,18 @@ mod guess_impl {
                 width_tables,
                 &mut cache,
             );
+            diagnostics.push(format!(
+                "redaction_index={index} page_index={} anchor_mode={} funnel_scanned={} funnel_after_char_units={} funnel_after_context={} funnel_after_shape={} funnel_after_anchor={} funnel_after_box={} funnel_scored={}",
+                redaction.page_index,
+                anchor.mode.as_str(),
+                funnel.scanned,
+                funnel.after_char_units,
+                funnel.after_context,
+                funnel.after_shape,
+                funnel.after_anchor,
+                funnel.after_box,
+                funnel.scored,
+            ));
             guesses.push(guess);
         }
 
@@ -499,14 +658,34 @@ mod guess_impl {
                     .unwrap_or_default()
             };
             diagnostics.push(format!(
-                "redaction_index={index} page_index={} anchored_row=true exact_count={} candidate_count={} top_guess={} left_anchor=[{}] right_anchor=[{}] tol_pt={}",
+                "redaction_index={index} page_index={} anchored_row=true exact_count={} candidate_count={} top_guess={} left_anchor=[{}] right_anchor=[{}] tol_pt={} anchor_mode={} anchor_width_source={} space_width_source={} candidate_width_source={} width_fallback_reason={}",
                 guess.page_index,
                 guess.exact_matches.len(),
                 guess.candidates.len(),
                 top,
                 guess.context.left_anchor_text,
                 guess.context.right_anchor_text,
-                guess.context.tol_pt
+                guess.context.tol_pt,
+                guess.context
+                    .anchor_mode
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                guess.context
+                    .anchor_width_source
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                guess.context
+                    .space_width_source
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                guess.context
+                    .candidate_width_source
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                guess.context
+                    .width_fallback_reason
+                    .as_deref()
+                    .unwrap_or("none"),
             ));
         }
 
@@ -517,6 +696,9 @@ mod guess_impl {
         let mut clusters = std::collections::BTreeMap::<GuessClusterKey, Vec<usize>>::new();
         for (index, guess) in guesses.iter().enumerate() {
             if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
+                continue;
+            }
+            if !is_two_sided_anchor_context(guess) {
                 continue;
             }
             let redaction_width = (guess.bbox.width().abs() as f64).max(1.0_f64);
@@ -643,11 +825,23 @@ mod guess_impl {
         if !guess.context.has_anchor_pair {
             return false;
         }
+        if !is_two_sided_anchor_context(guess) {
+            return false;
+        }
         let width = guess.bbox.width().abs() as f64;
         if width <= 0.0_f64 {
             return false;
         }
         (guess.context.gap_pt as f64).abs() / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
+    }
+
+    fn is_two_sided_anchor_context(guess: &RedactionGuess) -> bool {
+        guess
+            .context
+            .anchor_mode
+            .as_deref()
+            .map(|mode| mode == "two_sided")
+            .unwrap_or(true)
     }
 
     fn apply_row_joint_assignment(
@@ -687,7 +881,13 @@ mod guess_impl {
             let groups = collect_contiguous_multi_span_groups(indices, guesses);
             for group in groups {
                 if let Some(selected) = solve_joint_assignment_group(guesses, &group) {
-                    promotions.extend(group.iter().copied().zip(selected.into_iter()));
+                    for (guess_index, selected_text) in
+                        group.iter().copied().zip(selected.into_iter())
+                    {
+                        if let Some(text) = selected_text {
+                            promotions.push((guess_index, text));
+                        }
+                    }
                 }
             }
         }
@@ -755,7 +955,9 @@ mod guess_impl {
     }
 
     fn is_joint_assignment_candidate_row(guess: &RedactionGuess) -> bool {
-        guess.context.has_anchor_pair && !guess.candidates.is_empty()
+        guess.context.has_anchor_pair
+            && !guess.candidates.is_empty()
+            && is_two_sided_anchor_context(guess)
     }
 
     fn group_has_joint_assignment_signal(group: &[usize], guesses: &[RedactionGuess]) -> bool {
@@ -804,7 +1006,7 @@ mod guess_impl {
     fn solve_joint_assignment_group(
         guesses: &[RedactionGuess],
         group: &[usize],
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<Option<String>>> {
         if group.len() < JOINT_ASSIGNMENT_MIN_GROUP_ROWS || group.len() > JOINT_ASSIGNMENT_MAX_ROWS
         {
             return None;
@@ -820,6 +1022,8 @@ mod guess_impl {
         });
 
         let mut options_by_row = Vec::<Vec<JointAssignmentOption>>::with_capacity(group.len());
+        let mut null_costs = Vec::<f64>::with_capacity(group.len());
+        let mut allow_null_by_row = Vec::<bool>::with_capacity(group.len());
         for guess_index in group.iter().copied() {
             let guess = guesses.get(guess_index)?;
             let options = build_joint_assignment_options(
@@ -831,6 +1035,12 @@ mod guess_impl {
             if options.is_empty() {
                 return None;
             }
+            let best_cost = options
+                .first()
+                .map(|option| option.base_cost)
+                .unwrap_or(5.0_f64);
+            null_costs.push(best_cost + JOINT_ASSIGNMENT_NULL_DELTA);
+            allow_null_by_row.push(best_cost >= JOINT_ASSIGNMENT_NULL_MIN_BEST_COST);
             options_by_row.push(options);
         }
 
@@ -842,9 +1052,24 @@ mod guess_impl {
             prev_end_x_pt: f64::NEG_INFINITY,
         }];
 
-        for row_options in &options_by_row {
+        for ((row_options, null_cost), allow_null) in options_by_row
+            .iter()
+            .zip(null_costs.iter().copied())
+            .zip(allow_null_by_row.iter().copied())
+        {
             let mut next = Vec::<JointAssignmentBeamState>::new();
             for state in &beam {
+                if allow_null {
+                    let mut selected_skip = state.selected.clone();
+                    selected_skip.push(None);
+                    next.push(JointAssignmentBeamState {
+                        cost: state.cost + null_cost,
+                        selected: selected_skip,
+                        used_keys: state.used_keys.clone(),
+                        prev_start_x_pt: state.prev_start_x_pt,
+                        prev_end_x_pt: state.prev_end_x_pt,
+                    });
+                }
                 for option in row_options {
                     let mut cost = state.cost + option.base_cost;
                     if state.used_keys.iter().any(|key| key == &option.key) {
@@ -861,7 +1086,7 @@ mod guess_impl {
                     }
 
                     let mut selected = state.selected.clone();
-                    selected.push(option.text.clone());
+                    selected.push(Some(option.text.clone()));
                     let mut used_keys = state.used_keys.clone();
                     if !used_keys.iter().any(|key| key == &option.key) {
                         used_keys.push(option.key.clone());
@@ -941,7 +1166,8 @@ mod guess_impl {
                 + exact_bonus
                 + anchor_overlap_penalty
                 + name_shape_penalty;
-            let (start_x_pt, end_x_pt) = estimate_candidate_interval_pt(guess, text);
+            let (start_x_pt, end_x_pt) =
+                estimate_candidate_interval_pt(guess, text, candidate.width_pt);
             options.push(JointAssignmentOption {
                 text: text.to_owned(),
                 key: normalize_candidate_key(text),
@@ -959,16 +1185,29 @@ mod guess_impl {
         options
     }
 
-    fn estimate_candidate_interval_pt(guess: &RedactionGuess, text: &str) -> (f64, f64) {
+    fn estimate_candidate_interval_pt(
+        guess: &RedactionGuess,
+        text: &str,
+        measured_width_pt: Option<f32>,
+    ) -> (f64, f64) {
         let char_width = (guess.context.char_width_pt as f64).max(0.1_f64);
-        let glyph_count = text
-            .chars()
-            .filter(|ch| !ch.is_whitespace() && *ch != ',')
-            .count()
-            .max(1) as f64;
-        let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f64;
-        let width_pt = (glyph_count * char_width + spaces * char_width * 0.45_f64).max(0.1_f64);
-        let start = guess.bbox.x0 as f64;
+        let fallback_width = candidate_char_units(text) * char_width;
+        let width_pt = measured_width_pt
+            .map(|value| value as f64)
+            .filter(|value| value.is_finite() && *value > 0.0_f64)
+            .unwrap_or(fallback_width)
+            .max(0.1_f64);
+        let start = match guess.context.anchor_mode.as_deref() {
+            Some("right_only") => {
+                let right_x = guess
+                    .context
+                    .anchor_right_x
+                    .map(|value| value as f64)
+                    .unwrap_or(guess.bbox.x1 as f64);
+                (right_x - width_pt).min(guess.bbox.x1 as f64 - 0.1_f64)
+            }
+            Some("left_only") | Some("two_sided") | None | Some(_) => guess.bbox.x0 as f64,
+        };
         (start, start + width_pt)
     }
 
@@ -1062,14 +1301,33 @@ mod guess_impl {
         if target <= 0.0_f64 {
             return 0.0_f64;
         }
+        let estimated = candidate_char_units(text) * char_width;
+        ((estimated - target).abs() / target.max(1.0_f64)).min(3.0_f64)
+    }
+
+    fn candidate_char_units(text: &str) -> f64 {
         let glyph_count = text
             .chars()
             .filter(|ch| !ch.is_whitespace() && *ch != ',')
             .count()
             .max(1) as f64;
         let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f64;
-        let estimated = glyph_count * char_width + spaces * char_width * 0.45_f64;
-        ((estimated - target).abs() / target.max(1.0_f64)).min(3.0_f64)
+        glyph_count + spaces * 0.45_f64
+    }
+
+    fn char_unit_band(target_width_pt: f64, char_width_pt: f64, tolerance_pt: f64) -> (f64, f64) {
+        if !target_width_pt.is_finite()
+            || target_width_pt <= 0.0_f64
+            || !char_width_pt.is_finite()
+            || char_width_pt <= 0.0_f64
+        {
+            return (1.0_f64, f64::INFINITY);
+        }
+        let target_units = target_width_pt / char_width_pt.max(0.1_f64);
+        let slack = (tolerance_pt.abs() / char_width_pt.max(0.1_f64)).max(2.0_f64) + 2.0_f64;
+        let lower = (target_units - slack).max(1.0_f64);
+        let upper = (target_units + slack).max(lower + 1.0_f64);
+        (lower, upper)
     }
 
     fn anchor_overlap_penalty_pt(
@@ -1140,7 +1398,8 @@ mod guess_impl {
         assets: &std::collections::BTreeMap<String, FontAsset>,
         width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
         cache: &mut WidthCache,
-    ) -> RedactionGuess {
+    ) -> (RedactionGuess, CandidateFunnelMetrics) {
+        let mut funnel = CandidateFunnelMetrics::default();
         let asset = assets.get(&anchor.font_key);
         let fallback_char_width = estimate_char_width_pt(
             &anchor.left_anchor_text,
@@ -1192,6 +1451,10 @@ mod guess_impl {
             h_scale_bits: anchor.h_scale_pct.to_bits(),
             metrics_dpi_bits: DEFAULT_METRICS_DPI.to_bits(),
         };
+        let has_width_table_for_anchor = width_tables.contains_key(&WidthTableKey {
+            page_index: redaction.page_index,
+            font_key: anchor.font_key.clone(),
+        });
         let left_anchor_text = anchor.left_anchor_text.trim();
         if !cache.candidates.contains_key(&key) {
             let mut widths = std::collections::BTreeMap::new();
@@ -1215,6 +1478,7 @@ mod guess_impl {
                 .map(|(text, measured)| CandidateWidthEntry {
                     text: text.clone(),
                     width_pt: measured.pt,
+                    source: measured.source,
                 })
                 .collect::<Vec<_>>();
             sorted.sort_by(|left, right| {
@@ -1243,68 +1507,56 @@ mod guess_impl {
                 DEFAULT_METRICS_DPI,
             )
         });
-        let candidate_widths = cache.candidates.get(&key);
-        let Some(candidate_widths) = candidate_widths else {
-            return RedactionGuess {
-                page_index: redaction.page_index,
-                bbox: redaction.bbox,
-                candidates: Vec::new(),
-                exact_matches: Vec::new(),
-                context: GuessContext {
-                    left_anchor_text: anchor.left_anchor_text.clone(),
-                    right_anchor_text: anchor.right_anchor_text.clone(),
-                    gap_pt: (anchor.right_x - anchor.left_x) as f32,
-                    char_width_pt: fallback_char_width as f32,
-                    tol_pt: anchor.epsilon_pt as f32,
-                    anchor_left_x: Some(anchor.left_x as f32),
-                    anchor_right_x: Some(anchor.right_x as f32),
-                    anchor_font_key: Some(anchor.font_key.clone()),
-                    anchor_font_size_pt: Some(anchor.font_size_pt),
-                    anchor_h_scale_pct: Some(anchor.h_scale_pct),
-                    anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
-                    has_anchor_pair: true,
-                },
-                visual_compared_pixels: None,
-                visual_mean_abs_diff: None,
-                visual_changed_pixel_ratio: None,
-                visual_reason: None,
-                visual_dropped: false,
-            };
-        };
         let candidate_width_index = cache.sorted_by_width.get(&key);
         let Some(candidate_width_index) = candidate_width_index else {
-            return RedactionGuess {
-                page_index: redaction.page_index,
-                bbox: redaction.bbox,
-                candidates: Vec::new(),
-                exact_matches: Vec::new(),
-                context: GuessContext {
-                    left_anchor_text: anchor.left_anchor_text.clone(),
-                    right_anchor_text: anchor.right_anchor_text.clone(),
-                    gap_pt: (anchor.right_x - anchor.left_x) as f32,
-                    char_width_pt: fallback_char_width as f32,
-                    tol_pt: anchor.epsilon_pt as f32,
-                    anchor_left_x: Some(anchor.left_x as f32),
-                    anchor_right_x: Some(anchor.right_x as f32),
-                    anchor_font_key: Some(anchor.font_key.clone()),
-                    anchor_font_size_pt: Some(anchor.font_size_pt),
-                    anchor_h_scale_pct: Some(anchor.h_scale_pct),
-                    anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
-                    has_anchor_pair: true,
+            return (
+                RedactionGuess {
+                    page_index: redaction.page_index,
+                    bbox: redaction.bbox,
+                    candidates: Vec::new(),
+                    exact_matches: Vec::new(),
+                    context: GuessContext {
+                        left_anchor_text: anchor.left_anchor_text.clone(),
+                        right_anchor_text: anchor.right_anchor_text.clone(),
+                        gap_pt: (anchor.right_x - anchor.left_x) as f32,
+                        char_width_pt: fallback_char_width as f32,
+                        tol_pt: anchor.epsilon_pt as f32,
+                        anchor_left_x: Some(anchor.left_x as f32),
+                        anchor_right_x: Some(anchor.right_x as f32),
+                        anchor_font_key: Some(anchor.font_key.clone()),
+                        anchor_font_size_pt: Some(anchor.font_size_pt),
+                        anchor_h_scale_pct: Some(anchor.h_scale_pct),
+                        anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
+                        anchor_mode: Some(anchor.mode.as_str().to_owned()),
+                        anchor_width_source: None,
+                        space_width_source: None,
+                        candidate_width_source: None,
+                        width_fallback_reason: None,
+                        confidence_score: None,
+                        confidence_factors: None,
+                        has_anchor_pair: true,
+                    },
+                    visual_compared_pixels: None,
+                    visual_mean_abs_diff: None,
+                    visual_changed_pixel_ratio: None,
+                    visual_reason: None,
+                    visual_dropped: false,
                 },
-                visual_compared_pixels: None,
-                visual_mean_abs_diff: None,
-                visual_changed_pixel_ratio: None,
-                visual_reason: None,
-                visual_dropped: false,
-            };
+                funnel,
+            );
         };
 
         let mut scored = Vec::new();
         let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
         let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
         let gap_ratio = anchor_gap_pt / redaction_width_pt;
-        let multi_span_mode = gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
+        let multi_span_mode = matches!(anchor.mode, AnchorMode::TwoSided)
+            && gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
+        let (min_char_units, max_char_units) = char_unit_band(
+            redaction_width_pt,
+            fallback_char_width.max(0.1_f64),
+            anchor.epsilon_pt.max(cfg.tol_pt),
+        );
         let anchor_filter_limit_pt =
             (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(cfg.tol_pt.max(4.0_f64));
         let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
@@ -1328,10 +1580,16 @@ mod guess_impl {
                 MULTI_SPAN_WIDTH_BAND_LIMIT,
             );
             for entry in band {
+                funnel.scanned += 1;
                 let trimmed = entry.text.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
+                let char_units = candidate_char_units(trimmed);
+                if char_units < min_char_units || char_units > max_char_units {
+                    continue;
+                }
+                funnel.after_char_units += 1;
                 if !passes_context_filter(
                     &anchor.left_anchor_text,
                     &anchor.right_anchor_text,
@@ -1339,9 +1597,11 @@ mod guess_impl {
                 ) {
                     continue;
                 }
+                funnel.after_context += 1;
                 if list_like_context && !looks_like_multi_span_name_candidate(trimmed) {
                     continue;
                 }
+                funnel.after_shape += 1;
 
                 let predicted_right = anchor.left_x
                     + left_width.pt
@@ -1350,10 +1610,12 @@ mod guess_impl {
                     + space_width.pt
                     + anchor.row_bias_pt;
                 let anchor_err = (predicted_right - anchor.right_x).abs();
+                funnel.after_anchor += 1;
                 let box_err = (entry.width_pt - redaction_width_pt).abs();
                 if box_err > box_filter_limit_pt {
                     continue;
                 }
+                funnel.after_box += 1;
                 let raw_err = box_err + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT);
                 let context_penalty = punctuation_context_penalty(
                     &anchor.left_anchor_text,
@@ -1366,14 +1628,39 @@ mod guess_impl {
                     raw_error_pt: raw_err,
                     effective_error_pt: effective_err,
                     word_count: trimmed.split_whitespace().count() as u32,
+                    width_pt: entry.width_pt,
+                    width_source: entry.source,
                 });
             }
         } else {
-            for word in dictionary {
-                let trimmed = word.trim();
+            let single_span_width_slack_pt = (anchor.epsilon_pt.max(cfg.tol_pt) * 1.75_f64)
+                .max(redaction_width_pt * 0.45_f64)
+                .max(12.0_f64);
+            let lower_width = (redaction_width_pt - single_span_width_slack_pt).max(0.0_f64);
+            let upper_width = redaction_width_pt + single_span_width_slack_pt;
+            let ranged =
+                candidate_width_entries_in_range(candidate_width_index, lower_width, upper_width);
+            let mut band = if ranged.is_empty() {
+                candidate_width_index.as_slice()
+            } else {
+                ranged
+            };
+            band = trim_width_band_around_target(
+                band,
+                redaction_width_pt,
+                SINGLE_SPAN_WIDTH_BAND_LIMIT,
+            );
+            for entry in band {
+                let trimmed = entry.text.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
+                funnel.scanned += 1;
+                let char_units = candidate_char_units(trimmed);
+                if char_units < min_char_units || char_units > max_char_units {
+                    continue;
+                }
+                funnel.after_char_units += 1;
                 if !passes_context_filter(
                     &anchor.left_anchor_text,
                     &anchor.right_anchor_text,
@@ -1381,21 +1668,51 @@ mod guess_impl {
                 ) {
                     continue;
                 }
-                let Some(measured_width) = candidate_widths.get(trimmed).copied() else {
-                    continue;
-                };
-                let predicted_right = anchor.left_x
-                    + left_width.pt
-                    + space_width.pt
-                    + measured_width.pt
-                    + space_width.pt
-                    + anchor.row_bias_pt;
-                let anchor_err = (predicted_right - anchor.right_x).abs();
-                let box_err = (measured_width.pt - redaction_width_pt).abs();
-                if anchor_err > anchor_filter_limit_pt {
+                funnel.after_context += 1;
+                if list_like_context && !looks_like_multi_span_name_candidate(trimmed) {
                     continue;
                 }
-                let raw_err = anchor_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT);
+                funnel.after_shape += 1;
+                let box_err = (entry.width_pt - redaction_width_pt).abs();
+                let side_alignment_err = match anchor.mode {
+                    AnchorMode::TwoSided => {
+                        let predicted_right = anchor.left_x
+                            + left_width.pt
+                            + space_width.pt
+                            + entry.width_pt
+                            + space_width.pt
+                            + anchor.row_bias_pt;
+                        (predicted_right - anchor.right_x).abs()
+                    }
+                    AnchorMode::LeftOnly => {
+                        let predicted_start =
+                            anchor.left_x + left_width.pt + space_width.pt + anchor.row_bias_pt;
+                        (predicted_start - redaction.bbox.x0 as f64).abs()
+                    }
+                    AnchorMode::RightOnly => {
+                        let predicted_end = anchor.right_x - space_width.pt + anchor.row_bias_pt;
+                        (predicted_end - redaction.bbox.x1 as f64).abs()
+                    }
+                };
+                let side_alignment_limit = match anchor.mode {
+                    AnchorMode::TwoSided => anchor_filter_limit_pt,
+                    AnchorMode::LeftOnly | AnchorMode::RightOnly => {
+                        anchor_filter_limit_pt * 2.5_f64
+                    }
+                };
+                if side_alignment_err > side_alignment_limit {
+                    continue;
+                }
+                funnel.after_anchor += 1;
+                funnel.after_box += 1;
+                let raw_err = match anchor.mode {
+                    AnchorMode::TwoSided => {
+                        side_alignment_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT)
+                    }
+                    AnchorMode::LeftOnly | AnchorMode::RightOnly => {
+                        box_err + (side_alignment_err * 0.20_f64)
+                    }
+                };
                 let context_penalty = punctuation_context_penalty(
                     &anchor.left_anchor_text,
                     &anchor.right_anchor_text,
@@ -1407,9 +1724,12 @@ mod guess_impl {
                     raw_error_pt: raw_err,
                     effective_error_pt: effective_err,
                     word_count: trimmed.split_whitespace().count() as u32,
+                    width_pt: entry.width_pt,
+                    width_source: entry.source,
                 });
             }
         }
+        funnel.scored = scored.len();
         scored.sort_by(|left_candidate, right_candidate| {
             left_candidate
                 .effective_error_pt
@@ -1461,8 +1781,24 @@ mod guess_impl {
                 score: (1.0 - (candidate.effective_error_pt / denom)).clamp(0.0, 1.0) as f32,
                 error_pt: candidate.raw_error_pt as f32,
                 word_count: candidate.word_count,
+                width_pt: Some(candidate.width_pt as f32),
             })
             .collect::<Vec<_>>();
+        let candidate_width_source = selected
+            .first()
+            .map(|candidate| candidate.width_source.as_str().to_owned());
+        let mut width_fallback_parts = Vec::<&str>::new();
+        if asset.is_none() {
+            width_fallback_parts.push("font_asset_missing");
+        }
+        if !has_width_table_for_anchor {
+            width_fallback_parts.push("width_table_missing");
+        }
+        let width_fallback_reason = if width_fallback_parts.is_empty() {
+            None
+        } else {
+            Some(width_fallback_parts.join("+"))
+        };
 
         let char_width = if !anchor.left_anchor_text.trim().is_empty() {
             let chars = anchor.left_anchor_text.trim().chars().count().max(1) as f64;
@@ -1471,7 +1807,7 @@ mod guess_impl {
             fallback_char_width
         };
 
-        RedactionGuess {
+        let guess = RedactionGuess {
             page_index: redaction.page_index,
             bbox: redaction.bbox,
             candidates,
@@ -1488,6 +1824,13 @@ mod guess_impl {
                 anchor_font_size_pt: Some(anchor.font_size_pt),
                 anchor_h_scale_pct: Some(anchor.h_scale_pct),
                 anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
+                anchor_mode: Some(anchor.mode.as_str().to_owned()),
+                anchor_width_source: Some(left_width.source.as_str().to_owned()),
+                space_width_source: Some(space_width.source.as_str().to_owned()),
+                candidate_width_source,
+                width_fallback_reason,
+                confidence_score: None,
+                confidence_factors: None,
                 has_anchor_pair: true,
             },
             visual_compared_pixels: None,
@@ -1495,7 +1838,8 @@ mod guess_impl {
             visual_changed_pixel_ratio: None,
             visual_reason: None,
             visual_dropped: false,
-        }
+        };
+        (guess, funnel)
     }
 
     fn select_anchor_pair(
@@ -1516,6 +1860,12 @@ mod guess_impl {
             .filter(|hit| !hit.text.trim().is_empty());
         let left_hint = left_hint_hit.map(|hit| hit.text.trim());
         let right_hint = right_hint_hit.map(|hit| hit.text.trim());
+        let hints = AnchorHints {
+            left_text: left_hint,
+            left_x: left_hint_hit.map(|hit| hit.bbox.x0 as f64),
+            right_text: right_hint,
+            right_x: right_hint_hit.map(|hit| hit.bbox.x0 as f64),
+        };
 
         let mut row_runs = collect_row_runs_for_anchor(redaction, runs, true);
         if row_runs.is_empty() {
@@ -1584,6 +1934,7 @@ mod guess_impl {
                         right_bbox: run.bbox,
                         epsilon_pt: calibration.epsilon_pt,
                         row_bias_pt: calibration.bias_pt,
+                        mode: AnchorMode::TwoSided,
                     });
                 }
             }
@@ -1638,7 +1989,7 @@ mod guess_impl {
             }
         }
         if pairs.is_empty() {
-            return None;
+            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
         }
 
         pairs.sort_by(|left_pair, right_pair| {
@@ -1704,10 +2055,10 @@ mod guess_impl {
             width_tables,
         );
         if left_anchor_text.trim().is_empty() || right_anchor_text.trim().is_empty() {
-            return None;
+            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
         }
         if right_x <= left_x {
-            return None;
+            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
         }
 
         let measure_ctx = WidthMeasureContext {
@@ -1730,7 +2081,137 @@ mod guess_impl {
             right_bbox: right_run.bbox,
             epsilon_pt: calibration.epsilon_pt,
             row_bias_pt: calibration.bias_pt,
+            mode: AnchorMode::TwoSided,
         })
+    }
+
+    fn recover_one_sided_anchor(
+        redaction: &RedactionOccurrence,
+        row_runs: &[&FontTextRun],
+        hints: &AnchorHints<'_>,
+        assets: &std::collections::BTreeMap<String, FontAsset>,
+        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+    ) -> Option<AnchorPairData> {
+        let left_only = row_runs
+            .iter()
+            .copied()
+            .filter(|run| run.bbox.x1 <= redaction.bbox.x0 + 1.5_f32)
+            .min_by(|left_run, right_run| {
+                let left_gap = (redaction.bbox.x0 as f64 - left_run.bbox.x1 as f64).max(0.0_f64);
+                let right_gap = (redaction.bbox.x0 as f64 - right_run.bbox.x1 as f64).max(0.0_f64);
+                left_gap
+                    .partial_cmp(&right_gap)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        (run_center_y(left_run) - rect_center_y(&redaction.bbox))
+                            .abs()
+                            .partial_cmp(
+                                &(run_center_y(right_run) - rect_center_y(&redaction.bbox)).abs(),
+                            )
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+        let right_only = row_runs
+            .iter()
+            .copied()
+            .filter(|run| run.bbox.x0 >= redaction.bbox.x1 - 1.5_f32)
+            .min_by(|left_run, right_run| {
+                let left_gap = (left_run.bbox.x0 as f64 - redaction.bbox.x1 as f64).max(0.0_f64);
+                let right_gap = (right_run.bbox.x0 as f64 - redaction.bbox.x1 as f64).max(0.0_f64);
+                left_gap
+                    .partial_cmp(&right_gap)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        (run_center_y(left_run) - rect_center_y(&redaction.bbox))
+                            .abs()
+                            .partial_cmp(
+                                &(run_center_y(right_run) - rect_center_y(&redaction.bbox)).abs(),
+                            )
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+        if let Some(left_run) = left_only {
+            let asset = assets.get(&left_run.font_key);
+            let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
+                redaction.page_index,
+                left_run,
+                hints.left_text,
+                hints.left_x,
+                asset,
+                width_tables,
+            );
+            let right_anchor_text = hints.right_text.unwrap_or_default().to_owned();
+            let right_x = (redaction.bbox.x1 as f64 + 0.5_f64).max(left_x + 1.0_f64);
+            if !left_anchor_text.trim().is_empty() && right_x > left_x {
+                let measure_ctx = WidthMeasureContext {
+                    page_index: redaction.page_index,
+                    asset,
+                    width_tables,
+                    h_scale_pct: left_run.h_scale_pct,
+                };
+                let mut calibration =
+                    estimate_row_epsilon(row_runs, left_run, redaction, &measure_ctx);
+                calibration.epsilon_pt = (calibration.epsilon_pt * 1.75_f64).max(4.0_f64);
+                return Some(AnchorPairData {
+                    left_anchor_text,
+                    right_anchor_text,
+                    left_x,
+                    right_x,
+                    font_key: left_run.font_key.clone(),
+                    font_name: left_run.font_name.clone(),
+                    font_size_pt: left_run.font_size_pt,
+                    h_scale_pct: left_run.h_scale_pct,
+                    left_bbox: left_run.bbox,
+                    right_bbox: left_run.bbox,
+                    epsilon_pt: calibration.epsilon_pt,
+                    row_bias_pt: calibration.bias_pt,
+                    mode: AnchorMode::LeftOnly,
+                });
+            }
+        }
+
+        if let Some(right_run) = right_only {
+            let asset = assets.get(&right_run.font_key);
+            let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
+                redaction.page_index,
+                right_run,
+                hints.right_text,
+                hints.right_x,
+                asset,
+                width_tables,
+            );
+            let left_anchor_text = hints.left_text.unwrap_or_default().to_owned();
+            let left_x = (redaction.bbox.x0 as f64 - 0.5_f64).min(right_x - 1.0_f64);
+            if !right_anchor_text.trim().is_empty() && right_x > left_x {
+                let measure_ctx = WidthMeasureContext {
+                    page_index: redaction.page_index,
+                    asset,
+                    width_tables,
+                    h_scale_pct: right_run.h_scale_pct,
+                };
+                let mut calibration =
+                    estimate_row_epsilon(row_runs, right_run, redaction, &measure_ctx);
+                calibration.epsilon_pt = (calibration.epsilon_pt * 1.75_f64).max(4.0_f64);
+                return Some(AnchorPairData {
+                    left_anchor_text,
+                    right_anchor_text,
+                    left_x,
+                    right_x,
+                    font_key: right_run.font_key.clone(),
+                    font_name: right_run.font_name.clone(),
+                    font_size_pt: right_run.font_size_pt,
+                    h_scale_pct: right_run.h_scale_pct,
+                    left_bbox: right_run.bbox,
+                    right_bbox: right_run.bbox,
+                    epsilon_pt: calibration.epsilon_pt,
+                    row_bias_pt: calibration.bias_pt,
+                    mode: AnchorMode::RightOnly,
+                });
+            }
+        }
+
+        None
     }
 
     fn resolve_anchor_text_and_x(
@@ -1959,7 +2440,11 @@ mod guess_impl {
         if !width_pt.is_finite() || width_pt <= 0.0_f64 {
             return None;
         }
-        Some(measured_width_from_points(width_pt, metrics_dpi))
+        Some(measured_width_from_points(
+            width_pt,
+            metrics_dpi,
+            WidthSource::Asset,
+        ))
     }
 
     fn measure_text_width_from_sources(
@@ -1968,7 +2453,11 @@ mod guess_impl {
         width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
     ) -> Option<MeasuredWidth> {
         if input.text.is_empty() {
-            return Some(measured_width_from_points(0.0_f64, input.metrics_dpi));
+            return Some(measured_width_from_points(
+                0.0_f64,
+                input.metrics_dpi,
+                WidthSource::Fallback,
+            ));
         }
         if let Some(asset_value) = asset {
             if let Some(width) = measure_text_width_pt(
@@ -1991,15 +2480,22 @@ mod guess_impl {
             if let Some(width) = width_from_table(table, input.text, input.font_size_pt) {
                 if width.is_finite() && width > 0.0_f64 {
                     let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-                    return Some(measured_width_from_points(width * scale, input.metrics_dpi));
+                    return Some(measured_width_from_points(
+                        width * scale,
+                        input.metrics_dpi,
+                        WidthSource::PdfWidthTable,
+                    ));
                 }
             }
         }
         width_from_core_font(input.font_name, input.text, input.font_size_pt).and_then(|width| {
             let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
             let width_pt = width * scale;
-            (width_pt.is_finite() && width_pt > 0.0_f64)
-                .then_some(measured_width_from_points(width_pt, input.metrics_dpi))
+            (width_pt.is_finite() && width_pt > 0.0_f64).then_some(measured_width_from_points(
+                width_pt,
+                input.metrics_dpi,
+                WidthSource::CoreFont,
+            ))
         })
     }
 
@@ -2247,8 +2743,11 @@ mod guess_impl {
             .as_slice()
     }
 
-    fn measured_width_from_points(width_pt: f64, _dpi: f32) -> MeasuredWidth {
-        MeasuredWidth { pt: width_pt }
+    fn measured_width_from_points(width_pt: f64, _dpi: f32, source: WidthSource) -> MeasuredWidth {
+        MeasuredWidth {
+            pt: width_pt,
+            source,
+        }
     }
 
     fn times_roman_width(ch: char) -> i32 {
@@ -2536,7 +3035,7 @@ mod guess_impl {
                 }
             })
             .sum::<f64>();
-        measured_width_from_points(width_pt, dpi)
+        measured_width_from_points(width_pt, dpi, WidthSource::Fallback)
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2552,6 +3051,7 @@ mod guess_impl {
     struct CandidateWidthEntry {
         text: String,
         width_pt: f64,
+        source: WidthSource,
     }
 
     struct WidthCache {
@@ -2804,6 +3304,7 @@ mod guess_impl {
                         score: 1.0_f32,
                         error_pt: *error,
                         word_count: text.split_whitespace().count() as u32,
+                        width_pt: None,
                     })
                     .collect::<Vec<_>>(),
                 exact_matches: candidates
@@ -2822,6 +3323,13 @@ mod guess_impl {
                     anchor_font_size_pt: Some(11.0_f32),
                     anchor_h_scale_pct: Some(100.0_f32),
                     anchor_row_bias_pt: Some(0.0_f32),
+                    anchor_mode: Some("two_sided".to_owned()),
+                    anchor_width_source: None,
+                    space_width_source: None,
+                    candidate_width_source: None,
+                    width_fallback_reason: None,
+                    confidence_score: None,
+                    confidence_factors: None,
                     has_anchor_pair: true,
                 },
                 visual_compared_pixels: None,
@@ -2898,11 +3406,110 @@ mod guess_impl {
         }
 
         #[test]
+        fn select_anchor_pair_recovers_left_only_when_right_neighbor_missing() {
+            let redaction = RedactionOccurrence {
+                page_index: 1,
+                bbox: Rect::new(50.0, 100.0, 88.0, 112.0),
+                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
+                score: 1.0,
+                meta: BTreeMap::new(),
+                underlying_text: vec![crate::types::redaction_types::UnderlyingTextHit {
+                    page_index: 1,
+                    bbox: Rect::new(10.0, 100.0, 45.0, 112.0),
+                    text: "those served included".to_owned(),
+                }],
+            };
+            let runs = [run(1, "included", 10.0, 100.0, 45.0, 112.0)];
+            let run_refs = runs.iter().collect::<Vec<_>>();
+            let assets = BTreeMap::new();
+            let width_tables = BTreeMap::new();
+
+            let selected = select_anchor_pair(&redaction, &run_refs, &assets, &width_tables)
+                .expect("expected one-sided anchor recovery");
+            assert_eq!(selected.mode.as_str(), "left_only");
+            assert_eq!(selected.left_anchor_text, "included");
+            assert!(selected.right_x > selected.left_x);
+        }
+
+        #[test]
+        fn single_span_list_rows_filter_non_name_candidates() {
+            let redaction = RedactionOccurrence {
+                page_index: 1,
+                bbox: Rect::new(80.0, 200.0, 145.0, 212.0),
+                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
+                score: 1.0,
+                meta: BTreeMap::new(),
+                underlying_text: Vec::new(),
+            };
+            let anchor = AnchorPairData {
+                left_anchor_text: "those served included".to_owned(),
+                right_anchor_text: ",".to_owned(),
+                left_x: 30.0_f64,
+                right_x: 142.0_f64,
+                font_key: "F1".to_owned(),
+                font_name: "Helvetica".to_owned(),
+                font_size_pt: 11.0_f32,
+                h_scale_pct: 100.0_f32,
+                left_bbox: FontRect::new(10.0, 198.0, 75.0, 212.0),
+                right_bbox: FontRect::new(146.0, 198.0, 148.0, 212.0),
+                epsilon_pt: 8.0_f64,
+                row_bias_pt: 0.0_f64,
+                mode: AnchorMode::TwoSided,
+            };
+            let dictionary = vec![
+                "SARAH KELLEN".to_owned(),
+                "MAXWELL".to_owned(),
+                "A/B TEST".to_owned(),
+                "TOKEN123".to_owned(),
+                "WILLIAM HAMMOND".to_owned(),
+            ];
+            let cfg = GuessConfig {
+                max_words: 4,
+                max_candidates: 10,
+                max_dictionary: 100,
+                tol_pt: 100.0,
+                max_nodes: 1_000,
+                visual_score: false,
+                visual_score_dpi: 200.0_f32,
+                visual_min_ink_pixels: 64_u32,
+                visual_drop_threshold: None,
+            };
+            let assets = BTreeMap::new();
+            let width_tables = BTreeMap::new();
+            let mut cache = WidthCache::new();
+
+            let (guess, _funnel) = build_guess_for_anchor(
+                &redaction,
+                &dictionary,
+                &cfg,
+                &anchor,
+                &assets,
+                &width_tables,
+                &mut cache,
+            );
+            let names_only = guess
+                .candidates
+                .iter()
+                .map(|candidate| candidate.text.as_str())
+                .all(looks_like_multi_span_name_candidate);
+            assert!(
+                names_only,
+                "expected single-span list context to keep only name-like candidates, got {:?}",
+                guess
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.text.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
         fn width_band_range_and_trim_stay_near_target() {
             let entries = (0_i32..30_i32)
                 .map(|idx| CandidateWidthEntry {
                     text: format!("C{idx}"),
                     width_pt: 10.0 + idx as f64,
+                    source: WidthSource::CoreFont,
                 })
                 .collect::<Vec<_>>();
             let ranged = candidate_width_entries_in_range(&entries, 18.0_f64, 24.0_f64);
@@ -2974,6 +3581,43 @@ mod guess_impl {
             assert_eq!(top[1].as_deref(), Some("ADRIANA MUCINSKA"));
             assert_eq!(top[2].as_deref(), Some("NADIA MARCINKOVA"));
         }
+
+        #[test]
+        fn row_joint_assignment_can_skip_weak_rows_with_null_option() {
+            let mut guesses = vec![
+                synthetic_guess(
+                    100.0_f32,
+                    145.0_f32,
+                    460.0_f32,
+                    472.0_f32,
+                    &[("SARAH KELLEN", 0.35_f32), ("ADRIANA MUCINSKA", 0.95_f32)],
+                ),
+                synthetic_guess(
+                    152.0_f32,
+                    196.0_f32,
+                    460.0_f32,
+                    472.0_f32,
+                    &[("SARAH KELLEN", 2.50_f32), ("ADRIANA MUCINSKA", 2.90_f32)],
+                ),
+            ];
+
+            let assigned = apply_row_joint_assignment(&mut guesses);
+            assert_eq!(assigned.len(), 1);
+            assert_eq!(
+                guesses[0]
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.text.as_str()),
+                Some("SARAH KELLEN")
+            );
+            assert_eq!(
+                guesses[1]
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.text.as_str()),
+                Some("SARAH KELLEN")
+            );
+        }
     }
 }
 
@@ -2993,6 +3637,7 @@ mod redaction_impl {
     const LINE_SEARCH_WINDOW_PT: f32 = 18.0;
     const MAX_CONTEXT_GAP_PT: f32 = 80.0;
     const LARGE_OVERLAP_PT: f32 = 20.0;
+    const MAX_CONTEXT_WORDS_PER_SIDE: usize = 2;
     type LineMatchScore = (i32, i32, i32, i32);
     type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
 
@@ -3390,7 +4035,11 @@ mod redaction_impl {
             }
             start -= 1;
         }
-        line[start..=anchor_pos].to_vec()
+        let mut phrase = line[start..=anchor_pos].to_vec();
+        if phrase.len() > MAX_CONTEXT_WORDS_PER_SIDE {
+            phrase = phrase[phrase.len() - MAX_CONTEXT_WORDS_PER_SIDE..].to_vec();
+        }
+        phrase
     }
 
     fn grow_phrase_right(
@@ -3407,7 +4056,11 @@ mod redaction_impl {
             }
             end += 1;
         }
-        line[anchor_pos..=end].to_vec()
+        let mut phrase = line[anchor_pos..=end].to_vec();
+        if phrase.len() > MAX_CONTEXT_WORDS_PER_SIDE {
+            phrase.truncate(MAX_CONTEXT_WORDS_PER_SIDE);
+        }
+        phrase
     }
 
     fn word_gap(left: &Rect, right: &Rect) -> f32 {
@@ -3572,6 +4225,7 @@ mod visual_guess_score_impl {
     const OVERLAY_TEXT_COLOR: [f32; 3] = [0.0_f32, 0.0_f32, 0.0_f32];
     const OVERLAY_BORDER_WIDTH: f32 = 1.0_f32;
     const CONTEXT_ALIGNMENT_MAX_DIFF: f32 = 0.22_f32;
+    const MAX_VISUAL_SCORE_DPI: f32 = 96.0_f32;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct VisualGuessScoreConfig {
@@ -3697,6 +4351,14 @@ mod visual_guess_score_impl {
         cfg: VisualGuessScoreConfig,
         max_items: usize,
     ) -> Result<Vec<String>, String> {
+        let effective_dpi = cfg.dpi.min(MAX_VISUAL_SCORE_DPI);
+        let dpi_ratio = if cfg.dpi <= 0.0_f32 {
+            1.0_f32
+        } else {
+            (effective_dpi / cfg.dpi).clamp(0.1_f32, 1.0_f32)
+        };
+        let effective_min_ink_pixels =
+            ((cfg.min_ink_pixels as f32 * dpi_ratio * dpi_ratio).round() as u32).max(8_u32);
         let overlays_by_redaction = group_overlays_by_redaction(&inputs.overlays);
         let page_boxes = build_page_boxes(&inputs.pdf_bytes)?;
 
@@ -3758,12 +4420,13 @@ mod visual_guess_score_impl {
         let mut overlay_pages = BTreeMap::<u32, RenderedPage>::new();
         let mut context_pages = BTreeMap::<u32, RenderedPage>::new();
         for page_index in pages_to_render {
-            let base = base_renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
-            let overlay = overlay_renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
+            let base = base_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
+            let overlay =
+                overlay_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
             base_pages.insert(page_index, base);
             overlay_pages.insert(page_index, overlay);
             if let Some(renderer) = &context_renderer {
-                let context = renderer.render_page_to_rgba(page_index as usize, cfg.dpi)?;
+                let context = renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
                 context_pages.insert(page_index, context);
             }
         }
@@ -3831,7 +4494,7 @@ mod visual_guess_score_impl {
                             page_box,
                             context_window_bbox,
                             redaction.bbox,
-                            cfg.min_ink_pixels,
+                            effective_min_ink_pixels,
                         ) {
                             context_rows_scored += 1;
                             if context_score.mean_abs_diff > CONTEXT_ALIGNMENT_MAX_DIFF {
@@ -3850,7 +4513,7 @@ mod visual_guess_score_impl {
                 page_box,
                 window_bbox,
                 redaction.bbox,
-                cfg.min_ink_pixels,
+                effective_min_ink_pixels,
             );
             let Some(score) = score else {
                 guess.visual_reason = Some("insufficient_ink_pixels".to_owned());
@@ -3873,7 +4536,7 @@ mod visual_guess_score_impl {
         }
 
         diagnostics.push(format!(
-        "visual_score=enabled rows_total={} rows_with_top_guess={} context_rows_scored={} context_rows_rejected={} rows_scored={} rows_dropped={} dpi={} min_ink_pixels={} drop_threshold={} context_max_diff={}",
+        "visual_score=enabled rows_total={} rows_with_top_guess={} context_rows_scored={} context_rows_rejected={} rows_scored={} rows_dropped={} dpi_requested={} dpi_effective={} min_ink_pixels_requested={} min_ink_pixels_effective={} drop_threshold={} context_max_diff={}",
         max_items,
         rows_with_top_guess,
         context_rows_scored,
@@ -3881,7 +4544,9 @@ mod visual_guess_score_impl {
         rows_scored,
         rows_dropped,
         cfg.dpi,
+        effective_dpi,
         cfg.min_ink_pixels,
+        effective_min_ink_pixels,
         cfg.drop_threshold
             .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "none".to_owned()),

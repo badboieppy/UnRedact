@@ -14,6 +14,7 @@ use crate::types::redaction_types::{
 const OCR_WINDOW_MIN_WIDTH_PT: f32 = 64.0;
 const OCR_WINDOW_MAX_WIDTH_PT: f32 = 220.0;
 const OCR_WINDOW_PADDING_PT: f32 = 2.0;
+const MAX_RASTER_ANALYSIS_DPI: f32 = 120.0;
 const OCR_ENABLE_ENV: &str = "UNREDACT_ENABLE_LOCAL_OCR";
 const OCR_CMD_ENV: &str = "UNREDACT_TESSERACT_CMD";
 static OCR_TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -1118,8 +1119,9 @@ fn extract_ocr_context_hits(
     let page_box = page_render_box_from_page(&retriever.doc, page_id)
         .unwrap_or(Rect::new(0.0, 0.0, 612.0, 792.0));
 
+    let effective_dpi = cfg.raster_dpi.min(MAX_RASTER_ANALYSIS_DPI);
     let rendered = renderer
-        .render_page_to_rgba(page_index as usize, cfg.raster_dpi)
+        .render_page_to_rgba(page_index as usize, effective_dpi)
         .map_err(|e| format!("ocr_render_failed:{e}"))?;
     if rendered.width_px == 0 || rendered.height_px == 0 {
         return Err("ocr_empty_render".to_owned());
@@ -1736,8 +1738,9 @@ fn extract_raster_page_redactions(
     page_box: Rect,
     cfg: &RedactionFinderConfig,
 ) -> Result<Vec<RedactionOccurrence>, String> {
+    let effective_dpi = cfg.raster_dpi.min(MAX_RASTER_ANALYSIS_DPI);
     let rendered = renderer
-        .render_page_to_rgba(page_index as usize, cfg.raster_dpi)
+        .render_page_to_rgba(page_index as usize, effective_dpi)
         .map_err(|e| format!("render_failed:{e}"))?;
 
     if rendered.width_px == 0 || rendered.height_px == 0 {
@@ -1807,6 +1810,14 @@ fn extract_raster_page_redactions(
             let mut meta: BTreeMap<String, String> = BTreeMap::new();
             if cfg.include_details {
                 meta.insert("raster_dpi".to_owned(), format!("{:.1}", rendered.dpi));
+                meta.insert(
+                    "raster_dpi_requested".to_owned(),
+                    format!("{:.1}", cfg.raster_dpi),
+                );
+                meta.insert(
+                    "raster_dpi_effective".to_owned(),
+                    format!("{:.1}", effective_dpi),
+                );
                 meta.insert(
                     "image_dims_px".to_owned(),
                     format!("{}x{}", rendered.width_px, rendered.height_px),

@@ -22,6 +22,9 @@ struct TextState {
     font_name: String,
     font_size_pt: f32,
     h_scale_pct: f32,
+    char_spacing: f32,
+    word_spacing: f32,
+    leading: f32,
     text_matrix: Matrix,
 }
 
@@ -33,6 +36,9 @@ impl Default for TextState {
             font_name: String::new(),
             font_size_pt: 0.0,
             h_scale_pct: 100.0_f32,
+            char_spacing: 0.0_f32,
+            word_spacing: 0.0_f32,
+            leading: 0.0_f32,
             text_matrix: Matrix::default(),
         }
     }
@@ -56,6 +62,12 @@ struct TextMetrics {
     width_px: f32,
     char_advances_pt: Vec<f32>,
     char_advances_px: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct ShowTextOp {
+    text: String,
+    per_char_adjustments_pt: Vec<(usize, f32)>,
 }
 
 #[inline]
@@ -138,6 +150,27 @@ fn extract_text_runs(
                     .and_then(object_to_f32)
                     .unwrap_or(st.h_scale_pct);
             }
+            "Tc" => {
+                st.char_spacing = op
+                    .operands
+                    .first()
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.char_spacing);
+            }
+            "Tw" => {
+                st.word_spacing = op
+                    .operands
+                    .first()
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.word_spacing);
+            }
+            "TL" => {
+                st.leading = op
+                    .operands
+                    .first()
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.leading);
+            }
             "Tm" => {
                 if let Some(tx) = op.operands.get(4).and_then(object_to_f32) {
                     st.text_matrix.tx = tx;
@@ -146,37 +179,52 @@ fn extract_text_runs(
                     st.text_matrix.ty = ty;
                 }
             }
-            "Td" | "TD" => {
+            "Td" => {
                 let dx = op.operands.first().and_then(object_to_f32).unwrap_or(0.0);
                 let dy = op.operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
                 st.text_matrix.tx += dx;
                 st.text_matrix.ty += dy;
             }
-            "Tj" | "TJ" | "'" | "\"" => {
+            "TD" => {
+                let dx = op.operands.first().and_then(object_to_f32).unwrap_or(0.0);
+                let dy = op.operands.get(1).and_then(object_to_f32).unwrap_or(0.0);
+                st.text_matrix.tx += dx;
+                st.text_matrix.ty += dy;
+                // PDF spec: TD also sets leading to -dy.
+                st.leading = -dy;
+            }
+            "T*" => {
+                st.text_matrix.ty += next_line_delta_y(st.leading, st.font_size_pt);
+            }
+            "'" => {
                 if !st.in_text {
                     continue;
                 }
-                let text = text_from_show_op(op);
-                if text.trim().is_empty() {
+                st.text_matrix.ty += next_line_delta_y(st.leading, st.font_size_pt);
+                let Some(show) = parse_show_text_op(op, &st) else {
+                    continue;
+                };
+                if show.text.trim().is_empty() {
                     continue;
                 }
 
                 let font_info = font_map.get(&st.font_key);
-                let metrics = measure_run_metrics(
+                let mut metrics = measure_run_metrics(
                     font_info,
                     &st.font_name,
                     st.font_size_pt,
                     st.h_scale_pct,
-                    &text,
+                    &show.text,
                 )
                 .unwrap_or_else(|| {
                     fallback_text_metrics(
-                        &text,
+                        &show.text,
                         st.font_size_pt.abs().max(1.0_f32),
                         st.h_scale_pct,
                         DEFAULT_METRICS_DPI,
                     )
                 });
+                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
                 let width = metrics.width_pt.max(0.0_f32);
                 let h = st.font_size_pt.abs().max(1.0);
                 let x0 = st.text_matrix.tx;
@@ -184,7 +232,112 @@ fn extract_text_runs(
                 let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
                 out.push(FontTextRun {
                     page_index,
-                    text,
+                    text: show.text,
+                    bbox,
+                    font_key: st.font_key.clone(),
+                    font_name: st.font_name.clone(),
+                    font_size_pt: st.font_size_pt,
+                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
+                    measured_width_pt: Some(metrics.width_pt),
+                    measured_width_px: Some(metrics.width_px),
+                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    char_advances_pt: metrics.char_advances_pt,
+                    char_advances_px: metrics.char_advances_px,
+                });
+                st.text_matrix.tx += width;
+            }
+            "\"" => {
+                if !st.in_text {
+                    continue;
+                }
+                if let Some(value) = op.operands.first().and_then(object_to_f32) {
+                    st.word_spacing = value;
+                }
+                if let Some(value) = op.operands.get(1).and_then(object_to_f32) {
+                    st.char_spacing = value;
+                }
+                st.text_matrix.ty += next_line_delta_y(st.leading, st.font_size_pt);
+                let Some(show) = parse_show_text_op(op, &st) else {
+                    continue;
+                };
+                if show.text.trim().is_empty() {
+                    continue;
+                }
+
+                let font_info = font_map.get(&st.font_key);
+                let mut metrics = measure_run_metrics(
+                    font_info,
+                    &st.font_name,
+                    st.font_size_pt,
+                    st.h_scale_pct,
+                    &show.text,
+                )
+                .unwrap_or_else(|| {
+                    fallback_text_metrics(
+                        &show.text,
+                        st.font_size_pt.abs().max(1.0_f32),
+                        st.h_scale_pct,
+                        DEFAULT_METRICS_DPI,
+                    )
+                });
+                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
+                let width = metrics.width_pt.max(0.0_f32);
+                let h = st.font_size_pt.abs().max(1.0);
+                let x0 = st.text_matrix.tx;
+                let y1 = st.text_matrix.ty;
+                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
+                out.push(FontTextRun {
+                    page_index,
+                    text: show.text,
+                    bbox,
+                    font_key: st.font_key.clone(),
+                    font_name: st.font_name.clone(),
+                    font_size_pt: st.font_size_pt,
+                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
+                    measured_width_pt: Some(metrics.width_pt),
+                    measured_width_px: Some(metrics.width_px),
+                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    char_advances_pt: metrics.char_advances_pt,
+                    char_advances_px: metrics.char_advances_px,
+                });
+                st.text_matrix.tx += width;
+            }
+            "Tj" | "TJ" => {
+                if !st.in_text {
+                    continue;
+                }
+                let Some(show) = parse_show_text_op(op, &st) else {
+                    continue;
+                };
+                if show.text.trim().is_empty() {
+                    continue;
+                }
+
+                let font_info = font_map.get(&st.font_key);
+                let mut metrics = measure_run_metrics(
+                    font_info,
+                    &st.font_name,
+                    st.font_size_pt,
+                    st.h_scale_pct,
+                    &show.text,
+                )
+                .unwrap_or_else(|| {
+                    fallback_text_metrics(
+                        &show.text,
+                        st.font_size_pt.abs().max(1.0_f32),
+                        st.h_scale_pct,
+                        DEFAULT_METRICS_DPI,
+                    )
+                });
+                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
+                let width = metrics.width_pt.max(0.0_f32);
+                let h = st.font_size_pt.abs().max(1.0);
+                let x0 = st.text_matrix.tx;
+                let y1 = st.text_matrix.ty;
+                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
+                out.push(FontTextRun {
+                    page_index,
+                    text: show.text,
                     bbox,
                     font_key: st.font_key.clone(),
                     font_name: st.font_name.clone(),
@@ -293,22 +446,116 @@ fn extract_font_bytes(doc: &Document, dict: &Dictionary) -> (Option<Vec<u8>>, Op
     (None, None)
 }
 
-fn text_from_show_op(op: &lopdf::content::Operation) -> String {
+fn parse_show_text_op(op: &lopdf::content::Operation, st: &TextState) -> Option<ShowTextOp> {
     if op.operator.as_str() == "TJ" {
-        if let Some(Object::Array(a)) = op.operands.first() {
-            return a
-                .iter()
-                .filter_map(decode_pdf_text)
-                .collect::<Vec<_>>()
-                .join("");
+        let items = match op.operands.first() {
+            Some(Object::Array(values)) => values,
+            _ => return None,
+        };
+        let mut text = String::new();
+        let mut per_char_adjustments_pt = Vec::<(usize, f32)>::new();
+        let mut total_chars = 0_usize;
+        for item in items {
+            if let Some(value) = decode_pdf_text(item) {
+                if value.is_empty() {
+                    continue;
+                }
+                total_chars += value.chars().count();
+                text.push_str(&value);
+                continue;
+            }
+            if let Some(value) = object_to_f32(item) {
+                if total_chars == 0 {
+                    continue;
+                }
+                let adj = tj_adjustment_pt(value, st.font_size_pt, st.h_scale_pct);
+                if adj.is_finite() && adj.abs() > f32::EPSILON {
+                    per_char_adjustments_pt.push((total_chars - 1, adj));
+                }
+            }
+        }
+        return Some(ShowTextOp {
+            text,
+            per_char_adjustments_pt,
+        });
+    }
+
+    op.operands
+        .last()
+        .and_then(decode_pdf_text)
+        .map(|text| ShowTextOp {
+            text,
+            per_char_adjustments_pt: Vec::new(),
+        })
+}
+
+fn next_line_delta_y(leading: f32, font_size_pt: f32) -> f32 {
+    if leading.is_finite() && leading.abs() > 0.01_f32 {
+        -leading
+    } else {
+        -font_size_pt.abs().max(1.0_f32) * 1.2_f32
+    }
+}
+
+fn pdf_spacing_pt(value: f32, font_size_pt: f32, h_scale_pct: f32) -> f32 {
+    let font_size = font_size_pt.abs().max(1.0_f32);
+    let scale = (h_scale_pct / 100.0_f32).max(0.01_f32);
+    value * (font_size / 1000.0_f32) * scale
+}
+
+fn tj_adjustment_pt(value: f32, font_size_pt: f32, h_scale_pct: f32) -> f32 {
+    -pdf_spacing_pt(value, font_size_pt, h_scale_pct)
+}
+
+fn apply_pdf_spacing_adjustments(metrics: &mut TextMetrics, show: &ShowTextOp, st: &TextState) {
+    if show.text.is_empty() || metrics.char_advances_pt.is_empty() {
+        return;
+    }
+    let chars = show.text.chars().collect::<Vec<_>>();
+    let inter_char_spacing = pdf_spacing_pt(st.char_spacing, st.font_size_pt, st.h_scale_pct);
+    let inter_word_spacing = pdf_spacing_pt(st.word_spacing, st.font_size_pt, st.h_scale_pct);
+    let mut width_delta = 0.0_f32;
+
+    let last_gap_index = chars.len().saturating_sub(1);
+    for (idx, ch) in chars.iter().enumerate().take(last_gap_index) {
+        let mut delta = inter_char_spacing;
+        if ch.is_whitespace() {
+            delta += inter_word_spacing;
+        }
+        if delta.abs() <= f32::EPSILON {
+            continue;
+        }
+        if idx < metrics.char_advances_pt.len() {
+            metrics.char_advances_pt[idx] += delta;
+        }
+        width_delta += delta;
+    }
+
+    for (char_idx, delta) in &show.per_char_adjustments_pt {
+        if !delta.is_finite() || delta.abs() <= f32::EPSILON {
+            continue;
+        }
+        if *char_idx < metrics.char_advances_pt.len() {
+            metrics.char_advances_pt[*char_idx] += *delta;
+            width_delta += *delta;
         }
     }
 
-    if let Some(text) = op.operands.last().and_then(decode_pdf_text) {
-        return text;
+    metrics.width_pt += width_delta;
+    if !metrics.width_pt.is_finite() || metrics.width_pt <= 0.0_f32 {
+        metrics.width_pt = 0.001_f32;
     }
-
-    String::new()
+    metrics.width_px = points_to_pixels(metrics.width_pt, DEFAULT_METRICS_DPI);
+    metrics.char_advances_pt = normalize_char_advances(
+        &show.text,
+        metrics.char_advances_pt.clone(),
+        metrics.width_pt,
+    );
+    metrics.char_advances_px = metrics
+        .char_advances_pt
+        .iter()
+        .map(|value| points_to_pixels(*value, DEFAULT_METRICS_DPI))
+        .collect::<Vec<_>>();
 }
 
 fn measure_run_metrics(
@@ -845,4 +1092,74 @@ fn is_subset_prefix(parts: &[&str]) -> bool {
     }
 
     prefix.chars().all(|c| c.is_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::StringFormat;
+
+    fn literal(value: &str) -> Object {
+        Object::String(value.as_bytes().to_vec(), StringFormat::Literal)
+    }
+
+    #[test]
+    fn parse_show_text_op_tj_preserves_text_and_adjustments() {
+        let op = lopdf::content::Operation {
+            operator: "TJ".to_owned(),
+            operands: vec![Object::Array(vec![
+                literal("AB"),
+                Object::Integer(120),
+                literal("CD"),
+            ])],
+        };
+        let st = TextState {
+            font_size_pt: 10.0_f32,
+            h_scale_pct: 100.0_f32,
+            ..TextState::default()
+        };
+        let parsed = parse_show_text_op(&op, &st).expect("expected parsed show op in test");
+        assert_eq!(parsed.text, "ABCD");
+        assert_eq!(parsed.per_char_adjustments_pt.len(), 1);
+        assert_eq!(parsed.per_char_adjustments_pt[0].0, 1);
+        assert!((parsed.per_char_adjustments_pt[0].1 + 1.2_f32).abs() < 0.001_f32);
+    }
+
+    #[test]
+    fn spacing_adjustments_apply_tc_and_tw() {
+        let mut metrics = TextMetrics {
+            width_pt: 30.0_f32,
+            width_px: points_to_pixels(30.0_f32, DEFAULT_METRICS_DPI),
+            char_advances_pt: vec![10.0_f32, 10.0_f32, 10.0_f32],
+            char_advances_px: vec![
+                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
+                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
+                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
+            ],
+        };
+        let show = ShowTextOp {
+            text: "A B".to_owned(),
+            per_char_adjustments_pt: Vec::new(),
+        };
+        let st = TextState {
+            font_size_pt: 10.0_f32,
+            h_scale_pct: 100.0_f32,
+            char_spacing: 100.0_f32,
+            word_spacing: 50.0_f32,
+            ..TextState::default()
+        };
+        apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
+        assert!((metrics.width_pt - 32.5_f32).abs() < 0.001_f32);
+        assert!((metrics.char_advances_pt[0] - 11.0_f32).abs() < 0.001_f32);
+        assert!((metrics.char_advances_pt[1] - 11.5_f32).abs() < 0.001_f32);
+    }
+
+    #[test]
+    fn next_line_delta_prefers_leading_then_fallback() {
+        let with_leading = next_line_delta_y(14.0_f32, 10.0_f32);
+        assert!((with_leading + 14.0_f32).abs() < 0.001_f32);
+
+        let fallback = next_line_delta_y(0.0_f32, 12.0_f32);
+        assert!((fallback + 14.4_f32).abs() < 0.001_f32);
+    }
 }

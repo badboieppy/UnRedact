@@ -69,6 +69,8 @@ pub struct GuessCandidate {
     pub score: f32,
     pub error_pt: f32,
     pub word_count: u32,
+    #[serde(default)]
+    pub width_pt: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +94,20 @@ pub struct GuessContext {
     pub anchor_h_scale_pct: Option<f32>,
     #[serde(default, alias = "row_bias_pt")]
     pub anchor_row_bias_pt: Option<f32>,
+    #[serde(default)]
+    pub anchor_mode: Option<String>,
+    #[serde(default)]
+    pub anchor_width_source: Option<String>,
+    #[serde(default)]
+    pub space_width_source: Option<String>,
+    #[serde(default)]
+    pub candidate_width_source: Option<String>,
+    #[serde(default)]
+    pub width_fallback_reason: Option<String>,
+    #[serde(default)]
+    pub confidence_score: Option<f32>,
+    #[serde(default)]
+    pub confidence_factors: Option<String>,
     #[serde(
         rename = "guessable",
         alias = "has_anchor_pair",
