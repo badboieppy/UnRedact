@@ -131,3 +131,25 @@ Source: `benchmark/guess_accuracy_after_tuned.json`
 - Next likely improvement path:
   - add row-level joint assignment across contiguous redactions,
   - optionally use low-cost visual tie-breakers only for top-N ambiguous candidates.
+
+## Iteration 2 (Multi-Redaction Focus)
+Source: `benchmark/guess_accuracy_multi_opt.json`
+
+### Changes Implemented
+- Added multi-span width-band indexing in `build_guess_for_anchor`:
+  - pre-sorted candidate widths per `(page,font,size,scale)`,
+  - binary-search width-range slice for multi-span rows,
+  - optional width-band trimming near target width.
+- Added list-context name-shape filtering for multi-span rows to reduce noisy candidates.
+- Kept single-span path unchanged except shared scoring utilities.
+- Added benchmark candidate-volume metrics:
+  - overall/multi-span/single-span candidate counts (mean/median/p90).
+- Strengthened `tests/efta00038617_guessing.rs`:
+  - noisy dictionary (targets + broad names + noise words),
+  - minimum rank quality checks (`recall@5`, `recall@20`),
+  - multi-span candidate-volume guard.
+
+### Outcome
+- Accuracy: unchanged vs previous tuned baseline (`r@5`, `r@20`, `mrr` stable).
+- Multi-redaction performance: improved candidate scan pressure and slightly lower `guess_ms`.
+- Determinism: unchanged and still perfect.

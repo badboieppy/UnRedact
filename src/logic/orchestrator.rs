@@ -316,6 +316,7 @@ mod guess_impl {
     const MULTI_SPAN_BOX_ERROR_RATIO: f64 = 0.45_f64;
     const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
     const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
+    const MULTI_SPAN_WIDTH_BAND_LIMIT: usize = 900;
 
     #[derive(Debug, Clone, Copy)]
     struct MeasuredWidth {
@@ -824,7 +825,21 @@ mod guess_impl {
                 });
                 widths.insert(trimmed.to_owned(), width);
             }
+            let mut sorted = widths
+                .iter()
+                .map(|(text, measured)| CandidateWidthEntry {
+                    text: text.clone(),
+                    width_pt: measured.pt,
+                })
+                .collect::<Vec<_>>();
+            sorted.sort_by(|left, right| {
+                left.width_pt
+                    .partial_cmp(&right.width_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.text.cmp(&right.text))
+            });
             cache.candidates.insert(key.clone(), widths);
+            cache.sorted_by_width.insert(key.clone(), sorted);
         }
 
         let left_width = measure_width(left_anchor_text).unwrap_or_else(|| {
@@ -871,6 +886,34 @@ mod guess_impl {
                 visual_dropped: false,
             };
         };
+        let candidate_width_index = cache.sorted_by_width.get(&key);
+        let Some(candidate_width_index) = candidate_width_index else {
+            return RedactionGuess {
+                page_index: redaction.page_index,
+                bbox: redaction.bbox,
+                candidates: Vec::new(),
+                exact_matches: Vec::new(),
+                context: GuessContext {
+                    left_anchor_text: anchor.left_anchor_text.clone(),
+                    right_anchor_text: anchor.right_anchor_text.clone(),
+                    gap_pt: (anchor.right_x - anchor.left_x) as f32,
+                    char_width_pt: fallback_char_width as f32,
+                    tol_pt: anchor.epsilon_pt as f32,
+                    anchor_left_x: Some(anchor.left_x as f32),
+                    anchor_right_x: Some(anchor.right_x as f32),
+                    anchor_font_key: Some(anchor.font_key.clone()),
+                    anchor_font_size_pt: Some(anchor.font_size_pt),
+                    anchor_h_scale_pct: Some(anchor.h_scale_pct),
+                    anchor_row_bias_pt: Some(anchor.row_bias_pt as f32),
+                    has_anchor_pair: true,
+                },
+                visual_compared_pixels: None,
+                visual_mean_abs_diff: None,
+                visual_changed_pixel_ratio: None,
+                visual_reason: None,
+                visual_dropped: false,
+            };
+        };
 
         let mut scored = Vec::new();
         let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
@@ -882,50 +925,105 @@ mod guess_impl {
         let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
             + MULTI_SPAN_BOX_ERROR_PAD_PT)
             .max(anchor.epsilon_pt.max(2.5_f64));
-        for word in dictionary {
-            let trimmed = word.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if !passes_context_filter(&anchor.left_anchor_text, &anchor.right_anchor_text, trimmed)
-            {
-                continue;
-            }
-            let Some(measured_width) = candidate_widths.get(trimmed).copied() else {
-                continue;
+        let list_like_context =
+            is_list_like_context(&anchor.left_anchor_text, &anchor.right_anchor_text);
+        if multi_span_mode {
+            let lower_width = (redaction_width_pt - box_filter_limit_pt).max(0.0_f64);
+            let upper_width = redaction_width_pt + box_filter_limit_pt;
+            let ranged =
+                candidate_width_entries_in_range(candidate_width_index, lower_width, upper_width);
+            let mut band = if ranged.is_empty() {
+                candidate_width_index.as_slice()
+            } else {
+                ranged
             };
-            let predicted_right = anchor.left_x
-                + left_width.pt
-                + space_width.pt
-                + measured_width.pt
-                + space_width.pt
-                + anchor.row_bias_pt;
-            let anchor_err = (predicted_right - anchor.right_x).abs();
-            let box_err = (measured_width.pt - redaction_width_pt).abs();
-            if multi_span_mode {
+            band = trim_width_band_around_target(
+                band,
+                redaction_width_pt,
+                MULTI_SPAN_WIDTH_BAND_LIMIT,
+            );
+            for entry in band {
+                let trimmed = entry.text.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if !passes_context_filter(
+                    &anchor.left_anchor_text,
+                    &anchor.right_anchor_text,
+                    trimmed,
+                ) {
+                    continue;
+                }
+                if list_like_context && !looks_like_multi_span_name_candidate(trimmed) {
+                    continue;
+                }
+
+                let predicted_right = anchor.left_x
+                    + left_width.pt
+                    + space_width.pt
+                    + entry.width_pt
+                    + space_width.pt
+                    + anchor.row_bias_pt;
+                let anchor_err = (predicted_right - anchor.right_x).abs();
+                let box_err = (entry.width_pt - redaction_width_pt).abs();
                 if box_err > box_filter_limit_pt {
                     continue;
                 }
-            } else if anchor_err > anchor_filter_limit_pt {
-                continue;
+                let raw_err = box_err + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT);
+                let context_penalty = punctuation_context_penalty(
+                    &anchor.left_anchor_text,
+                    &anchor.right_anchor_text,
+                    trimmed,
+                );
+                let effective_err = raw_err + context_penalty;
+                scored.push(ScoredDictionaryCandidate {
+                    text: trimmed.to_owned(),
+                    raw_error_pt: raw_err,
+                    effective_error_pt: effective_err,
+                    word_count: trimmed.split_whitespace().count() as u32,
+                });
             }
-            let raw_err = if multi_span_mode {
-                box_err + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT)
-            } else {
-                anchor_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT)
-            };
-            let context_penalty = punctuation_context_penalty(
-                &anchor.left_anchor_text,
-                &anchor.right_anchor_text,
-                trimmed,
-            );
-            let effective_err = raw_err + context_penalty;
-            scored.push(ScoredDictionaryCandidate {
-                text: trimmed.to_owned(),
-                raw_error_pt: raw_err,
-                effective_error_pt: effective_err,
-                word_count: trimmed.split_whitespace().count() as u32,
-            });
+        } else {
+            for word in dictionary {
+                let trimmed = word.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if !passes_context_filter(
+                    &anchor.left_anchor_text,
+                    &anchor.right_anchor_text,
+                    trimmed,
+                ) {
+                    continue;
+                }
+                let Some(measured_width) = candidate_widths.get(trimmed).copied() else {
+                    continue;
+                };
+                let predicted_right = anchor.left_x
+                    + left_width.pt
+                    + space_width.pt
+                    + measured_width.pt
+                    + space_width.pt
+                    + anchor.row_bias_pt;
+                let anchor_err = (predicted_right - anchor.right_x).abs();
+                let box_err = (measured_width.pt - redaction_width_pt).abs();
+                if anchor_err > anchor_filter_limit_pt {
+                    continue;
+                }
+                let raw_err = anchor_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT);
+                let context_penalty = punctuation_context_penalty(
+                    &anchor.left_anchor_text,
+                    &anchor.right_anchor_text,
+                    trimmed,
+                );
+                let effective_err = raw_err + context_penalty;
+                scored.push(ScoredDictionaryCandidate {
+                    text: trimmed.to_owned(),
+                    raw_error_pt: raw_err,
+                    effective_error_pt: effective_err,
+                    word_count: trimmed.split_whitespace().count() as u32,
+                });
+            }
         }
         scored.sort_by(|left_candidate, right_candidate| {
             left_candidate
@@ -2059,15 +2157,23 @@ mod guess_impl {
         metrics_dpi_bits: u32,
     }
 
+    #[derive(Debug, Clone)]
+    struct CandidateWidthEntry {
+        text: String,
+        width_pt: f64,
+    }
+
     struct WidthCache {
         candidates:
             std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
+        sorted_by_width: std::collections::BTreeMap<WidthKey, Vec<CandidateWidthEntry>>,
     }
 
     impl WidthCache {
         fn new() -> Self {
             Self {
                 candidates: std::collections::BTreeMap::new(),
+                sorted_by_width: std::collections::BTreeMap::new(),
             }
         }
     }
@@ -2123,6 +2229,44 @@ mod guess_impl {
         run_text.contains(target) || target.contains(run_text)
     }
 
+    fn candidate_width_entries_in_range(
+        entries: &[CandidateWidthEntry],
+        min_width_pt: f64,
+        max_width_pt: f64,
+    ) -> &[CandidateWidthEntry] {
+        if entries.is_empty() || !min_width_pt.is_finite() || !max_width_pt.is_finite() {
+            return &[];
+        }
+        if min_width_pt > max_width_pt {
+            return &[];
+        }
+        let start = entries.partition_point(|entry| entry.width_pt < min_width_pt);
+        let end = entries.partition_point(|entry| entry.width_pt <= max_width_pt);
+        if start >= end || start >= entries.len() {
+            return &[];
+        }
+        &entries[start..end.min(entries.len())]
+    }
+
+    fn trim_width_band_around_target(
+        entries: &[CandidateWidthEntry],
+        target_width_pt: f64,
+        limit: usize,
+    ) -> &[CandidateWidthEntry] {
+        if entries.len() <= limit || limit == 0 {
+            return entries;
+        }
+        let mid = entries.partition_point(|entry| entry.width_pt < target_width_pt);
+        let half = limit >> 1_usize;
+        let mut start = mid.saturating_sub(half);
+        let mut end = start.saturating_add(limit).min(entries.len());
+        if end - start < limit {
+            start = end.saturating_sub(limit);
+        }
+        end = end.max(start);
+        &entries[start..end]
+    }
+
     fn passes_context_filter(
         left_anchor_text: &str,
         right_anchor_text: &str,
@@ -2142,6 +2286,45 @@ mod guess_impl {
         true
     }
 
+    fn is_list_like_context(left_anchor_text: &str, right_anchor_text: &str) -> bool {
+        let left_lower = left_anchor_text.trim().to_ascii_lowercase();
+        let right_lower = right_anchor_text.trim().to_ascii_lowercase();
+        left_lower.contains("including")
+            || left_lower.contains("included")
+            || left_lower.contains("among")
+            || left_lower.contains("served")
+            || right_lower.starts_with(',')
+            || right_lower.starts_with("and ")
+    }
+
+    fn looks_like_multi_span_name_candidate(candidate: &str) -> bool {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.contains(',')
+            || trimmed.contains('(')
+            || trimmed.contains(')')
+            || trimmed.contains('/')
+            || trimmed.contains('&')
+        {
+            return false;
+        }
+        if trimmed.chars().any(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        let words = trimmed.split_whitespace().collect::<Vec<_>>();
+        if words.len() < 2 || words.len() > 4 {
+            return false;
+        }
+        words.iter().all(|word| {
+            !word.is_empty()
+                && word
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
+        })
+    }
+
     fn punctuation_context_penalty(
         left_anchor_text: &str,
         right_anchor_text: &str,
@@ -2156,12 +2339,7 @@ mod guess_impl {
 
         let word_count = candidate_trim.split_whitespace().count();
         let mut penalty = 0.0_f64;
-        let list_context = left_lower.contains("including")
-            || left_lower.contains("included")
-            || left_lower.contains("among")
-            || left_lower.contains("served")
-            || right_lower.starts_with(',')
-            || right_lower.starts_with("and ");
+        let list_context = is_list_like_context(&left_lower, &right_lower);
 
         if list_context {
             if word_count <= 1 {
@@ -2269,6 +2447,42 @@ mod guess_impl {
             assert_eq!(selected.left_anchor_text, "included");
             assert_eq!(selected.right_anchor_text, ",");
             assert!((selected.left_bbox.y1 - 112.0).abs() < 0.01);
+        }
+
+        #[test]
+        fn list_context_name_filter_accepts_expected_name_shapes() {
+            assert!(looks_like_multi_span_name_candidate("SARAH KELLEN"));
+            assert!(looks_like_multi_span_name_candidate("JEAN LUC BRUNEL"));
+            assert!(looks_like_multi_span_name_candidate("ANNE-MARIE O'NEIL"));
+            assert!(!looks_like_multi_span_name_candidate("MAXWELL"));
+            assert!(!looks_like_multi_span_name_candidate("BARNETT, RICHARD"));
+            assert!(!looks_like_multi_span_name_candidate("(pilot)"));
+            assert!(!looks_like_multi_span_name_candidate("A/B TEST"));
+            assert!(!looks_like_multi_span_name_candidate("TOKEN123"));
+        }
+
+        #[test]
+        fn width_band_range_and_trim_stay_near_target() {
+            let entries = (0_i32..30_i32)
+                .map(|idx| CandidateWidthEntry {
+                    text: format!("C{idx}"),
+                    width_pt: 10.0 + idx as f64,
+                })
+                .collect::<Vec<_>>();
+            let ranged = candidate_width_entries_in_range(&entries, 18.0_f64, 24.0_f64);
+            assert_eq!(ranged.len(), 7);
+            assert!(ranged
+                .first()
+                .is_some_and(|entry| entry.width_pt >= 18.0_f64));
+            assert!(ranged
+                .last()
+                .is_some_and(|entry| entry.width_pt <= 24.0_f64));
+
+            let trimmed = trim_width_band_around_target(&entries, 20.0_f64, 8_usize);
+            assert_eq!(trimmed.len(), 8);
+            assert!(trimmed
+                .iter()
+                .any(|entry| (entry.width_pt - 20.0_f64).abs() < 0.001_f64));
         }
     }
 }

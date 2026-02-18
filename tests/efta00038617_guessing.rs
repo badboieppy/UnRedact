@@ -18,12 +18,40 @@ const TARGET_NAMES: [&str; 10] = [
     "RICHARD BARNETT",
 ];
 
+const NOISE_WORDS: [&str; 24] = [
+    "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET",
+    "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
+    "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
+];
+
 fn test_output_dir() -> PathBuf {
     std::env::temp_dir().join(format!("unredact_test_efta00038617_{}", std::process::id()))
 }
 
 fn write_name_dictionary(path: &Path) {
-    let content = TARGET_NAMES.join("\n");
+    let mut lines = TARGET_NAMES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let target_set = TARGET_NAMES
+        .iter()
+        .map(|value| value.to_ascii_uppercase())
+        .collect::<BTreeSet<_>>();
+    for line in include_str!("../assets/names.txt").lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if target_set.contains(&trimmed.to_ascii_uppercase()) {
+            continue;
+        }
+        lines.push(trimmed.to_owned());
+        if lines.len() >= 1_200 {
+            break;
+        }
+    }
+    lines.extend(NOISE_WORDS.into_iter().map(str::to_owned));
+    let content = lines.join("\n");
     let write_result = std::fs::write(path, content.as_bytes());
     assert!(
         write_result.is_ok(),
@@ -60,6 +88,49 @@ fn collect_candidate_text_upper(rows: &[&RedactionGuess]) -> BTreeSet<String> {
                 .map(|candidate| candidate.text.to_ascii_uppercase())
         })
         .collect::<BTreeSet<_>>()
+}
+
+fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for text in &guess.exact_matches {
+        let normalized = text.trim().to_ascii_uppercase();
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    for candidate in &guess.candidates {
+        let normalized = candidate.text.trim().to_ascii_uppercase();
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+fn rank_in_guess(guess: &RedactionGuess, target: &str) -> Option<usize> {
+    let normalized = target.trim().to_ascii_uppercase();
+    ordered_guess_texts_upper(guess)
+        .iter()
+        .position(|value| value == &normalized)
+        .map(|index| index + 1)
+}
+
+fn best_rank_in_rows(rows: &[&RedactionGuess], target: &str) -> Option<usize> {
+    rows.iter()
+        .filter_map(|guess| rank_in_guess(guess, target))
+        .min()
+}
+
+fn is_multi_span_row(row: &RedactionGuess) -> bool {
+    if !row.context.has_anchor_pair {
+        return false;
+    }
+    let width = row.bbox.width().abs() as f64;
+    if width <= 0.0 {
+        return false;
+    }
+    (row.context.gap_pt as f64).abs() / width >= 2.0_f64
 }
 
 fn horizontal_overlap_pt(left: &RedactionGuess, right: &RedactionGuess) -> f32 {
@@ -169,5 +240,61 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         missing.is_empty(),
         "missing expected names from first bullet candidate pool: {:?}",
         missing
+    );
+
+    let ranks = TARGET_NAMES
+        .iter()
+        .map(|target| best_rank_in_rows(&first_bullet_rows, target))
+        .collect::<Vec<_>>();
+    let found = ranks.iter().filter(|rank| rank.is_some()).count();
+    let recall_at_5 = ranks
+        .iter()
+        .filter_map(|rank| *rank)
+        .filter(|rank| *rank <= 5)
+        .count() as f64
+        / TARGET_NAMES.len() as f64;
+    let recall_at_20 = ranks
+        .iter()
+        .filter_map(|rank| *rank)
+        .filter(|rank| *rank <= 20)
+        .count() as f64
+        / TARGET_NAMES.len() as f64;
+    assert_eq!(
+        found,
+        TARGET_NAMES.len(),
+        "expected all targets found in first bullet rows, ranks={:?}",
+        ranks
+    );
+    assert!(
+        recall_at_5 >= 0.2_f64,
+        "expected recall@5 >= 0.2 for noisy dictionary, got {:.3} (ranks={:?})",
+        recall_at_5,
+        ranks
+    );
+    assert!(
+        recall_at_20 >= 0.6_f64,
+        "expected recall@20 >= 0.6 for noisy dictionary, got {:.3} (ranks={:?})",
+        recall_at_20,
+        ranks
+    );
+
+    let multi_span_rows = first_bullet_rows
+        .iter()
+        .copied()
+        .filter(|row| is_multi_span_row(row))
+        .collect::<Vec<_>>();
+    assert!(
+        !multi_span_rows.is_empty(),
+        "expected first-bullet set to include multi-span anchor rows"
+    );
+    let mean_multi_span_candidates = multi_span_rows
+        .iter()
+        .map(|row| row.candidates.len() as f64)
+        .sum::<f64>()
+        / multi_span_rows.len() as f64;
+    assert!(
+        mean_multi_span_candidates <= 900.0_f64,
+        "mean multi-span candidate volume too high: {:.1}",
+        mean_multi_span_candidates
     );
 }

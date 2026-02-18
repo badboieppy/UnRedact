@@ -26,6 +26,8 @@ const NOISE_WORDS: [&str; 24] = [
     "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
 ];
 
+const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
+
 #[derive(Debug, Clone, Serialize)]
 struct RankedTarget {
     label: String,
@@ -50,6 +52,7 @@ struct DatasetResult {
     summary: BenchmarkSummary,
     visual_summary: VisualSummary,
     timing_summary: TimingSummary,
+    candidate_summary: CandidateSummary,
     targets: Vec<RankedTarget>,
 }
 
@@ -60,6 +63,7 @@ struct AccuracyBenchmark {
     overall: BenchmarkSummary,
     overall_visual: VisualSummary,
     overall_timing: TimingSummary,
+    overall_candidates: CandidateSummary,
     consistency: ConsistencySummary,
 }
 
@@ -87,6 +91,16 @@ struct MetricDefinitions {
     timing_guess_ms: &'static str,
     timing_visualize_ms: &'static str,
     timing_orchestrator_total_ms: &'static str,
+    candidate_rows_total: &'static str,
+    candidate_rows_with_candidates: &'static str,
+    candidate_mean_count: &'static str,
+    candidate_median_count: &'static str,
+    candidate_p90_count: &'static str,
+    candidate_multi_span_rows: &'static str,
+    candidate_multi_span_mean_count: &'static str,
+    candidate_multi_span_p90_count: &'static str,
+    candidate_single_span_rows: &'static str,
+    candidate_single_span_mean_count: &'static str,
     consistency_repeats: &'static str,
     consistency_all_hashes_identical: &'static str,
     consistency_hash_match_ratio: &'static str,
@@ -119,6 +133,20 @@ struct TimingSummary {
     orchestrator_total_ms: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CandidateSummary {
+    rows_total: usize,
+    rows_with_candidates: usize,
+    mean_count: Option<f64>,
+    median_count: Option<f64>,
+    p90_count: Option<f64>,
+    multi_span_rows: usize,
+    multi_span_mean_count: Option<f64>,
+    multi_span_p90_count: Option<f64>,
+    single_span_rows: usize,
+    single_span_mean_count: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct VisualAccumulator {
     rows_total: usize,
@@ -127,6 +155,15 @@ struct VisualAccumulator {
     abs_diff: Vec<f64>,
     changed_ratio: Vec<f64>,
     compared_pixels: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CandidateAccumulator {
+    rows_total: usize,
+    rows_with_candidates: usize,
+    counts: Vec<f64>,
+    multi_span_counts: Vec<f64>,
+    single_span_counts: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -191,6 +228,7 @@ struct EvaluatedDataset {
     dataset: DatasetResult,
     visual_accumulator: VisualAccumulator,
     timing_accumulator: TimingAccumulator,
+    candidate_accumulator: CandidateAccumulator,
     run_snapshot: DatasetRunSnapshot,
 }
 
@@ -468,6 +506,74 @@ fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumu
     merged
 }
 
+fn is_multi_span_guess(guess: &RedactionGuess) -> bool {
+    if !guess.context.has_anchor_pair {
+        return false;
+    }
+    let width = guess.bbox.width().abs() as f64;
+    if width <= 0.0_f64 {
+        return false;
+    }
+    (guess.context.gap_pt as f64).abs() / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
+}
+
+fn candidate_accumulator_from_guesses(guesses: &[RedactionGuess]) -> CandidateAccumulator {
+    let mut acc = CandidateAccumulator {
+        rows_total: guesses.len(),
+        ..CandidateAccumulator::default()
+    };
+    for guess in guesses {
+        let count = guess.candidates.len() as f64;
+        if count > 0.0_f64 {
+            acc.rows_with_candidates += 1;
+        }
+        acc.counts.push(count);
+        if is_multi_span_guess(guess) {
+            acc.multi_span_counts.push(count);
+        } else {
+            acc.single_span_counts.push(count);
+        }
+    }
+    acc
+}
+
+fn summarize_candidate_accumulator(mut acc: CandidateAccumulator) -> CandidateSummary {
+    acc.counts
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    acc.multi_span_counts
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    acc.single_span_counts
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    CandidateSummary {
+        rows_total: acc.rows_total,
+        rows_with_candidates: acc.rows_with_candidates,
+        mean_count: mean(&acc.counts),
+        median_count: percentile_sorted(&acc.counts, 0.5_f64),
+        p90_count: percentile_sorted(&acc.counts, 0.9_f64),
+        multi_span_rows: acc.multi_span_counts.len(),
+        multi_span_mean_count: mean(&acc.multi_span_counts),
+        multi_span_p90_count: percentile_sorted(&acc.multi_span_counts, 0.9_f64),
+        single_span_rows: acc.single_span_counts.len(),
+        single_span_mean_count: mean(&acc.single_span_counts),
+    }
+}
+
+fn merge_candidate_accumulators(accumulators: &[CandidateAccumulator]) -> CandidateAccumulator {
+    let mut merged = CandidateAccumulator::default();
+    for acc in accumulators {
+        merged.rows_total += acc.rows_total;
+        merged.rows_with_candidates += acc.rows_with_candidates;
+        merged.counts.extend_from_slice(&acc.counts);
+        merged
+            .multi_span_counts
+            .extend_from_slice(&acc.multi_span_counts);
+        merged
+            .single_span_counts
+            .extend_from_slice(&acc.single_span_counts);
+    }
+    merged
+}
+
 fn timing_accumulator_from_diagnostics(diagnostics: &[String]) -> TimingAccumulator {
     let mut acc = TimingAccumulator::default();
     for line in diagnostics {
@@ -718,13 +824,16 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
         name: "EFTA00101126".to_owned(),
         summary: summarize_ranks(&ranks),
         visual_summary,
         timing_summary,
+        candidate_summary,
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
@@ -733,6 +842,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.name.clone(),
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
+            dataset.candidate_summary.clone(),
             dataset.targets.clone(),
         ))?,
         rows: build_row_snapshots("EFTA00101126", &report.guesses),
@@ -745,6 +855,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         dataset,
         visual_accumulator,
         timing_accumulator,
+        candidate_accumulator,
         run_snapshot,
     })
 }
@@ -784,13 +895,16 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
+    let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
         name: "EFTA00038617".to_owned(),
         summary: summarize_ranks(&ranks),
         visual_summary,
         timing_summary,
+        candidate_summary,
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
@@ -799,6 +913,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.name.clone(),
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
+            dataset.candidate_summary.clone(),
             dataset.targets.clone(),
         ))?,
         rows: build_row_snapshots("EFTA00038617", &report.guesses),
@@ -811,6 +926,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         dataset,
         visual_accumulator,
         timing_accumulator,
+        candidate_accumulator,
         run_snapshot,
     })
 }
@@ -887,6 +1003,40 @@ fn print_timing_summary(label: &str, summary: &TimingSummary) {
     );
 }
 
+fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
+    println!(
+        "{label:16} rows={} with_candidates={} mean={} median={} p90={} multi_rows={} multi_mean={} multi_p90={} single_rows={} single_mean={}",
+        summary.rows_total,
+        summary.rows_with_candidates,
+        summary
+            .mean_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .median_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .p90_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary.multi_span_rows,
+        summary
+            .multi_span_mean_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .multi_span_p90_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary.single_span_rows,
+        summary
+            .single_span_mean_count
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned()),
+    );
+}
+
 fn metric_definitions() -> MetricDefinitions {
     MetricDefinitions {
         evaluated_items: "Number of target strings evaluated in this dataset.",
@@ -921,6 +1071,16 @@ fn metric_definitions() -> MetricDefinitions {
         timing_guess_ms: "Average guessing stage runtime in milliseconds.",
         timing_visualize_ms: "Average visualization stage runtime in milliseconds.",
         timing_orchestrator_total_ms: "Average total orchestrator runtime in milliseconds.",
+        candidate_rows_total: "Total redaction rows considered for candidate-count statistics.",
+        candidate_rows_with_candidates: "Rows where the candidate list is non-empty.",
+        candidate_mean_count: "Mean number of candidates per row.",
+        candidate_median_count: "Median number of candidates per row.",
+        candidate_p90_count: "90th percentile candidate count per row.",
+        candidate_multi_span_rows: "Rows classified as multi-span by anchor-gap ratio.",
+        candidate_multi_span_mean_count: "Mean candidate count for multi-span rows.",
+        candidate_multi_span_p90_count: "90th percentile candidate count for multi-span rows.",
+        candidate_single_span_rows: "Rows classified as non-multi-span rows.",
+        candidate_single_span_mean_count: "Mean candidate count for non-multi-span rows.",
         consistency_repeats: "Number of repeated benchmark runs with the same code/config.",
         consistency_all_hashes_identical:
             "True when every repeated run produced the same benchmark hash.",
@@ -1151,6 +1311,12 @@ fn main() {
             .collect::<Vec<_>>();
         let overall_timing =
             summarize_timing_accumulator(&merge_timing_accumulators(&timing_accumulators));
+        let candidate_accumulators = evaluated
+            .iter()
+            .map(|item| item.candidate_accumulator.clone())
+            .collect::<Vec<_>>();
+        let overall_candidates =
+            summarize_candidate_accumulator(merge_candidate_accumulators(&candidate_accumulators));
         let definitions = metric_definitions();
 
         let provisional = AccuracyBenchmark {
@@ -1159,6 +1325,7 @@ fn main() {
             overall,
             overall_visual,
             overall_timing,
+            overall_candidates,
             consistency: ConsistencySummary {
                 repeats: 1,
                 all_hashes_identical: true,
@@ -1261,6 +1428,46 @@ fn main() {
         payload.definitions.timing_orchestrator_total_ms
     );
     println!(
+        "  candidate_rows_total: {}",
+        payload.definitions.candidate_rows_total
+    );
+    println!(
+        "  candidate_rows_with_candidates: {}",
+        payload.definitions.candidate_rows_with_candidates
+    );
+    println!(
+        "  candidate_mean_count: {}",
+        payload.definitions.candidate_mean_count
+    );
+    println!(
+        "  candidate_median_count: {}",
+        payload.definitions.candidate_median_count
+    );
+    println!(
+        "  candidate_p90_count: {}",
+        payload.definitions.candidate_p90_count
+    );
+    println!(
+        "  candidate_multi_span_rows: {}",
+        payload.definitions.candidate_multi_span_rows
+    );
+    println!(
+        "  candidate_multi_span_mean_count: {}",
+        payload.definitions.candidate_multi_span_mean_count
+    );
+    println!(
+        "  candidate_multi_span_p90_count: {}",
+        payload.definitions.candidate_multi_span_p90_count
+    );
+    println!(
+        "  candidate_single_span_rows: {}",
+        payload.definitions.candidate_single_span_rows
+    );
+    println!(
+        "  candidate_single_span_mean_count: {}",
+        payload.definitions.candidate_single_span_mean_count
+    );
+    println!(
         "  consistency_repeats: {}",
         payload.definitions.consistency_repeats
     );
@@ -1296,10 +1503,15 @@ fn main() {
         print_summary(&dataset.name, &dataset.summary);
         print_visual_summary(&format!("{} visual", dataset.name), &dataset.visual_summary);
         print_timing_summary(&format!("{} timing", dataset.name), &dataset.timing_summary);
+        print_candidate_summary(
+            &format!("{} candidates", dataset.name),
+            &dataset.candidate_summary,
+        );
     }
     print_summary("OVERALL", &payload.overall);
     print_visual_summary("OVERALL visual", &payload.overall_visual);
     print_timing_summary("OVERALL timing", &payload.overall_timing);
+    print_candidate_summary("OVERALL candidates", &payload.overall_candidates);
     println!(
         "CONSISTENCY      repeats={} hashes_identical={} hash_match={:.3} top1_agree={:.3} top5_jaccard={:.3} unstable_rows={} unstable_ratio={:.3}",
         payload.consistency.repeats,
