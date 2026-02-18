@@ -284,6 +284,24 @@ mod guess_impl {
     }
 
     #[derive(Debug, Clone)]
+    struct JointAssignmentOption {
+        text: String,
+        key: String,
+        base_cost: f64,
+        start_x_pt: f64,
+        end_x_pt: f64,
+    }
+
+    #[derive(Debug, Clone)]
+    struct JointAssignmentBeamState {
+        cost: f64,
+        selected: Vec<String>,
+        used_keys: Vec<String>,
+        prev_start_x_pt: f64,
+        prev_end_x_pt: f64,
+    }
+
+    #[derive(Debug, Clone)]
     struct PairCandidate {
         left_idx: usize,
         right_idx: usize,
@@ -317,6 +335,16 @@ mod guess_impl {
     const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
     const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
     const MULTI_SPAN_WIDTH_BAND_LIMIT: usize = 900;
+    const JOINT_ASSIGNMENT_MIN_GROUP_ROWS: usize = 2;
+    const JOINT_ASSIGNMENT_MAX_ROWS: usize = 14;
+    const JOINT_ASSIGNMENT_MAX_OPTIONS_PER_ROW: usize = 24;
+    const JOINT_ASSIGNMENT_OPTION_SCAN_LIMIT: usize = 500;
+    const JOINT_ASSIGNMENT_BEAM_WIDTH: usize = 160;
+    const JOINT_ASSIGNMENT_DUPLICATE_PENALTY: f64 = 8.0_f64;
+    const JOINT_ASSIGNMENT_OVERLAP_MARGIN_PT: f64 = 0.75_f64;
+    const JOINT_ASSIGNMENT_OVERLAP_PENALTY: f64 = 2.8_f64;
+    const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 140.0_f64;
+    const JOINT_ASSIGNMENT_NAME_SHAPE_PENALTY: f64 = 1.25_f64;
 
     #[derive(Debug, Clone, Copy)]
     struct MeasuredWidth {
@@ -479,7 +507,8 @@ mod guess_impl {
         }
 
         apply_cluster_consensus(&mut guesses);
-        apply_row_sequence_consensus(&mut guesses);
+        let jointly_assigned = apply_row_joint_assignment(&mut guesses);
+        apply_row_sequence_consensus(&mut guesses, &jointly_assigned);
         for (index, guess) in guesses.iter().enumerate() {
             if !guess.context.has_anchor_pair {
                 continue;
@@ -634,9 +663,348 @@ mod guess_impl {
         }
     }
 
-    fn apply_row_sequence_consensus(guesses: &mut [RedactionGuess]) {
+    fn is_multi_span_row_guess(guess: &RedactionGuess) -> bool {
+        if !guess.context.has_anchor_pair {
+            return false;
+        }
+        let width = guess.bbox.width().abs() as f64;
+        if width <= 0.0_f64 {
+            return false;
+        }
+        (guess.context.gap_pt as f64).abs() / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
+    }
+
+    fn apply_row_joint_assignment(
+        guesses: &mut [RedactionGuess],
+    ) -> std::collections::BTreeSet<usize> {
         let mut rows = std::collections::BTreeMap::<(u32, i32), Vec<usize>>::new();
         for (index, guess) in guesses.iter().enumerate() {
+            if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
+                continue;
+            }
+            let center_y = ((guess.bbox.y0 + guess.bbox.y1) * 0.5_f32) as f64;
+            let y_bucket = (center_y / 6.0_f64).round() as i32;
+            rows.entry((guess.page_index, y_bucket))
+                .or_default()
+                .push(index);
+        }
+
+        let mut promotions = Vec::<(usize, String)>::new();
+        for indices in rows.values_mut() {
+            if indices.len() < JOINT_ASSIGNMENT_MIN_GROUP_ROWS {
+                continue;
+            }
+            indices.sort_by(|left_idx, right_idx| {
+                guesses[*left_idx]
+                    .bbox
+                    .x0
+                    .partial_cmp(&guesses[*right_idx].bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        guesses[*left_idx]
+                            .bbox
+                            .x1
+                            .partial_cmp(&guesses[*right_idx].bbox.x1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            let groups = collect_contiguous_multi_span_groups(indices, guesses);
+            for group in groups {
+                if let Some(selected) = solve_joint_assignment_group(guesses, &group) {
+                    promotions.extend(group.iter().copied().zip(selected.into_iter()));
+                }
+            }
+        }
+
+        let mut assigned = std::collections::BTreeSet::<usize>::new();
+        for (guess_index, selected_text) in promotions {
+            if let Some(guess) = guesses.get_mut(guess_index) {
+                promote_text_to_front(guess, &selected_text);
+                assigned.insert(guess_index);
+            }
+        }
+        assigned
+    }
+
+    fn collect_contiguous_multi_span_groups(
+        indices: &[usize],
+        guesses: &[RedactionGuess],
+    ) -> Vec<Vec<usize>> {
+        let mut groups = Vec::<Vec<usize>>::new();
+        let mut current = Vec::<usize>::new();
+
+        for guess_index in indices.iter().copied() {
+            let guess = &guesses[guess_index];
+            if !is_joint_assignment_candidate_row(guess) {
+                if current.len() >= JOINT_ASSIGNMENT_MIN_GROUP_ROWS {
+                    groups.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                continue;
+            }
+
+            if current.is_empty() {
+                current.push(guess_index);
+                continue;
+            }
+
+            let prev_index = *current.last().unwrap_or(&guess_index);
+            let prev = &guesses[prev_index];
+            let x_gap = (guess.bbox.x0 as f64 - prev.bbox.x1 as f64).max(0.0_f64);
+            let contiguous = x_gap <= JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT
+                && joint_assignment_rows_are_compatible(prev, guess);
+            if contiguous {
+                current.push(guess_index);
+            } else {
+                if current.len() >= JOINT_ASSIGNMENT_MIN_GROUP_ROWS {
+                    groups.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                current.push(guess_index);
+            }
+        }
+
+        if current.len() >= JOINT_ASSIGNMENT_MIN_GROUP_ROWS {
+            groups.push(current);
+        }
+        groups
+            .into_iter()
+            .filter(|group| {
+                group.len() <= JOINT_ASSIGNMENT_MAX_ROWS
+                    && group_has_joint_assignment_signal(group, guesses)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn is_joint_assignment_candidate_row(guess: &RedactionGuess) -> bool {
+        guess.context.has_anchor_pair && !guess.candidates.is_empty()
+    }
+
+    fn group_has_joint_assignment_signal(group: &[usize], guesses: &[RedactionGuess]) -> bool {
+        group.iter().copied().any(|guess_index| {
+            let guess = &guesses[guess_index];
+            is_multi_span_row_guess(guess)
+                || is_list_like_context(
+                    &guess.context.left_anchor_text,
+                    &guess.context.right_anchor_text,
+                )
+        })
+    }
+
+    fn joint_assignment_rows_are_compatible(left: &RedactionGuess, right: &RedactionGuess) -> bool {
+        let same_font_key = match (
+            left.context.anchor_font_key.as_deref(),
+            right.context.anchor_font_key.as_deref(),
+        ) {
+            (Some(l), Some(r)) => l == r,
+            _ => true,
+        };
+        let similar_font_size = match (
+            left.context.anchor_font_size_pt,
+            right.context.anchor_font_size_pt,
+        ) {
+            (Some(l), Some(r)) => (l - r).abs() <= 0.75_f32,
+            _ => true,
+        };
+        let similar_h_scale = match (
+            left.context.anchor_h_scale_pct,
+            right.context.anchor_h_scale_pct,
+        ) {
+            (Some(l), Some(r)) => (l - r).abs() <= 8.0_f32,
+            _ => true,
+        };
+        let close_row_bias = match (
+            left.context.anchor_row_bias_pt,
+            right.context.anchor_row_bias_pt,
+        ) {
+            (Some(l), Some(r)) => (l - r).abs() <= 5.0_f32,
+            _ => true,
+        };
+        same_font_key && similar_font_size && similar_h_scale && close_row_bias
+    }
+
+    fn solve_joint_assignment_group(
+        guesses: &[RedactionGuess],
+        group: &[usize],
+    ) -> Option<Vec<String>> {
+        if group.len() < JOINT_ASSIGNMENT_MIN_GROUP_ROWS || group.len() > JOINT_ASSIGNMENT_MAX_ROWS
+        {
+            return None;
+        }
+
+        let prefer_name_shape = group.iter().copied().any(|guess_index| {
+            let guess = &guesses[guess_index];
+            is_multi_span_row_guess(guess)
+                || is_list_like_context(
+                    &guess.context.left_anchor_text,
+                    &guess.context.right_anchor_text,
+                )
+        });
+
+        let mut options_by_row = Vec::<Vec<JointAssignmentOption>>::with_capacity(group.len());
+        for guess_index in group.iter().copied() {
+            let guess = guesses.get(guess_index)?;
+            let options = build_joint_assignment_options(
+                guess,
+                JOINT_ASSIGNMENT_OPTION_SCAN_LIMIT,
+                JOINT_ASSIGNMENT_MAX_OPTIONS_PER_ROW,
+                prefer_name_shape,
+            );
+            if options.is_empty() {
+                return None;
+            }
+            options_by_row.push(options);
+        }
+
+        let mut beam = vec![JointAssignmentBeamState {
+            cost: 0.0_f64,
+            selected: Vec::new(),
+            used_keys: Vec::new(),
+            prev_start_x_pt: f64::NEG_INFINITY,
+            prev_end_x_pt: f64::NEG_INFINITY,
+        }];
+
+        for row_options in &options_by_row {
+            let mut next = Vec::<JointAssignmentBeamState>::new();
+            for state in &beam {
+                for option in row_options {
+                    let mut cost = state.cost + option.base_cost;
+                    if state.used_keys.iter().any(|key| key == &option.key) {
+                        cost += JOINT_ASSIGNMENT_DUPLICATE_PENALTY;
+                    }
+                    if state.prev_end_x_pt.is_finite() {
+                        let overlap_pt = (state.prev_end_x_pt - option.start_x_pt
+                            + JOINT_ASSIGNMENT_OVERLAP_MARGIN_PT)
+                            .max(0.0_f64);
+                        cost += overlap_pt * JOINT_ASSIGNMENT_OVERLAP_PENALTY;
+                        if option.start_x_pt + 0.5_f64 < state.prev_start_x_pt {
+                            cost += 2.5_f64;
+                        }
+                    }
+
+                    let mut selected = state.selected.clone();
+                    selected.push(option.text.clone());
+                    let mut used_keys = state.used_keys.clone();
+                    if !used_keys.iter().any(|key| key == &option.key) {
+                        used_keys.push(option.key.clone());
+                    }
+                    next.push(JointAssignmentBeamState {
+                        cost,
+                        selected,
+                        used_keys,
+                        prev_start_x_pt: option.start_x_pt,
+                        prev_end_x_pt: option.end_x_pt,
+                    });
+                }
+            }
+
+            if next.is_empty() {
+                return None;
+            }
+            next.sort_by(|left, right| {
+                left.cost
+                    .partial_cmp(&right.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            next.truncate(JOINT_ASSIGNMENT_BEAM_WIDTH);
+            beam = next;
+        }
+
+        beam.into_iter().next().map(|state| state.selected)
+    }
+
+    fn build_joint_assignment_options(
+        guess: &RedactionGuess,
+        scan_limit: usize,
+        max_options: usize,
+        prefer_name_shape: bool,
+    ) -> Vec<JointAssignmentOption> {
+        if guess.candidates.is_empty() {
+            return Vec::new();
+        }
+        let mut options = Vec::<JointAssignmentOption>::new();
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        let scan = guess.candidates.len().min(scan_limit);
+        for (rank, candidate) in guess.candidates.iter().take(scan).enumerate() {
+            let text = candidate.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if !seen.insert(text.to_owned()) {
+                continue;
+            }
+            let context_penalty = punctuation_context_penalty(
+                &guess.context.left_anchor_text,
+                &guess.context.right_anchor_text,
+                text,
+            );
+            let width_penalty = candidate_width_penalty_pt(guess, text);
+            let rank_penalty = ((rank + 2) as f64).ln() * 0.10_f64;
+            let exact_bonus = if guess.exact_matches.iter().any(|value| value == text) {
+                -0.25_f64
+            } else {
+                0.0_f64
+            };
+            let anchor_overlap_penalty = anchor_overlap_penalty_pt(
+                &guess.context.left_anchor_text,
+                &guess.context.right_anchor_text,
+                text,
+            );
+            let name_shape_penalty =
+                if prefer_name_shape && !looks_like_multi_span_name_candidate(text) {
+                    JOINT_ASSIGNMENT_NAME_SHAPE_PENALTY
+                } else {
+                    0.0_f64
+                };
+            let base_cost = (candidate.error_pt as f64)
+                + context_penalty
+                + width_penalty
+                + rank_penalty
+                + exact_bonus
+                + anchor_overlap_penalty
+                + name_shape_penalty;
+            let (start_x_pt, end_x_pt) = estimate_candidate_interval_pt(guess, text);
+            options.push(JointAssignmentOption {
+                text: text.to_owned(),
+                key: normalize_candidate_key(text),
+                base_cost,
+                start_x_pt,
+                end_x_pt,
+            });
+        }
+        options.sort_by(|left, right| {
+            left.base_cost
+                .partial_cmp(&right.base_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        options.truncate(max_options);
+        options
+    }
+
+    fn estimate_candidate_interval_pt(guess: &RedactionGuess, text: &str) -> (f64, f64) {
+        let char_width = (guess.context.char_width_pt as f64).max(0.1_f64);
+        let glyph_count = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != ',')
+            .count()
+            .max(1) as f64;
+        let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f64;
+        let width_pt = (glyph_count * char_width + spaces * char_width * 0.45_f64).max(0.1_f64);
+        let start = guess.bbox.x0 as f64;
+        (start, start + width_pt)
+    }
+
+    fn apply_row_sequence_consensus(
+        guesses: &mut [RedactionGuess],
+        skip_indices: &std::collections::BTreeSet<usize>,
+    ) {
+        let mut rows = std::collections::BTreeMap::<(u32, i32), Vec<usize>>::new();
+        for (index, guess) in guesses.iter().enumerate() {
+            if skip_indices.contains(&index) {
+                continue;
+            }
             if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
                 continue;
             }
@@ -726,6 +1094,47 @@ mod guess_impl {
         let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f64;
         let estimated = glyph_count * char_width + spaces * char_width * 0.45_f64;
         ((estimated - target).abs() / target.max(1.0_f64)).min(3.0_f64)
+    }
+
+    fn anchor_overlap_penalty_pt(
+        left_anchor_text: &str,
+        right_anchor_text: &str,
+        candidate: &str,
+    ) -> f64 {
+        let anchor_tokens = tokenize_alpha_words(left_anchor_text)
+            .into_iter()
+            .chain(tokenize_alpha_words(right_anchor_text))
+            .collect::<std::collections::BTreeSet<_>>();
+        if anchor_tokens.is_empty() {
+            return 0.0_f64;
+        }
+        let candidate_tokens = tokenize_alpha_words(candidate);
+        if candidate_tokens.is_empty() {
+            return 0.0_f64;
+        }
+        let mut matches = 0_u32;
+        for token in &candidate_tokens {
+            if anchor_tokens.contains(token) {
+                matches += 1;
+            }
+        }
+        if matches == 0 {
+            return 0.0_f64;
+        }
+        let mut penalty = matches as f64 * 0.45_f64;
+        if matches >= 2 {
+            penalty += 0.35_f64;
+        }
+        penalty
+    }
+
+    fn tokenize_alpha_words(value: &str) -> Vec<String> {
+        value
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\'' && ch != '-')
+            .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+            .filter(|token| token.len() >= 3)
+            .map(|token| token.to_ascii_lowercase())
+            .collect::<Vec<_>>()
     }
 
     fn promote_text_to_front(guess: &mut RedactionGuess, selected_text: &str) {
@@ -2396,6 +2805,51 @@ mod guess_impl {
         use super::*;
         use std::collections::BTreeMap;
 
+        fn synthetic_guess(
+            x0: f32,
+            x1: f32,
+            y0: f32,
+            y1: f32,
+            candidates: &[(&str, f32)],
+        ) -> RedactionGuess {
+            RedactionGuess {
+                page_index: 1,
+                bbox: Rect::new(x0, y0, x1, y1),
+                candidates: candidates
+                    .iter()
+                    .map(|(text, error)| GuessCandidate {
+                        text: (*text).to_owned(),
+                        score: 1.0_f32,
+                        error_pt: *error,
+                        word_count: text.split_whitespace().count() as u32,
+                    })
+                    .collect::<Vec<_>>(),
+                exact_matches: candidates
+                    .first()
+                    .map(|(text, _)| vec![(*text).to_owned()])
+                    .unwrap_or_default(),
+                context: GuessContext {
+                    left_anchor_text: "including".to_owned(),
+                    right_anchor_text: "and".to_owned(),
+                    gap_pt: 120.0_f32,
+                    char_width_pt: 5.0_f32,
+                    tol_pt: 4.0_f32,
+                    anchor_left_x: Some(80.0_f32),
+                    anchor_right_x: Some(200.0_f32),
+                    anchor_font_key: Some("F1".to_owned()),
+                    anchor_font_size_pt: Some(11.0_f32),
+                    anchor_h_scale_pct: Some(100.0_f32),
+                    anchor_row_bias_pt: Some(0.0_f32),
+                    has_anchor_pair: true,
+                },
+                visual_compared_pixels: None,
+                visual_mean_abs_diff: None,
+                visual_changed_pixel_ratio: None,
+                visual_reason: None,
+                visual_dropped: false,
+            }
+        }
+
         fn run(page_index: u32, text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> FontTextRun {
             FontTextRun {
                 page_index,
@@ -2483,6 +2937,60 @@ mod guess_impl {
             assert!(trimmed
                 .iter()
                 .any(|entry| (entry.width_pt - 20.0_f64).abs() < 0.001_f64));
+        }
+
+        #[test]
+        fn row_joint_assignment_promotes_unique_names_for_multi_span_groups() {
+            let mut guesses = vec![
+                synthetic_guess(
+                    100.0_f32,
+                    145.0_f32,
+                    460.0_f32,
+                    472.0_f32,
+                    &[
+                        ("SARAH KELLEN", 0.45_f32),
+                        ("ADRIANA MUCINSKA", 0.85_f32),
+                        ("NADIA MARCINKOVA", 1.10_f32),
+                    ],
+                ),
+                synthetic_guess(
+                    260.0_f32,
+                    308.0_f32,
+                    460.0_f32,
+                    472.0_f32,
+                    &[
+                        ("SARAH KELLEN", 0.40_f32),
+                        ("ADRIANA MUCINSKA", 0.55_f32),
+                        ("NADIA MARCINKOVA", 0.95_f32),
+                    ],
+                ),
+                synthetic_guess(
+                    420.0_f32,
+                    469.0_f32,
+                    460.0_f32,
+                    472.0_f32,
+                    &[
+                        ("SARAH KELLEN", 0.42_f32),
+                        ("NADIA MARCINKOVA", 0.58_f32),
+                        ("ADRIANA MUCINSKA", 0.90_f32),
+                    ],
+                ),
+            ];
+
+            let assigned = apply_row_joint_assignment(&mut guesses);
+            assert_eq!(assigned.len(), 3);
+            let top = guesses
+                .iter()
+                .map(|guess| {
+                    guess
+                        .candidates
+                        .first()
+                        .map(|candidate| candidate.text.clone())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(top[0].as_deref(), Some("SARAH KELLEN"));
+            assert_eq!(top[1].as_deref(), Some("ADRIANA MUCINSKA"));
+            assert_eq!(top[2].as_deref(), Some("NADIA MARCINKOVA"));
         }
     }
 }
