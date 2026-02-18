@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use unredact::service::unredact_entry::{
+use unredact::service::unredact_cli_entry::{
     run_batch_from_paths, run_from_paths, UnredactServiceConfig,
 };
 use unredact::types::guess_types::GuessConfig;

@@ -39,6 +39,20 @@ impl DictionaryData {
         let inputs = self.load_dictionary(dictionary_path, max_dictionary)?;
         Ok((inputs.dictionary, inputs.diagnostics))
     }
+
+    #[inline]
+    pub fn read_dictionary_bytes(&self, dictionary_path: &Path) -> Result<Vec<u8>, String> {
+        self.file_store.read(dictionary_path)
+    }
+
+    #[inline]
+    pub fn load_dictionary_from_bytes(
+        &self,
+        dictionary_bytes: Option<&[u8]>,
+        max_dictionary: usize,
+    ) -> Result<DictionaryInputs, String> {
+        load_dictionary_from_bytes(dictionary_bytes, max_dictionary)
+    }
 }
 
 impl Default for DictionaryData {
@@ -54,11 +68,22 @@ pub fn load_dictionary(
     dictionary_path: Option<&Path>,
     max_dictionary: usize,
 ) -> Result<DictionaryInputs, String> {
-    let mut diagnostics = Vec::new();
-    let dictionary = if let Some(path) = dictionary_path {
-        let bytes = file_store.read(path)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let mut expanded = Vec::new();
+    let dictionary_bytes = match dictionary_path {
+        Some(path) => Some(file_store.read(path)?),
+        None => None,
+    };
+    load_dictionary_from_bytes(dictionary_bytes.as_deref(), max_dictionary)
+}
+
+#[inline]
+pub fn load_dictionary_from_bytes(
+    dictionary_bytes: Option<&[u8]>,
+    max_dictionary: usize,
+) -> Result<DictionaryInputs, String> {
+    let mut diagnostics = Vec::<String>::new();
+    let dictionary = if let Some(bytes) = dictionary_bytes {
+        let text = String::from_utf8_lossy(bytes);
+        let mut expanded = Vec::<String>::new();
         for line in text.lines() {
             for candidate in name_combinations(line, false) {
                 expanded.extend(case_variants(&candidate));

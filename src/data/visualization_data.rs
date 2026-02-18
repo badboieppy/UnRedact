@@ -76,6 +76,53 @@ impl VisualizationData {
     }
 
     #[inline]
+    pub fn load_inputs_from_bytes(
+        &self,
+        pdf_bytes: &[u8],
+        report: &RedactionReport,
+        guesses: Option<&GuessReport>,
+        font_runs: Option<&FontRunReport>,
+    ) -> Result<VisualizationInputs, String> {
+        let width_map = build_font_width_map(pdf_bytes)?;
+        let mut rects = Vec::with_capacity(report.redactions.len());
+        for redaction in &report.redactions {
+            rects.push((redaction.page_index, redaction.bbox));
+        }
+        let overlays = build_overlays(report, guesses, font_runs, &width_map);
+        Ok(VisualizationInputs {
+            pdf_bytes: pdf_bytes.to_vec(),
+            rects,
+            overlays,
+        })
+    }
+
+    #[inline]
+    pub fn render_visualized_pdf_from_bytes(
+        &self,
+        pdf_bytes: &[u8],
+        report: &RedactionReport,
+        guesses: Option<&GuessReport>,
+        font_runs: Option<&FontRunReport>,
+        cfg: VisualizerConfig,
+    ) -> Result<Vec<u8>, String> {
+        let inputs = self.load_inputs_from_bytes(pdf_bytes, report, guesses, font_runs)?;
+        let annotator = PdfAnnotator;
+        annotator.annotate(
+            &inputs.pdf_bytes,
+            &inputs.rects,
+            &inputs.overlays,
+            cfg.color,
+            cfg.text_color,
+            cfg.border_width,
+        )
+    }
+
+    #[inline]
+    pub fn write_visualized_pdf(&self, output_path: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.file_store.write(output_path, bytes)
+    }
+
+    #[inline]
     pub fn render_and_write(
         &self,
         pdf_path: &Path,
@@ -107,22 +154,12 @@ impl VisualizationDataSource for VisualizationData {
         font_runs: Option<&FontRunReport>,
     ) -> Result<VisualizationInputs, String> {
         let pdf_bytes = self.file_store.read(pdf_path)?;
-        let width_map = build_font_width_map(&pdf_bytes)?;
-        let mut rects = Vec::with_capacity(report.redactions.len());
-        for r in &report.redactions {
-            rects.push((r.page_index, r.bbox));
-        }
-        let overlays = build_overlays(report, guesses, font_runs, &width_map);
-        Ok(VisualizationInputs {
-            pdf_bytes,
-            rects,
-            overlays,
-        })
+        self.load_inputs_from_bytes(&pdf_bytes, report, guesses, font_runs)
     }
 
     #[inline]
     fn write_output(&self, output_path: &Path, bytes: &[u8]) -> Result<(), String> {
-        self.file_store.write(output_path, bytes)
+        self.write_visualized_pdf(output_path, bytes)
     }
 }
 

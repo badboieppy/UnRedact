@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::dependency::file_store::FileStore;
 use crate::dependency::pdf_font_occurrence_accessor::{
-    build_file_font_report, DataBuildConfig, FileDataBuilder,
+    build_file_font_report, build_file_font_report_from_bytes, DataBuildConfig, FileDataBuilder,
 };
 use crate::dependency::pdf_font_run_accessor::build_font_run_report;
 use crate::types::file_types::{
@@ -46,10 +46,37 @@ impl FontsData {
     }
 
     #[inline]
+    pub fn detect_fonts_from_bytes(
+        &self,
+        input_name: &str,
+        input_bytes: &[u8],
+        include_details: bool,
+    ) -> Result<FontDetectionReport, String> {
+        let report = build_file_font_report_from_bytes(
+            input_name,
+            input_bytes,
+            DataBuildConfig { include_details },
+        )?;
+        Ok(FontDetectionReport {
+            inputs: vec![finalize_file_font_report(report, include_details)],
+        })
+    }
+
+    #[inline]
     pub fn write_fonts(&self, path: &Path, report: &FontDetectionReport) -> Result<(), String> {
         let json = serde_json::to_vec_pretty(report)
             .map_err(|e| format!("failed to encode fonts json: {e}"))?;
         self.file_store.write(path, &json)
+    }
+
+    #[inline]
+    pub fn load_font_runs_from_bytes(
+        &self,
+        input_name: &str,
+        pdf_bytes: &[u8],
+    ) -> Result<FontRunInputs, String> {
+        let report = build_font_run_report(Path::new(input_name), pdf_bytes)?;
+        Ok(FontRunInputs { report })
     }
 }
 
@@ -64,8 +91,7 @@ impl FontRunDataSource for FontsData {
     #[inline]
     fn load_font_runs(&self, pdf_path: &Path) -> Result<FontRunInputs, String> {
         let bytes = self.file_store.read(pdf_path)?;
-        let report = build_font_run_report(pdf_path, &bytes)?;
-        Ok(FontRunInputs { report })
+        self.load_font_runs_from_bytes(&pdf_path.to_string_lossy(), &bytes)
     }
 }
 

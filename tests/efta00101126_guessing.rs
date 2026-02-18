@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use unredact::service::unredact_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 

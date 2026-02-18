@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use unredact::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever, RedactionsData};
 use unredact::data::{DictionaryData, FontsData, GuessValidationData};
 use unredact::logic::{run_guess_from_paths, RunGuessRequest};
-use unredact::service::unredact_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport};
 use unredact::types::redaction_types::{
     Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,

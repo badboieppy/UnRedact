@@ -5,7 +5,11 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::logic::{run_orchestrator, OrchestratorConfig, OrchestratorRequest};
+use crate::logic::{
+    build_output_file_paths, read_dictionary_bytes, read_input_pdf_bytes,
+    run_redaction_guessing_component, write_encoded_outputs, BytesPipelineRequest, OutputFilePaths,
+    PipelineConfig,
+};
 use crate::types::guess_types::GuessConfig;
 use crate::types::visualizer_config::VisualizerConfig;
 
@@ -134,26 +138,30 @@ pub fn run_batch_from_paths(
 
 #[inline]
 pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String> {
-    let orchestrator_req = OrchestratorRequest {
-        input: req.input,
-        output_dir: req.output_dir,
-        dictionary_path: req.dictionary_path,
-        cfg: OrchestratorConfig {
-            include_details: req.cfg.include_details,
-            include_full_page_rects: req.cfg.include_full_page_rects,
-            enable_image_analysis: req.cfg.enable_image_analysis,
-            raster_dpi: req.cfg.raster_dpi,
-            guess: req.cfg.guess,
-            visualize: req.cfg.visualize,
-            visualizer: req.cfg.visualizer,
-        },
+    let pipeline_cfg = PipelineConfig {
+        include_details: req.cfg.include_details,
+        include_full_page_rects: req.cfg.include_full_page_rects,
+        enable_image_analysis: req.cfg.enable_image_analysis,
+        raster_dpi: req.cfg.raster_dpi,
+        guess: req.cfg.guess,
+        visualize: req.cfg.visualize,
+        visualizer: req.cfg.visualizer,
     };
-    let out = run_orchestrator(orchestrator_req)?;
+    let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
+    let bytes_req = BytesPipelineRequest {
+        input_name: req.input.to_string_lossy().to_string(),
+        pdf_bytes: read_input_pdf_bytes(&req.input)?,
+        dictionary_bytes: read_dictionary_bytes(req.dictionary_path.as_deref())?,
+        cfg: pipeline_cfg,
+    };
+    let bytes_outputs = run_redaction_guessing_component(bytes_req)?;
+    let encoded_outputs = crate::logic::encode_outputs(&bytes_outputs)?;
+    write_encoded_outputs(&output_paths, &encoded_outputs)?;
     Ok(UnredactServiceOutputs {
-        redactions_path: out.redactions_path,
-        fonts_path: out.fonts_path,
-        guesses_path: out.guesses_path,
-        visualized_pdf_path: out.visualized_pdf_path,
+        redactions_path: output_paths.redactions_path,
+        fonts_path: output_paths.fonts_path,
+        guesses_path: output_paths.guesses_path,
+        visualized_pdf_path: output_paths.visualized_pdf_path,
     })
 }
 

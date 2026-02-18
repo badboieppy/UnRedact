@@ -45,6 +45,41 @@ pub fn build_file_font_report(
     })
 }
 
+#[inline]
+pub fn build_file_font_report_from_bytes(
+    input_name: &str,
+    bytes: &[u8],
+    _config: DataBuildConfig,
+) -> Result<FileFontReport, String> {
+    let pdf_occurrences = extract_pdf_occurrences_from_bytes(bytes);
+    let (kind, text_source, occurrences) = match pdf_occurrences {
+        Ok(occurrences) => (
+            InputFileKind::Pdf,
+            TextSourceKind::EmbeddedText,
+            Some(occurrences),
+        ),
+        Err(_) => {
+            let classified = classify_kind_from_path(Path::new(input_name));
+            (
+                classified,
+                default_text_source_for_kind(classified),
+                Some(FontOccurrences { items: vec![] }),
+            )
+        }
+    };
+
+    Ok(FileFontReport {
+        path: input_name.to_owned(),
+        kind,
+        text_source,
+        fonts: FontsFound {
+            distinct: vec![],
+            counts: vec![],
+        },
+        occurrences,
+    })
+}
+
 fn extract_occurrences(
     builder: &FileDataBuilder<'_>,
     path: &Path,
@@ -79,6 +114,19 @@ fn extract_pdf_occurrences(
         .flatten()
         .collect::<Vec<_>>();
 
+    Ok(FontOccurrences { items })
+}
+
+fn extract_pdf_occurrences_from_bytes(bytes: &[u8]) -> Result<FontOccurrences, String> {
+    let doc = Document::load_mem(bytes).map_err(|error| error.to_string())?;
+    let pages = doc.get_pages();
+    let items = pages
+        .into_iter()
+        .map(|(page_no, page_id)| extract_pdf_page_occurrences(&doc, page_no, page_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     Ok(FontOccurrences { items })
 }
 
