@@ -310,11 +310,16 @@ mod guess_impl {
 
     const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
     const GLYPH_UNITS_SCALE: f64 = 64.0_f64;
+    const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
+    const MULTI_SPAN_ANCHOR_PRIOR_WEIGHT: f64 = 0.15_f64;
+    const SINGLE_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.12_f64;
+    const MULTI_SPAN_BOX_ERROR_RATIO: f64 = 0.45_f64;
+    const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
+    const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
 
     #[derive(Debug, Clone, Copy)]
     struct MeasuredWidth {
         pt: f64,
-        px: f64,
     }
 
     struct WidthMeasureContext<'a> {
@@ -508,6 +513,11 @@ mod guess_impl {
             if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
                 continue;
             }
+            let redaction_width = (guess.bbox.width().abs() as f64).max(1.0_f64);
+            let gap_ratio = (guess.context.gap_pt as f64).abs() / redaction_width;
+            if gap_ratio >= CLUSTER_CONSENSUS_MAX_GAP_RATIO {
+                continue;
+            }
             let Some(font_key) = guess.context.anchor_font_key.clone() else {
                 continue;
             };
@@ -555,20 +565,34 @@ mod guess_impl {
                 }
 
                 guess.candidates.sort_by(|left_candidate, right_candidate| {
+                    let left_local = left_candidate.error_pt as f64;
+                    let right_local = right_candidate.error_pt as f64;
                     let left_consensus = aggregate
                         .get(&left_candidate.text)
-                        .and_then(|(score, count)| (*count == cluster_size).then_some(*score))
+                        .map(|(score, count)| {
+                            (*score / *count as f64)
+                                + (cluster_size.saturating_sub(*count) as f64 * 1.5_f64)
+                        })
                         .unwrap_or(f64::INFINITY);
                     let right_consensus = aggregate
                         .get(&right_candidate.text)
-                        .and_then(|(score, count)| (*count == cluster_size).then_some(*score))
+                        .map(|(score, count)| {
+                            (*score / *count as f64)
+                                + (cluster_size.saturating_sub(*count) as f64 * 1.5_f64)
+                        })
                         .unwrap_or(f64::INFINITY);
                     left_consensus
                         .partial_cmp(&right_consensus)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| {
-                            (left_candidate.error_pt as f64)
-                                .partial_cmp(&(right_candidate.error_pt as f64))
+                            left_local
+                                .partial_cmp(&right_local)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| {
+                            left_candidate
+                                .score
+                                .partial_cmp(&right_candidate.score)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .then_with(|| left_candidate.word_count.cmp(&right_candidate.word_count))
@@ -576,18 +600,24 @@ mod guess_impl {
                 });
 
                 guess.exact_matches.sort_by(|left_text, right_text| {
-                    let left_consensus = aggregate
-                        .get(left_text)
-                        .and_then(|(score, count)| (*count == cluster_size).then_some(*score))
-                        .unwrap_or(f64::INFINITY);
-                    let right_consensus = aggregate
-                        .get(right_text)
-                        .and_then(|(score, count)| (*count == cluster_size).then_some(*score))
-                        .unwrap_or(f64::INFINITY);
                     let left_local = local_error.get(left_text).copied().unwrap_or(f64::INFINITY);
                     let right_local = local_error
                         .get(right_text)
                         .copied()
+                        .unwrap_or(f64::INFINITY);
+                    let left_consensus = aggregate
+                        .get(left_text)
+                        .map(|(score, count)| {
+                            (*score / *count as f64)
+                                + (cluster_size.saturating_sub(*count) as f64 * 1.5_f64)
+                        })
+                        .unwrap_or(f64::INFINITY);
+                    let right_consensus = aggregate
+                        .get(right_text)
+                        .map(|(score, count)| {
+                            (*score / *count as f64)
+                                + (cluster_size.saturating_sub(*count) as f64 * 1.5_f64)
+                        })
                         .unwrap_or(f64::INFINITY);
                     left_consensus
                         .partial_cmp(&right_consensus)
@@ -777,22 +807,16 @@ mod guess_impl {
             metrics_dpi_bits: DEFAULT_METRICS_DPI.to_bits(),
         };
         let left_anchor_text = anchor.left_anchor_text.trim();
-        let phrase_key = PhraseWidthKey {
-            width_key: key.clone(),
-            left_anchor_text: left_anchor_text.to_owned(),
-        };
-
-        if !cache.phrases.contains_key(&phrase_key) {
+        if !cache.candidates.contains_key(&key) {
             let mut widths = std::collections::BTreeMap::new();
             for word in dictionary {
                 let trimmed = word.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                let phrase = candidate_prefix_phrase(left_anchor_text, trimmed);
-                let width = measure_width(&phrase).unwrap_or_else(|| {
+                let width = measure_width(trimmed).unwrap_or_else(|| {
                     fallback_measured_width(
-                        &phrase,
+                        trimmed,
                         fallback_char_width,
                         fallback_space_width,
                         DEFAULT_METRICS_DPI,
@@ -800,7 +824,7 @@ mod guess_impl {
                 });
                 widths.insert(trimmed.to_owned(), width);
             }
-            cache.phrases.insert(phrase_key.clone(), widths);
+            cache.candidates.insert(key.clone(), widths);
         }
 
         let left_width = measure_width(left_anchor_text).unwrap_or_else(|| {
@@ -811,8 +835,16 @@ mod guess_impl {
                 DEFAULT_METRICS_DPI,
             )
         });
-        let candidate_prefix_widths = cache.phrases.get(&phrase_key);
-        let Some(candidate_prefix_widths) = candidate_prefix_widths else {
+        let space_width = measure_width(" ").unwrap_or_else(|| {
+            fallback_measured_width(
+                " ",
+                fallback_char_width,
+                fallback_space_width,
+                DEFAULT_METRICS_DPI,
+            )
+        });
+        let candidate_widths = cache.candidates.get(&key);
+        let Some(candidate_widths) = candidate_widths else {
             return RedactionGuess {
                 page_index: redaction.page_index,
                 bbox: redaction.bbox,
@@ -841,8 +873,15 @@ mod guess_impl {
         };
 
         let mut scored = Vec::new();
-        let width_filter_limit_pt =
+        let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
+        let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
+        let gap_ratio = anchor_gap_pt / redaction_width_pt;
+        let multi_span_mode = gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
+        let anchor_filter_limit_pt =
             (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(cfg.tol_pt.max(4.0_f64));
+        let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
+            + MULTI_SPAN_BOX_ERROR_PAD_PT)
+            .max(anchor.epsilon_pt.max(2.5_f64));
         for word in dictionary {
             let trimmed = word.trim();
             if trimmed.is_empty() {
@@ -852,15 +891,29 @@ mod guess_impl {
             {
                 continue;
             }
-            let Some(prefix_width) = candidate_prefix_widths.get(trimmed).copied() else {
+            let Some(measured_width) = candidate_widths.get(trimmed).copied() else {
                 continue;
             };
-            let _prefix_width_px = prefix_width.px;
-            let predicted_right = anchor.left_x + prefix_width.pt + anchor.row_bias_pt;
-            let raw_err = (predicted_right - anchor.right_x).abs();
-            if raw_err > width_filter_limit_pt {
+            let predicted_right = anchor.left_x
+                + left_width.pt
+                + space_width.pt
+                + measured_width.pt
+                + space_width.pt
+                + anchor.row_bias_pt;
+            let anchor_err = (predicted_right - anchor.right_x).abs();
+            let box_err = (measured_width.pt - redaction_width_pt).abs();
+            if multi_span_mode {
+                if box_err > box_filter_limit_pt {
+                    continue;
+                }
+            } else if anchor_err > anchor_filter_limit_pt {
                 continue;
             }
+            let raw_err = if multi_span_mode {
+                box_err + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT)
+            } else {
+                anchor_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT)
+            };
             let context_penalty = punctuation_context_penalty(
                 &anchor.left_anchor_text,
                 &anchor.right_anchor_text,
@@ -1705,15 +1758,8 @@ mod guess_impl {
             .as_slice()
     }
 
-    fn measured_width_from_points(width_pt: f64, dpi: f32) -> MeasuredWidth {
-        MeasuredWidth {
-            pt: width_pt,
-            px: points_to_pixels(width_pt, dpi),
-        }
-    }
-
-    fn points_to_pixels(points: f64, dpi: f32) -> f64 {
-        points * (dpi as f64 / 72.0_f64)
+    fn measured_width_from_points(width_pt: f64, _dpi: f32) -> MeasuredWidth {
+        MeasuredWidth { pt: width_pt }
     }
 
     fn times_roman_width(ch: char) -> i32 {
@@ -2004,14 +2050,6 @@ mod guess_impl {
         measured_width_from_points(width_pt, dpi)
     }
 
-    fn candidate_prefix_phrase(left_anchor_text: &str, candidate: &str) -> String {
-        if left_anchor_text.is_empty() {
-            format!("{candidate} ")
-        } else {
-            format!("{left_anchor_text} {candidate} ")
-        }
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
     struct WidthKey {
         page_index: u32,
@@ -2021,23 +2059,15 @@ mod guess_impl {
         metrics_dpi_bits: u32,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    struct PhraseWidthKey {
-        width_key: WidthKey,
-        left_anchor_text: String,
-    }
-
     struct WidthCache {
-        phrases: std::collections::BTreeMap<
-            PhraseWidthKey,
-            std::collections::BTreeMap<String, MeasuredWidth>,
-        >,
+        candidates:
+            std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
     }
 
     impl WidthCache {
         fn new() -> Self {
             Self {
-                phrases: std::collections::BTreeMap::new(),
+                candidates: std::collections::BTreeMap::new(),
             }
         }
     }
@@ -2139,6 +2169,18 @@ mod guess_impl {
             }
             if word_count >= 5 {
                 penalty += 0.40_f64;
+            }
+            if candidate_trim.contains(',') {
+                penalty += 0.55_f64;
+            }
+            if candidate_trim.contains('(') || candidate_trim.contains(')') {
+                penalty += 0.45_f64;
+            }
+            if candidate_trim.contains('/') || candidate_trim.contains('&') {
+                penalty += 0.35_f64;
+            }
+            if word_count == 2 && !candidate_trim.contains(',') {
+                penalty -= 0.15_f64;
             }
         }
 
