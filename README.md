@@ -1,75 +1,129 @@
 # UnRedact
-Un-redact files
+UnRedact is a tool that analyzes redacted PDF files and makes best-effort guesses about hidden text.
 
-## Build/Lint Policy
-- Builds run through `clippy` and fail on any warning.
-- Ensure clippy is installed: `rustup component add clippy`
+It works by combining:
+- redaction box detection,
+- nearby visible text,
+- PDF font/width measurements (including kerning and ligatures),
+- visual scoring against the rendered page.
 
-## Available CLIs
+## Important Note
+UnRedact generates guesses. It does not guarantee the true hidden text.
 
-### Font Detection CLI
-Use the `font_detection_cli` binary to analyze embedded fonts and emit JSON metadata:
+## Who This Is For
+- Researchers and journalists
+- Investigators reviewing released records
+- Anyone who wants structured, repeatable analysis of redacted PDFs
 
-- Scan one or more files: `cargo run --bin font_detection_cli -- detect <FILE>...`
-- Include verbose metadata: add `--details`
-- Write output to a file: `--output path/to/report.json`
-
-### Redaction Finder CLI
-The `redaction_finder_cli` binary surfaces annotation, drawn, and raster redactions:
-
-- Basic run: `cargo run --bin redaction_finder_cli -- path/to/file.pdf`
-- Emit extra per-redaction metadata: `--details`
-- Limit detection scope: `--mode annotations|drawn|all`
-- Include full-page rectangles: `--include-full-page-rects`
-- Skip raster analysis if you only need vector checks: `--no-image-analysis`
-- Set render resolution for raster detection: `--raster-dpi 200`
-- Write JSON to disk instead of stdout: `--output path/to/report.json`
-
-Raster detection in the CLI uses the pure-Rust `hayro` crate.
-
-### Redaction Guesser CLI
-The `redaction_guess_cli` binary generates standalone guess reports from precomputed JSON inputs:
-
-- Basic run: `cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --pdf path/to/file.pdf`
-- Include a custom dictionary: `--dictionary words.txt`
-- Control search size: `--max-words 4 --max-candidates 50 --max-dictionary 2000`
-- Control tolerance: `--tol-pt 4.0`
-- Cap search work: `--max-nodes 50000`
-- Write JSON to disk instead of stdout: `--output path/to/guesses.json`
-
-Example orchestration:
+## Install
+1. Install Rust: https://rustup.rs
+2. Clone this repository.
+3. Build:
 
 ```bash
-cargo run --bin redaction_finder_cli -- path/to/file.pdf --output redactions.json --details
-cargo run --bin font_detection_cli -- detect path/to/file.pdf --output fonts.json --details
-cargo run --bin redaction_guess_cli --redactions redactions.json --fonts fonts.json --pdf path/to/file.pdf --output guesses.json
+cargo build --release
 ```
 
-### Orchestrator CLI
-The `unredact_orchestrator_cli` binary runs redaction detection, font detection, and guessing in one pass:
+## Quick Start (Single PDF)
+Run UnRedact on one file:
 
-- Basic run: `cargo run --bin unredact_orchestrator_cli -- path/to/file.pdf`
-- Output directory: `--output-dir path/to/out` (defaults to the system temp dir under `unredact`)
-- Include a custom dictionary: `--dictionary words.txt`
-- Control redaction detection: `--details --include-full-page-rects --no-image-analysis --raster-dpi 200`
-- Control guessing: `--max-words 4 --max-candidates 50 --max-dictionary 2000 --tol-pt 4.0 --max-nodes 50000`
-- Visualize redactions: `--visualize --visualize-border 1.0` (writes a `*.visualized.pdf`)
+```bash
+cargo run --bin unredact -- path/to/file.pdf --output-dir path/to/output
+```
 
-### PDF to PNG CLI
-Use the `pdf_to_png` binary to render PDF pages into PNG files for docs/README updates:
+This creates:
+- `file.redactions.json` (detected redaction regions)
+- `file.fonts.json` (detected text/font runs)
+- `file.guesses.json` (best guesses, scores, and diagnostics)
 
-- Render first page: `cargo run --bin pdf_to_png -- path/to/file.pdf`
-- Render a specific page: `cargo run --bin pdf_to_png -- path/to/file.pdf --page 2`
-- Render all pages: `cargo run --bin pdf_to_png -- path/to/file.pdf --all-pages --output-dir path/to/out`
-- Choose DPI: `--dpi 200`
-- Write single-page output to a specific file: `--output path/to/page.png`
+## Create a Visualized PDF
+If you want an output PDF with overlays:
 
-## Example PDFs
+```bash
+cargo run --bin unredact -- path/to/file.pdf --output-dir path/to/output --visualize
+```
 
-Original sample:
+This also creates:
+- `file.visualized.pdf`
+
+## Process a Whole Folder (Batch Mode)
+You can pass a folder instead of a single file:
+
+```bash
+cargo run --bin unredact -- path/to/folder --output-dir path/to/output --recursive --glob *.pdf
+```
+
+Useful batch options:
+- `--recursive`: include subfolders
+- `--glob`: filename filter (`*` and `?` supported), default `*.pdf`
+- `--jobs`: number of parallel workers
+- `--fail-fast`: stop at the first failed file
+- `--batch-manifest`: write a JSON summary report
+
+The batch manifest includes per-file success/failure and runtime.
+
+## Use Your Own Dictionary (Optional)
+You can provide a custom dictionary file (one entry per line):
+
+```bash
+cargo run --bin unredact -- path/to/file.pdf --dictionary path/to/dictionary.txt
+```
+
+If you do not provide one, UnRedact uses the built-in names list.
+
+## Most Useful Runtime Controls
+- `--max-candidates`: number of guesses to keep per redaction
+- `--max-dictionary`: maximum dictionary size loaded
+- `--tol-pt`: width tolerance
+- `--no-visual-score`: disable visual scoring
+- `--visual-score-dpi`: render DPI for visual scoring
+- `--visual-drop-threshold`: drop guesses above a visual error threshold
+
+Show all `unredact` options:
+
+```bash
+cargo run --bin unredact -- --help
+```
+
+## Accuracy Benchmark
+Use this benchmark to track quality and consistency over time:
+
+```bash
+cargo run --bin guess_accuracy_benchmark -- --out benchmark/guess_accuracy.json --repeats 2 --consistency-out benchmark/guess_consistency.json
+```
+
+This reports:
+- recall and ranking metrics,
+- visual error metrics,
+- stage timing metrics,
+- run-to-run consistency metrics.
+
+Use `--determinism` as shorthand for `--repeats 3`.
+
+Show benchmark options:
+
+```bash
+cargo run --bin guess_accuracy_benchmark -- --help
+```
+
+## PDF to PNG Helper
+Use this to convert PDF pages into PNG images (useful for documentation and visual checks):
+
+```bash
+cargo run --bin pdf_to_png -- path/to/file.pdf --page 2 --dpi 200
+```
+
+Show options:
+
+```bash
+cargo run --bin pdf_to_png -- --help
+```
+
+## Example
+Original sample (page 8):
 
 ![Original PDF preview](example/EFTA00101126.png)
 
-Visualized output:
+Visualized sample (page 8):
 
 ![Visualized PDF preview](example/EFTA00101126.visualized.png)
