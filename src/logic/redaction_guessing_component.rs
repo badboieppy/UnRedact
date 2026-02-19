@@ -106,7 +106,9 @@ mod guess_impl {
     use crate::types::guess_types::{
         GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
     };
-    use crate::types::redaction_types::{Rect, RedactionOccurrence, RedactionReport};
+    use crate::types::redaction_types::{
+        Rect, RedactionKind, RedactionOccurrence, RedactionReport,
+    };
 
     pub struct RunGuessRequest<'a> {
         pub report_data: &'a dyn ReportDataSource,
@@ -413,7 +415,9 @@ mod guess_impl {
     const GLYPH_UNITS_SCALE: f64 = 64.0_f64;
     const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
     const MULTI_SPAN_ANCHOR_PRIOR_WEIGHT: f64 = 0.15_f64;
+    const MULTI_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.70_f64;
     const SINGLE_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.12_f64;
+    const RASTER_WIDTH_NOISE_PT: f64 = 2.50_f64;
     const MULTI_SPAN_BOX_ERROR_RATIO: f64 = 0.45_f64;
     const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
     const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
@@ -1377,6 +1381,19 @@ mod guess_impl {
         }
     }
 
+    fn effective_box_error_pt(
+        redaction: &RedactionOccurrence,
+        candidate_width_pt: f64,
+        target_width_pt: f64,
+    ) -> f64 {
+        let raw = (candidate_width_pt - target_width_pt).abs();
+        if matches!(redaction.kind, RedactionKind::RasterDarkRegion) {
+            (raw - RASTER_WIDTH_NOISE_PT).max(0.0_f64)
+        } else {
+            raw
+        }
+    }
+
     fn build_guess_for_anchor(
         redaction: &RedactionOccurrence,
         dictionary: &[String],
@@ -1598,12 +1615,13 @@ mod guess_impl {
                     + anchor.row_bias_pt;
                 let anchor_err = (predicted_right - anchor.right_x).abs();
                 funnel.after_anchor += 1;
-                let box_err = (entry.width_pt - redaction_width_pt).abs();
+                let box_err = effective_box_error_pt(redaction, entry.width_pt, redaction_width_pt);
                 if box_err > box_filter_limit_pt {
                     continue;
                 }
                 funnel.after_box += 1;
-                let raw_err = box_err + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT);
+                let raw_err = (box_err * MULTI_SPAN_BOX_PRIOR_WEIGHT)
+                    + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT);
                 let context_penalty = punctuation_context_penalty(
                     &anchor.left_anchor_text,
                     &anchor.right_anchor_text,
@@ -1660,7 +1678,7 @@ mod guess_impl {
                     continue;
                 }
                 funnel.after_shape += 1;
-                let box_err = (entry.width_pt - redaction_width_pt).abs();
+                let box_err = effective_box_error_pt(redaction, entry.width_pt, redaction_width_pt);
                 let side_alignment_err = match anchor.mode {
                     AnchorMode::TwoSided => {
                         let predicted_right = anchor.left_x
@@ -3599,8 +3617,8 @@ mod redaction_impl {
     const MAX_CONTEXT_GAP_PT: f32 = 80.0;
     const LARGE_OVERLAP_PT: f32 = 20.0;
     const MAX_CONTEXT_WORDS_PER_SIDE: usize = 2;
-    const RASTER_TWO_PASS_MIN_PAGES: usize = 5;
-    const RASTER_PREPASS_DPI: f32 = 60.0;
+    const RASTER_PREPASS_DPI: f32 = 18.0;
+    const RASTER_HIGHPASS_DPI: f32 = 96.0;
     type LineMatchScore = (i32, i32, i32, i32);
     type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
 
@@ -3737,50 +3755,8 @@ mod redaction_impl {
             return Vec::new();
         }
 
-        if page_indices.len() < RASTER_TWO_PASS_MIN_PAGES {
-            let started = Instant::now();
-            let mut out = Vec::<RedactionOccurrence>::new();
-            for page_index in page_indices {
-                match retriever.raster_redactions(*page_index, cfg) {
-                    Ok(v) => out.extend(v),
-                    Err(m) => {
-                        diagnostics.push(format!("page_index={page_index} raster_page_error={m}"))
-                    }
-                }
-            }
-            diagnostics.push(format!(
-                "raster_two_pass=pages={} mode=single_pass_small_doc elapsed_ms={} threshold_pages={}",
-                page_indices.len(),
-                started.elapsed().as_millis(),
-                RASTER_TWO_PASS_MIN_PAGES
-            ));
-            return out;
-        }
-
-        let high_dpi = cfg.raster_dpi;
-        let low_dpi = high_dpi.min(RASTER_PREPASS_DPI);
-        if (low_dpi - high_dpi).abs() < f32::EPSILON {
-            let started = Instant::now();
-            let mut out = Vec::<RedactionOccurrence>::new();
-            for page_index in page_indices {
-                match retriever.raster_redactions(*page_index, cfg) {
-                    Ok(v) => out.extend(v),
-                    Err(m) => {
-                        diagnostics.push(format!("page_index={page_index} raster_page_error={m}"))
-                    }
-                }
-            }
-            diagnostics.push(format!(
-                "raster_two_pass=pages={} mode=single_pass_same_dpi elapsed_ms={} dpi={:.1}",
-                page_indices.len(),
-                started.elapsed().as_millis(),
-                high_dpi
-            ));
-            return out;
-        }
-
         let prepass_cfg = RedactionFinderConfig {
-            raster_dpi: low_dpi,
+            raster_dpi: RASTER_PREPASS_DPI,
             ..*cfg
         };
         let prepass_started = Instant::now();
@@ -3802,7 +3778,7 @@ mod redaction_impl {
         let prepass_ms = prepass_started.elapsed().as_millis();
 
         let highpass_cfg = RedactionFinderConfig {
-            raster_dpi: high_dpi,
+            raster_dpi: RASTER_HIGHPASS_DPI,
             ..*cfg
         };
         let highpass_started = Instant::now();
@@ -3830,12 +3806,13 @@ mod redaction_impl {
         }
         let highpass_ms = highpass_started.elapsed().as_millis();
         diagnostics.push(format!(
-            "raster_two_pass=pages={} candidate_pages={} non_candidate_pages={} prepass_dpi={:.1} highpass_dpi={:.1} prepass_ms={} highpass_pages={} highpass_ms={} highpass_fallback_pages={}",
+            "raster_two_pass=pages={} candidate_pages={} non_candidate_pages={} prepass_dpi={:.1} highpass_dpi={:.1} requested_dpi={:.1} prepass_ms={} highpass_pages={} highpass_ms={} highpass_fallback_pages={}",
             page_indices.len(),
             candidate_pages.len(),
             page_indices.len().saturating_sub(candidate_pages.len()),
-            low_dpi,
-            high_dpi,
+            RASTER_PREPASS_DPI,
+            RASTER_HIGHPASS_DPI,
+            cfg.raster_dpi,
             prepass_ms,
             highpass_pages,
             highpass_ms,
@@ -4147,6 +4124,8 @@ mod redaction_impl {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::cell::RefCell;
+        use std::collections::BTreeMap;
 
         fn hit(
             page_index: u32,
@@ -4161,6 +4140,170 @@ mod redaction_impl {
                 bbox: Rect::new(x0, y0, x1, y1),
                 text: text.to_owned(),
             }
+        }
+
+        fn occ(page_index: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> RedactionOccurrence {
+            RedactionOccurrence {
+                page_index,
+                bbox: Rect::new(x0, y0, x1, y1),
+                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
+                score: 1.0_f32,
+                meta: BTreeMap::new(),
+                underlying_text: Vec::new(),
+            }
+        }
+
+        struct FakeRasterRetriever {
+            pages: Vec<u32>,
+            prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+            highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+            calls: RefCell<Vec<(u32, f32)>>,
+        }
+
+        impl FakeRasterRetriever {
+            fn new(
+                pages: Vec<u32>,
+                prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+                highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+            ) -> Self {
+                Self {
+                    pages,
+                    prepass,
+                    highpass,
+                    calls: RefCell::new(Vec::new()),
+                }
+            }
+        }
+
+        impl RedactionDataRetriever for FakeRasterRetriever {
+            fn page_indices(&self) -> Vec<u32> {
+                self.pages.clone()
+            }
+
+            fn annotation_redactions(
+                &self,
+                _page_index: u32,
+                _include_details: bool,
+            ) -> Result<Vec<RedactionOccurrence>, String> {
+                Ok(Vec::new())
+            }
+
+            fn drawn_redactions(
+                &self,
+                _page_index: u32,
+                _include_details: bool,
+                _include_full_page_rects: bool,
+            ) -> Result<Vec<RedactionOccurrence>, String> {
+                Ok(Vec::new())
+            }
+
+            fn raster_redactions(
+                &self,
+                page_index: u32,
+                cfg: &RedactionFinderConfig,
+            ) -> Result<Vec<RedactionOccurrence>, String> {
+                self.calls.borrow_mut().push((page_index, cfg.raster_dpi));
+                if (cfg.raster_dpi - RASTER_PREPASS_DPI).abs() < f32::EPSILON {
+                    return Ok(self.prepass.get(&page_index).cloned().unwrap_or_default());
+                }
+                if (cfg.raster_dpi - RASTER_HIGHPASS_DPI).abs() < f32::EPSILON {
+                    return Ok(self.highpass.get(&page_index).cloned().unwrap_or_default());
+                }
+                Err(format!("unexpected_dpi={}", cfg.raster_dpi))
+            }
+
+            fn underlying_text_hits(
+                &self,
+                _page_index: u32,
+            ) -> Result<Vec<UnderlyingTextHit>, String> {
+                Ok(Vec::new())
+            }
+        }
+
+        #[test]
+        fn raster_two_pass_uses_fixed_prepass_and_highpass_dpi() {
+            let mut prepass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
+            prepass.insert(0, vec![occ(0, 10.0, 10.0, 30.0, 20.0)]);
+            prepass.insert(2, vec![occ(2, 50.0, 10.0, 80.0, 20.0)]);
+            let mut highpass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
+            highpass.insert(0, vec![occ(0, 12.0, 10.0, 32.0, 20.0)]);
+
+            let retriever = FakeRasterRetriever::new(vec![0, 1, 2], prepass, highpass);
+            let cfg = RedactionFinderConfig {
+                include_details: false,
+                mode: RedactionMode::All,
+                include_full_page_rects: false,
+                enable_image_analysis: true,
+                raster_dpi: 200.0_f32,
+            };
+            let mut diagnostics = Vec::<String>::new();
+            let out =
+                collect_raster_redactions_two_pass(&retriever, &[0, 1, 2], &cfg, &mut diagnostics);
+
+            let calls = retriever
+                .calls
+                .borrow()
+                .iter()
+                .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
+                .collect::<Vec<_>>();
+            let prepass = format!("{:.1}", RASTER_PREPASS_DPI);
+            let highpass = format!("{:.1}", RASTER_HIGHPASS_DPI);
+            assert_eq!(
+                calls,
+                vec![
+                    format!("0:{prepass}"),
+                    format!("1:{prepass}"),
+                    format!("2:{prepass}"),
+                    format!("0:{highpass}"),
+                    format!("2:{highpass}"),
+                ]
+            );
+            assert_eq!(out.len(), 2);
+            assert!((out[0].bbox.x0 - 12.0_f32).abs() < 0.01_f32);
+            assert!((out[1].bbox.x0 - 50.0_f32).abs() < 0.01_f32);
+            let summary = diagnostics
+                .iter()
+                .find(|line| line.starts_with("raster_two_pass="))
+                .expect("expected two-pass diagnostic");
+            assert!(summary.contains(&format!("prepass_dpi={prepass}")));
+            assert!(summary.contains(&format!("highpass_dpi={highpass}")));
+            assert!(summary.contains("requested_dpi=200.0"));
+            assert!(
+                !summary.contains("single_pass"),
+                "expected no single-pass mode diagnostic"
+            );
+        }
+
+        #[test]
+        fn raster_two_pass_does_not_use_single_pass_for_small_docs() {
+            let retriever = FakeRasterRetriever::new(vec![0], BTreeMap::new(), BTreeMap::new());
+            let cfg = RedactionFinderConfig {
+                include_details: false,
+                mode: RedactionMode::All,
+                include_full_page_rects: false,
+                enable_image_analysis: true,
+                raster_dpi: 200.0_f32,
+            };
+            let mut diagnostics = Vec::<String>::new();
+            let out = collect_raster_redactions_two_pass(&retriever, &[0], &cfg, &mut diagnostics);
+            assert!(out.is_empty());
+            let calls = retriever
+                .calls
+                .borrow()
+                .iter()
+                .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
+                .collect::<Vec<_>>();
+            assert_eq!(calls, vec![format!("0:{:.1}", RASTER_PREPASS_DPI)]);
+            let summary = diagnostics
+                .iter()
+                .find(|line| line.starts_with("raster_two_pass="))
+                .expect("expected two-pass diagnostic");
+            assert!(summary.contains("candidate_pages=0"));
+            assert!(summary.contains("highpass_pages=0"));
+            assert!(
+                !summary.contains("single_pass"),
+                "expected no single-pass mode diagnostic"
+            );
         }
 
         #[test]

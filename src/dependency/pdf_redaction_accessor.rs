@@ -1167,16 +1167,16 @@ fn image_detections_to_dark_regions(
     let mut regions = Vec::new();
     for det in &detections.detections {
         let x0_px = (det.normalized_rect.x0 * width_px as f32)
-            .round()
+            .floor()
             .clamp(0.0, width_px as f32) as u32;
         let x1_px = (det.normalized_rect.x1 * width_px as f32)
-            .round()
+            .ceil()
             .clamp(0.0, width_px as f32) as u32;
         let y0_px = (det.normalized_rect.y0 * height_px as f32)
-            .round()
+            .floor()
             .clamp(0.0, height_px as f32) as u32;
         let y1_px = (det.normalized_rect.y1 * height_px as f32)
-            .round()
+            .ceil()
             .clamp(0.0, height_px as f32) as u32;
 
         if x1_px <= x0_px || y1_px <= y0_px {
@@ -1295,7 +1295,7 @@ fn dark_run_profile_for_region(
             col_ratio >= 0.55 || (col_ratio >= 0.38 && col_avg <= dark_threshold as f32);
     }
 
-    fill_small_bright_gaps(&mut dark_cols, 2);
+    fill_small_bright_gaps(&mut dark_cols, 1);
 
     let min_run_px = ((region_w as f32) * 0.035).ceil() as usize;
     let min_run_px = min_run_px.max(2);
@@ -1337,7 +1337,7 @@ fn dark_run_profile_for_region(
         let coverage_factor = (1.0 - ((run_coverage - 0.55).abs() / 0.55)).clamp(0.0, 1.0);
         let mut confidence =
             (0.45 * run_count_factor) + (0.35 * gap_factor) + (0.20 * coverage_factor);
-        if max_gap_px < 2 {
+        if max_gap_px == 0 {
             confidence *= 0.5;
         }
         if dark_ratio < 0.08 {
