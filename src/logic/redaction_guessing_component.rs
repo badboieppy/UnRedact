@@ -4226,6 +4226,14 @@ mod visual_guess_score_impl {
     const OVERLAY_BORDER_WIDTH: f32 = 1.0_f32;
     const CONTEXT_ALIGNMENT_MAX_DIFF: f32 = 0.22_f32;
     const MAX_VISUAL_SCORE_DPI: f32 = 96.0_f32;
+    const ENABLE_VISUAL_RERANK: bool = false;
+    const VISUAL_RERANK_TOP_K: usize = 3;
+    const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.35_f32;
+    const VISUAL_RERANK_MAX_BASE_GAP: f32 = 0.08_f32;
+    const VISUAL_RERANK_MAX_TOP_SCORE: f32 = 0.80_f32;
+    const VISUAL_RERANK_MIN_GAIN_TO_REORDER: f32 = 0.04_f32;
+    const EDGE_BAND_PT: f32 = 1.5_f32;
+    const EDGE_BAND_WEIGHT: f32 = 1.8_f32;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct VisualGuessScoreConfig {
@@ -4252,6 +4260,14 @@ mod visual_guess_score_impl {
         compared_pixels: u32,
         mean_abs_diff: f32,
         changed_pixel_ratio: f32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CandidateVisualScore {
+        text: String,
+        score: RowPixelScore,
+        blended_score: f32,
+        combined_gain: f32,
     }
 
     #[inline]
@@ -4436,6 +4452,10 @@ mod visual_guess_score_impl {
         let mut context_rows_rejected = 0_usize;
         let mut rows_scored = 0_usize;
         let mut rows_dropped = 0_usize;
+        let mut rerank_rows_considered = 0_usize;
+        let mut rerank_rows_scored = 0_usize;
+        let mut rerank_top1_changed = 0_usize;
+        let mut rerank_gain_sum = 0.0_f64;
         for (index, (guess, redaction)) in guesses
             .iter_mut()
             .zip(redactions.redactions.iter())
@@ -4507,6 +4527,88 @@ mod visual_guess_score_impl {
                 }
             }
 
+            let top_before = top_guess_text(guess).map(|value| value.to_owned());
+            let mut row_scored = false;
+            if should_visual_rerank_row(guess, overlays) {
+                rerank_rows_considered += 1;
+                match score_top_k_candidates_for_row(
+                    &annotator,
+                    &inputs.pdf_bytes,
+                    redaction.page_index,
+                    base_page,
+                    page_box,
+                    redaction.bbox,
+                    overlays,
+                    guess,
+                    effective_dpi,
+                    effective_min_ink_pixels,
+                ) {
+                    Ok(mut candidate_scores) if !candidate_scores.is_empty() => {
+                        rerank_rows_scored += 1;
+                        candidate_scores.sort_by(|left, right| {
+                            right
+                                .blended_score
+                                .partial_cmp(&left.blended_score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| {
+                                    left.score
+                                        .mean_abs_diff
+                                        .partial_cmp(&right.score.mean_abs_diff)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                        });
+                        let mut chosen = candidate_scores.first().cloned();
+                        let Some(mut chosen) = chosen.take() else {
+                            guess.visual_reason = Some("visual_rerank_empty".to_owned());
+                            continue;
+                        };
+                        if let Some(before) = top_before.as_deref() {
+                            if !before.eq_ignore_ascii_case(&chosen.text)
+                                && chosen.combined_gain < VISUAL_RERANK_MIN_GAIN_TO_REORDER
+                            {
+                                if let Some(original) = candidate_scores
+                                    .iter()
+                                    .find(|candidate| candidate.text.eq_ignore_ascii_case(before))
+                                    .cloned()
+                                {
+                                    chosen = original;
+                                }
+                            }
+                        }
+                        rows_scored += 1;
+                        row_scored = true;
+                        guess.visual_compared_pixels = Some(chosen.score.compared_pixels);
+                        guess.visual_mean_abs_diff = Some(chosen.score.mean_abs_diff);
+                        guess.visual_changed_pixel_ratio = Some(chosen.score.changed_pixel_ratio);
+
+                        if let Some(before) = top_before.as_deref() {
+                            if !before.eq_ignore_ascii_case(&chosen.text) {
+                                rerank_top1_changed += 1;
+                                promote_guess_text_to_front(guess, &chosen.text);
+                            }
+                        }
+                        rerank_gain_sum += chosen.combined_gain.max(0.0_f32) as f64;
+
+                        if let Some(threshold) = cfg.drop_threshold {
+                            if chosen.score.mean_abs_diff > threshold {
+                                guess.candidates.clear();
+                                guess.exact_matches.clear();
+                                guess.visual_dropped = true;
+                                rows_dropped += 1;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        guess.visual_reason = Some(format!("visual_rerank_failed:{error}"));
+                    }
+                }
+            }
+
+            if row_scored {
+                continue;
+            }
+
             let score = score_row_overlay(
                 base_page,
                 overlay_page,
@@ -4516,7 +4618,9 @@ mod visual_guess_score_impl {
                 effective_min_ink_pixels,
             );
             let Some(score) = score else {
-                guess.visual_reason = Some("insufficient_ink_pixels".to_owned());
+                if guess.visual_reason.is_none() {
+                    guess.visual_reason = Some("insufficient_ink_pixels".to_owned());
+                }
                 continue;
             };
 
@@ -4552,6 +4656,26 @@ mod visual_guess_score_impl {
             .unwrap_or_else(|| "none".to_owned()),
         CONTEXT_ALIGNMENT_MAX_DIFF
     ));
+        let rerank_changed_ratio = if rerank_rows_scored == 0 {
+            0.0_f64
+        } else {
+            rerank_top1_changed as f64 / rerank_rows_scored as f64
+        };
+        let rerank_mean_gain = if rerank_rows_scored == 0 {
+            0.0_f64
+        } else {
+            rerank_gain_sum / rerank_rows_scored as f64
+        };
+        diagnostics.push(format!(
+            "visual_rerank=rows_considered={} rows_scored={} top1_changed={} top1_changed_ratio={:.4} mean_gain={:.4} top_k={} blend_weight={:.3}",
+            rerank_rows_considered,
+            rerank_rows_scored,
+            rerank_top1_changed,
+            rerank_changed_ratio,
+            rerank_mean_gain,
+            VISUAL_RERANK_TOP_K,
+            VISUAL_RERANK_BLEND_WEIGHT
+        ));
         Ok(diagnostics)
     }
 
@@ -4593,6 +4717,256 @@ mod visual_guess_score_impl {
             .candidates
             .first()
             .map(|candidate| candidate.text.as_str())
+    }
+
+    fn promote_guess_text_to_front(guess: &mut RedactionGuess, selected_text: &str) {
+        if let Some(pos) = guess
+            .candidates
+            .iter()
+            .position(|candidate| candidate.text.eq_ignore_ascii_case(selected_text))
+        {
+            let chosen = guess.candidates.remove(pos);
+            guess.candidates.insert(0, chosen);
+        }
+        if let Some(pos) = guess
+            .exact_matches
+            .iter()
+            .position(|text| text.eq_ignore_ascii_case(selected_text))
+        {
+            let chosen = guess.exact_matches.remove(pos);
+            guess.exact_matches.insert(0, chosen);
+        }
+    }
+
+    fn ordered_candidate_texts_top_k(guess: &RedactionGuess, top_k: usize) -> Vec<String> {
+        let mut out = Vec::<String>::new();
+        let mut seen = BTreeSet::<String>::new();
+        for text in &guess.exact_matches {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_ascii_uppercase();
+            if seen.insert(key) {
+                out.push(trimmed.to_owned());
+            }
+            if out.len() >= top_k {
+                return out;
+            }
+        }
+        for candidate in &guess.candidates {
+            let trimmed = candidate.text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_ascii_uppercase();
+            if seen.insert(key) {
+                out.push(trimmed.to_owned());
+            }
+            if out.len() >= top_k {
+                return out;
+            }
+        }
+        out
+    }
+
+    fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) -> bool {
+        if !ENABLE_VISUAL_RERANK {
+            return false;
+        }
+        if overlays.len() < 3 {
+            return false;
+        }
+        let mut ordered = overlays.to_vec();
+        ordered.sort_by(|left, right| {
+            left.x
+                .partial_cmp(&right.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let Some(left) = ordered.first() else {
+            return false;
+        };
+        let Some(right) = ordered.last() else {
+            return false;
+        };
+        if left.text.trim().is_empty() || right.text.trim().is_empty() {
+            return false;
+        }
+
+        let texts = ordered_candidate_texts_top_k(guess, VISUAL_RERANK_TOP_K);
+        if texts.len() < 2 {
+            return false;
+        }
+        let top = geometric_score_for_text(guess, &texts[0]);
+        let second = geometric_score_for_text(guess, &texts[1]);
+        if !top.is_finite() || !second.is_finite() {
+            return false;
+        }
+        if top > VISUAL_RERANK_MAX_TOP_SCORE {
+            return false;
+        }
+        (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP
+    }
+
+    fn visual_quality_from_diff(mean_abs_diff: f32) -> f32 {
+        (1.0_f32 - mean_abs_diff / 0.30_f32).clamp(0.0_f32, 1.0_f32)
+    }
+
+    fn geometric_score_for_text(guess: &RedactionGuess, text: &str) -> f32 {
+        if let Some(candidate) = guess
+            .candidates
+            .iter()
+            .find(|candidate| candidate.text.eq_ignore_ascii_case(text))
+        {
+            return candidate.score;
+        }
+        if guess
+            .exact_matches
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(text))
+        {
+            return 1.0_f32;
+        }
+        0.0_f32
+    }
+
+    fn candidate_width_pt_for_text(guess: &RedactionGuess, text: &str) -> f32 {
+        if let Some(width) = guess
+            .candidates
+            .iter()
+            .find(|candidate| candidate.text.eq_ignore_ascii_case(text))
+            .and_then(|candidate| candidate.width_pt)
+            .filter(|value| value.is_finite() && *value > 0.0_f32)
+        {
+            return width;
+        }
+        let char_width = guess.context.char_width_pt.max(0.1_f32);
+        approximate_candidate_width_pt(text, char_width)
+    }
+
+    fn approximate_candidate_width_pt(text: &str, char_width_pt: f32) -> f32 {
+        let glyph_count = text
+            .chars()
+            .filter(|ch| !ch.is_whitespace() && *ch != ',')
+            .count()
+            .max(1) as f32;
+        let spaces = text.chars().filter(|ch| ch.is_whitespace()).count() as f32;
+        (glyph_count * char_width_pt + spaces * char_width_pt * 0.45_f32).max(0.1_f32)
+    }
+
+    fn build_candidate_overlays_from_template(
+        template_overlays: &[TextOverlay],
+        candidate_text: &str,
+        candidate_width_pt: f32,
+        top_width_pt: f32,
+    ) -> Option<Vec<TextOverlay>> {
+        if template_overlays.len() < 3 {
+            return None;
+        }
+        let mut ordered = template_overlays.to_vec();
+        ordered.sort_by(|left, right| {
+            left.x
+                .partial_cmp(&right.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut left = ordered.first()?.clone();
+        let mut guess = ordered.get(1)?.clone();
+        let mut right = ordered.get(2)?.clone();
+
+        let top_width = top_width_pt.max(0.1_f32);
+        let right_space = (right.x - (guess.x + top_width)).max(0.0_f32);
+        let new_right_x = guess.x + candidate_width_pt.max(0.1_f32) + right_space;
+        let delta = new_right_x - right.x;
+
+        guess.text = candidate_text.to_owned();
+        right.x = new_right_x;
+
+        let mut bbox = left.bbox;
+        bbox.x1 = (bbox.x1 + delta).max(bbox.x0 + 1.0_f32);
+        left.bbox = bbox;
+        guess.bbox = bbox;
+        right.bbox = bbox;
+        Some(vec![left, guess, right])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn score_top_k_candidates_for_row(
+        annotator: &PdfAnnotator,
+        pdf_bytes: &[u8],
+        page_index: u32,
+        base_page: &RenderedPage,
+        page_box: Rect,
+        redaction_bbox: Rect,
+        template_overlays: &[TextOverlay],
+        guess: &RedactionGuess,
+        dpi: f32,
+        min_ink_pixels: u32,
+    ) -> Result<Vec<CandidateVisualScore>, String> {
+        let texts = ordered_candidate_texts_top_k(guess, VISUAL_RERANK_TOP_K);
+        if texts.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let top_text = texts.first().cloned().unwrap_or_default();
+        let top_width = candidate_width_pt_for_text(guess, &top_text);
+        let mut out = Vec::<CandidateVisualScore>::new();
+        for text in texts {
+            let candidate_width = candidate_width_pt_for_text(guess, &text);
+            let Some(overlays) = build_candidate_overlays_from_template(
+                template_overlays,
+                &text,
+                candidate_width,
+                top_width,
+            ) else {
+                continue;
+            };
+            let annotated = annotator.annotate(
+                pdf_bytes,
+                &[],
+                &overlays,
+                OVERLAY_TEXT_COLOR,
+                OVERLAY_TEXT_COLOR,
+                OVERLAY_BORDER_WIDTH,
+            )?;
+            let renderer = HayroRenderer::new_from_bytes(&annotated)?;
+            let overlaid_page = renderer.render_page_to_rgba(page_index as usize, dpi)?;
+            let Some(window_bbox) =
+                union_overlay_bbox(&overlays).map(|bbox| pad_rect(bbox, page_box))
+            else {
+                continue;
+            };
+            let Some(score) = score_row_overlay(
+                base_page,
+                &overlaid_page,
+                page_box,
+                window_bbox,
+                redaction_bbox,
+                min_ink_pixels,
+            ) else {
+                continue;
+            };
+            let geometric = geometric_score_for_text(guess, &text);
+            let visual = visual_quality_from_diff(score.mean_abs_diff);
+            let blended = geometric * (1.0_f32 - VISUAL_RERANK_BLEND_WEIGHT)
+                + visual * VISUAL_RERANK_BLEND_WEIGHT;
+            out.push(CandidateVisualScore {
+                text,
+                score,
+                blended_score: blended,
+                combined_gain: 0.0_f32,
+            });
+        }
+        if out.is_empty() {
+            return Ok(out);
+        }
+        let top_blended = out
+            .iter()
+            .find(|candidate| candidate.text.eq_ignore_ascii_case(&top_text))
+            .map(|candidate| candidate.blended_score)
+            .unwrap_or_else(|| out[0].blended_score);
+        for candidate in &mut out {
+            candidate.combined_gain = candidate.blended_score - top_blended;
+        }
+        Ok(out)
     }
 
     fn union_overlay_bbox(overlays: &[TextOverlay]) -> Option<Rect> {
@@ -4651,8 +5025,10 @@ mod visual_guess_score_impl {
 
         let width = base.width_px as usize;
         let mut compared_pixels = 0_u32;
-        let mut changed_pixels = 0_u32;
+        let mut changed_weight = 0.0_f32;
+        let mut compared_weight = 0.0_f32;
         let mut diff_sum = 0.0_f32;
+        let edge_band_px = ((EDGE_BAND_PT / 72.0_f32) * base.dpi).ceil().max(0.0_f32) as u32;
 
         for y in window.1..window.3 {
             for x in window.0..window.2 {
@@ -4673,10 +5049,20 @@ mod visual_guess_score_impl {
                 }
 
                 compared_pixels = compared_pixels.saturating_add(1);
+                let edge_weight = if let Some(red_box) = redaction {
+                    if point_in_edge_band_px(x, y, red_box, edge_band_px) {
+                        EDGE_BAND_WEIGHT
+                    } else {
+                        1.0_f32
+                    }
+                } else {
+                    1.0_f32
+                };
+                compared_weight += edge_weight;
                 let delta = base_luma.abs_diff(over_luma);
-                diff_sum += delta as f32 / 255.0_f32;
+                diff_sum += (delta as f32 / 255.0_f32) * edge_weight;
                 if delta >= CHANGED_LUMA_DELTA {
-                    changed_pixels = changed_pixels.saturating_add(1);
+                    changed_weight += edge_weight;
                 }
             }
         }
@@ -4684,11 +5070,11 @@ mod visual_guess_score_impl {
         if compared_pixels < min_ink_pixels {
             return None;
         }
-        let denom = compared_pixels as f32;
+        let denom = compared_weight.max(0.0001_f32);
         Some(RowPixelScore {
             compared_pixels,
             mean_abs_diff: diff_sum / denom,
-            changed_pixel_ratio: changed_pixels as f32 / denom,
+            changed_pixel_ratio: changed_weight / denom,
         })
     }
 
@@ -4706,6 +5092,22 @@ mod visual_guess_score_impl {
 
     fn point_in_rect_px(x: u32, y: u32, rect: (u32, u32, u32, u32)) -> bool {
         x >= rect.0 && x < rect.2 && y >= rect.1 && y < rect.3
+    }
+
+    fn point_in_edge_band_px(x: u32, y: u32, rect: (u32, u32, u32, u32), band_px: u32) -> bool {
+        if band_px == 0 {
+            return false;
+        }
+        let y_min = rect.1.saturating_sub(band_px);
+        let y_max = rect.3.saturating_add(band_px);
+        if y < y_min || y >= y_max {
+            return false;
+        }
+        let left_min = rect.0.saturating_sub(band_px);
+        let left_band = x >= left_min && x < rect.0;
+        let right_max = rect.2.saturating_add(band_px);
+        let right_band = x >= rect.2 && x < right_max;
+        left_band || right_band
     }
 
     fn rect_pdf_to_pixels(

@@ -51,6 +51,7 @@ struct DatasetResult {
     name: String,
     summary: BenchmarkSummary,
     visual_summary: VisualSummary,
+    visual_rerank_summary: VisualRerankSummary,
     timing_summary: TimingSummary,
     candidate_summary: CandidateSummary,
     quality_summary: QualitySummary,
@@ -63,6 +64,7 @@ struct AccuracyBenchmark {
     datasets: Vec<DatasetResult>,
     overall: BenchmarkSummary,
     overall_visual: VisualSummary,
+    overall_visual_rerank: VisualRerankSummary,
     overall_timing: TimingSummary,
     overall_candidates: CandidateSummary,
     overall_quality: QualitySummary,
@@ -88,6 +90,11 @@ struct MetricDefinitions {
     visual_p90_abs_diff: &'static str,
     visual_mean_changed_pixel_ratio: &'static str,
     visual_mean_compared_pixels: &'static str,
+    visual_rerank_rows_considered: &'static str,
+    visual_rerank_rows_scored: &'static str,
+    visual_rerank_top1_changed: &'static str,
+    visual_rerank_top1_changed_ratio: &'static str,
+    visual_rerank_mean_gain: &'static str,
     timing_redactions_ms: &'static str,
     timing_fonts_ms: &'static str,
     timing_guess_ms: &'static str,
@@ -136,6 +143,15 @@ struct VisualSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct VisualRerankSummary {
+    rows_considered: usize,
+    rows_scored: usize,
+    top1_changed: usize,
+    top1_changed_ratio: Option<f64>,
+    mean_gain: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct TimingSummary {
     redactions_ms: Option<f64>,
     fonts_ms: Option<f64>,
@@ -179,6 +195,14 @@ struct VisualAccumulator {
     abs_diff: Vec<f64>,
     changed_ratio: Vec<f64>,
     compared_pixels: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VisualRerankAccumulator {
+    rows_considered: usize,
+    rows_scored: usize,
+    top1_changed: usize,
+    weighted_gain_sum: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -251,6 +275,7 @@ struct BenchmarkRunSnapshot {
 struct EvaluatedDataset {
     dataset: DatasetResult,
     visual_accumulator: VisualAccumulator,
+    visual_rerank_accumulator: VisualRerankAccumulator,
     timing_accumulator: TimingAccumulator,
     candidate_accumulator: CandidateAccumulator,
     run_snapshot: DatasetRunSnapshot,
@@ -531,6 +556,69 @@ fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumu
         merged
             .compared_pixels
             .extend_from_slice(&acc.compared_pixels);
+    }
+    merged
+}
+
+fn visual_rerank_accumulator_from_diagnostics(diagnostics: &[String]) -> VisualRerankAccumulator {
+    let mut acc = VisualRerankAccumulator::default();
+    for line in diagnostics {
+        let Some(rest) = line.strip_prefix("visual_rerank=") else {
+            continue;
+        };
+        let mut rows_considered = None::<usize>;
+        let mut rows_scored = None::<usize>;
+        let mut top1_changed = None::<usize>;
+        let mut mean_gain = None::<f64>;
+        for token in rest.split_whitespace() {
+            if let Some(value) = token.strip_prefix("rows_considered=") {
+                rows_considered = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("rows_scored=") {
+                rows_scored = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("top1_changed=") {
+                top1_changed = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("mean_gain=") {
+                mean_gain = value.parse::<f64>().ok();
+            }
+        }
+        let scored = rows_scored.unwrap_or(0_usize);
+        acc.rows_considered += rows_considered.unwrap_or(0_usize);
+        acc.rows_scored += scored;
+        acc.top1_changed += top1_changed.unwrap_or(0_usize);
+        if let Some(gain) = mean_gain {
+            acc.weighted_gain_sum += gain * scored as f64;
+        }
+    }
+    acc
+}
+
+fn summarize_visual_rerank_accumulator(acc: &VisualRerankAccumulator) -> VisualRerankSummary {
+    VisualRerankSummary {
+        rows_considered: acc.rows_considered,
+        rows_scored: acc.rows_scored,
+        top1_changed: acc.top1_changed,
+        top1_changed_ratio: if acc.rows_scored == 0 {
+            None
+        } else {
+            Some(acc.top1_changed as f64 / acc.rows_scored as f64)
+        },
+        mean_gain: if acc.rows_scored == 0 {
+            None
+        } else {
+            Some(acc.weighted_gain_sum / acc.rows_scored as f64)
+        },
+    }
+}
+
+fn merge_visual_rerank_accumulators(
+    accumulators: &[VisualRerankAccumulator],
+) -> VisualRerankAccumulator {
+    let mut merged = VisualRerankAccumulator::default();
+    for acc in accumulators {
+        merged.rows_considered += acc.rows_considered;
+        merged.rows_scored += acc.rows_scored;
+        merged.top1_changed += acc.top1_changed;
+        merged.weighted_gain_sum += acc.weighted_gain_sum;
     }
     merged
 }
@@ -901,6 +989,8 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let visual_rerank_accumulator = visual_rerank_accumulator_from_diagnostics(&report.diagnostics);
+    let visual_rerank_summary = summarize_visual_rerank_accumulator(&visual_rerank_accumulator);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
@@ -911,6 +1001,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         name: "EFTA00101126".to_owned(),
         summary: summarize_ranks(&ranks),
         visual_summary,
+        visual_rerank_summary,
         timing_summary,
         candidate_summary,
         quality_summary: quality_summary.clone(),
@@ -922,6 +1013,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.name.clone(),
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
+            dataset.visual_rerank_summary.clone(),
             dataset.candidate_summary.clone(),
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
@@ -935,6 +1027,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
     Ok(EvaluatedDataset {
         dataset,
         visual_accumulator,
+        visual_rerank_accumulator,
         timing_accumulator,
         candidate_accumulator,
         run_snapshot,
@@ -975,6 +1068,8 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
     let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
+    let visual_rerank_accumulator = visual_rerank_accumulator_from_diagnostics(&report.diagnostics);
+    let visual_rerank_summary = summarize_visual_rerank_accumulator(&visual_rerank_accumulator);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
@@ -985,6 +1080,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         name: "EFTA00038617".to_owned(),
         summary: summarize_ranks(&ranks),
         visual_summary,
+        visual_rerank_summary,
         timing_summary,
         candidate_summary,
         quality_summary: quality_summary.clone(),
@@ -996,6 +1092,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.name.clone(),
             dataset.summary.clone(),
             dataset.visual_summary.clone(),
+            dataset.visual_rerank_summary.clone(),
             dataset.candidate_summary.clone(),
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
@@ -1009,6 +1106,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
     Ok(EvaluatedDataset {
         dataset,
         visual_accumulator,
+        visual_rerank_accumulator,
         timing_accumulator,
         candidate_accumulator,
         run_snapshot,
@@ -1057,6 +1155,23 @@ fn print_visual_summary(label: &str, summary: &VisualSummary) {
         summary
             .mean_compared_pixels
             .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+}
+
+fn print_visual_rerank_summary(label: &str, summary: &VisualRerankSummary) {
+    println!(
+        "{label:16} considered={:>3} scored={:>3} top1_changed={:>3} top1_changed_ratio={} mean_gain={}",
+        summary.rows_considered,
+        summary.rows_scored,
+        summary.top1_changed,
+        summary
+            .top1_changed_ratio
+            .map(|value| format!("{:.2}%", value * 100.0_f64))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .mean_gain
+            .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "-".to_owned())
     );
 }
@@ -1165,6 +1280,16 @@ fn metric_definitions() -> MetricDefinitions {
             "Average fraction of significantly changed pixels in scored rows; lower is better.",
         visual_mean_compared_pixels:
             "Average non-background pixel count used per scored row.",
+        visual_rerank_rows_considered:
+            "Rows eligible for visual rerank candidate scoring (top-K evaluation path).",
+        visual_rerank_rows_scored:
+            "Rows where visual rerank actually scored candidate alternatives.",
+        visual_rerank_top1_changed:
+            "Rows where rerank changed top-1 guess from geometric ranking.",
+        visual_rerank_top1_changed_ratio:
+            "top1_changed / rows_scored for visual rerank; higher means more rerank impact.",
+        visual_rerank_mean_gain:
+            "Average blended-score gain of chosen rerank candidate over baseline top candidate.",
         timing_redactions_ms: "Average redaction stage runtime in milliseconds.",
         timing_fonts_ms: "Average font extraction stage runtime in milliseconds.",
         timing_guess_ms: "Average guessing stage runtime in milliseconds.",
@@ -1420,6 +1545,13 @@ fn main() {
             .collect::<Vec<_>>();
         let overall_visual =
             summarize_visual_accumulator(merge_visual_accumulators(&visual_accumulators));
+        let visual_rerank_accumulators = evaluated
+            .iter()
+            .map(|item| item.visual_rerank_accumulator.clone())
+            .collect::<Vec<_>>();
+        let overall_visual_rerank = summarize_visual_rerank_accumulator(
+            &merge_visual_rerank_accumulators(&visual_rerank_accumulators),
+        );
         let timing_accumulators = evaluated
             .iter()
             .map(|item| item.timing_accumulator.clone())
@@ -1444,6 +1576,7 @@ fn main() {
             datasets,
             overall,
             overall_visual,
+            overall_visual_rerank,
             overall_timing,
             overall_candidates,
             overall_quality,
@@ -1540,6 +1673,26 @@ fn main() {
     println!(
         "  visual_mean_compared_pixels: {}",
         payload.definitions.visual_mean_compared_pixels
+    );
+    println!(
+        "  visual_rerank_rows_considered: {}",
+        payload.definitions.visual_rerank_rows_considered
+    );
+    println!(
+        "  visual_rerank_rows_scored: {}",
+        payload.definitions.visual_rerank_rows_scored
+    );
+    println!(
+        "  visual_rerank_top1_changed: {}",
+        payload.definitions.visual_rerank_top1_changed
+    );
+    println!(
+        "  visual_rerank_top1_changed_ratio: {}",
+        payload.definitions.visual_rerank_top1_changed_ratio
+    );
+    println!(
+        "  visual_rerank_mean_gain: {}",
+        payload.definitions.visual_rerank_mean_gain
     );
     println!(
         "  timing_redactions_ms: {}",
@@ -1666,6 +1819,10 @@ fn main() {
     for dataset in &payload.datasets {
         print_summary(&dataset.name, &dataset.summary);
         print_visual_summary(&format!("{} visual", dataset.name), &dataset.visual_summary);
+        print_visual_rerank_summary(
+            &format!("{} rerank", dataset.name),
+            &dataset.visual_rerank_summary,
+        );
         print_timing_summary(&format!("{} timing", dataset.name), &dataset.timing_summary);
         print_candidate_summary(
             &format!("{} candidates", dataset.name),
@@ -1678,6 +1835,7 @@ fn main() {
     }
     print_summary("OVERALL", &payload.overall);
     print_visual_summary("OVERALL visual", &payload.overall_visual);
+    print_visual_rerank_summary("OVERALL rerank", &payload.overall_visual_rerank);
     print_timing_summary("OVERALL timing", &payload.overall_timing);
     print_candidate_summary("OVERALL candidates", &payload.overall_candidates);
     print_quality_summary("OVERALL quality", &payload.overall_quality);
