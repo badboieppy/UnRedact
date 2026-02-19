@@ -44,7 +44,14 @@ fn efta00101126_last_two_redactions_include_sarah_kellen_uppercase() {
         visualizer: VisualizerConfig::default(),
     };
 
-    let run_result = run_from_paths(input, &output_dir, None, cfg);
+    let dictionary_path = Path::new("assets/names.txt");
+    assert!(
+        dictionary_path.exists(),
+        "missing dictionary input: {}",
+        dictionary_path.display()
+    );
+
+    let run_result = run_from_paths(input, &output_dir, Some(dictionary_path), cfg);
     assert!(
         run_result.is_ok(),
         "pipeline run failed: {:?}",

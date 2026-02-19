@@ -11,7 +11,7 @@ use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 pub fn run_redaction_guessing_component(
     req: BytesPipelineRequest,
 ) -> Result<BytesPipelineOutputs, String> {
-    let component_started = Instant::now();
+    let component_started = Instant::now(); 
     let redactions_data = RedactionsData::new();
     let fonts_data = FontsData::new();
     let dictionary_data = DictionaryData::new();
@@ -427,11 +427,10 @@ mod guess_impl {
     const JOINT_ASSIGNMENT_MAX_OPTIONS_PER_ROW: usize = 24;
     const JOINT_ASSIGNMENT_OPTION_SCAN_LIMIT: usize = 500;
     const JOINT_ASSIGNMENT_BEAM_WIDTH: usize = 160;
-    const JOINT_ASSIGNMENT_DUPLICATE_PENALTY: f64 = 8.0_f64;
+    const JOINT_ASSIGNMENT_DUPLICATE_PENALTY: f64 = 6.0_f64;
     const JOINT_ASSIGNMENT_OVERLAP_MARGIN_PT: f64 = 0.75_f64;
     const JOINT_ASSIGNMENT_OVERLAP_PENALTY: f64 = 2.8_f64;
     const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 140.0_f64;
-    const JOINT_ASSIGNMENT_NAME_SHAPE_PENALTY: f64 = 1.25_f64;
     const JOINT_ASSIGNMENT_NULL_DELTA: f64 = 0.75_f64;
     const JOINT_ASSIGNMENT_NULL_MIN_BEST_COST: f64 = 1.4_f64;
 
@@ -1012,15 +1011,6 @@ mod guess_impl {
             return None;
         }
 
-        let prefer_name_shape = group.iter().copied().any(|guess_index| {
-            let guess = &guesses[guess_index];
-            is_multi_span_row_guess(guess)
-                || is_list_like_context(
-                    &guess.context.left_anchor_text,
-                    &guess.context.right_anchor_text,
-                )
-        });
-
         let mut options_by_row = Vec::<Vec<JointAssignmentOption>>::with_capacity(group.len());
         let mut null_costs = Vec::<f64>::with_capacity(group.len());
         let mut allow_null_by_row = Vec::<bool>::with_capacity(group.len());
@@ -1030,7 +1020,6 @@ mod guess_impl {
                 guess,
                 JOINT_ASSIGNMENT_OPTION_SCAN_LIMIT,
                 JOINT_ASSIGNMENT_MAX_OPTIONS_PER_ROW,
-                prefer_name_shape,
             );
             if options.is_empty() {
                 return None;
@@ -1051,6 +1040,11 @@ mod guess_impl {
             prev_start_x_pt: f64::NEG_INFINITY,
             prev_end_x_pt: f64::NEG_INFINITY,
         }];
+        let duplicate_penalty_amount = if group.len() >= 3 {
+            JOINT_ASSIGNMENT_DUPLICATE_PENALTY
+        } else {
+            0.0_f64
+        };
 
         for ((row_options, null_cost), allow_null) in options_by_row
             .iter()
@@ -1072,8 +1066,10 @@ mod guess_impl {
                 }
                 for option in row_options {
                     let mut cost = state.cost + option.base_cost;
-                    if state.used_keys.iter().any(|key| key == &option.key) {
-                        cost += JOINT_ASSIGNMENT_DUPLICATE_PENALTY;
+                    if duplicate_penalty_amount > 0.0_f64
+                        && state.used_keys.iter().any(|key| key == &option.key)
+                    {
+                        cost += duplicate_penalty_amount;
                     }
                     if state.prev_end_x_pt.is_finite() {
                         let overlap_pt = (state.prev_end_x_pt - option.start_x_pt
@@ -1120,7 +1116,6 @@ mod guess_impl {
         guess: &RedactionGuess,
         scan_limit: usize,
         max_options: usize,
-        prefer_name_shape: bool,
     ) -> Vec<JointAssignmentOption> {
         if guess.candidates.is_empty() {
             return Vec::new();
@@ -1153,19 +1148,12 @@ mod guess_impl {
                 &guess.context.right_anchor_text,
                 text,
             );
-            let name_shape_penalty =
-                if prefer_name_shape && !looks_like_multi_span_name_candidate(text) {
-                    JOINT_ASSIGNMENT_NAME_SHAPE_PENALTY
-                } else {
-                    0.0_f64
-                };
             let base_cost = (candidate.error_pt as f64)
                 + context_penalty
                 + width_penalty
                 + rank_penalty
                 + exact_bonus
-                + anchor_overlap_penalty
-                + name_shape_penalty;
+                + anchor_overlap_penalty;
             let (start_x_pt, end_x_pt) =
                 estimate_candidate_interval_pt(guess, text, candidate.width_pt);
             options.push(JointAssignmentOption {
@@ -1250,6 +1238,7 @@ mod guess_impl {
             });
 
             let mut used = std::collections::BTreeSet::<String>::new();
+            let duplicate_penalty_amount = if indices.len() >= 3 { 3.0_f64 } else { 0.0_f64 };
             for guess_index in indices.iter().copied() {
                 let guess = &mut guesses[guess_index];
                 if guess.candidates.is_empty() {
@@ -1259,11 +1248,12 @@ mod guess_impl {
                 let max_scan = guess.candidates.len().min(80);
                 for (rank, candidate) in guess.candidates.iter().take(max_scan).enumerate() {
                     let key = normalize_candidate_key(&candidate.text);
-                    let duplicate_penalty = if used.contains(&key) {
-                        6.0_f64
-                    } else {
-                        0.0_f64
-                    };
+                    let duplicate_penalty =
+                        if duplicate_penalty_amount > 0.0_f64 && used.contains(&key) {
+                            duplicate_penalty_amount
+                        } else {
+                            0.0_f64
+                        };
                     let width_penalty = candidate_width_penalty_pt(guess, &candidate.text);
                     let rank_penalty = rank as f64 * 0.05_f64;
                     let cost = candidate.error_pt as f64
@@ -1598,7 +1588,7 @@ mod guess_impl {
                     continue;
                 }
                 funnel.after_context += 1;
-                if list_like_context && !looks_like_multi_span_name_candidate(trimmed) {
+                if list_like_context && !looks_like_alpha_phrase_candidate(trimmed) {
                     continue;
                 }
                 funnel.after_shape += 1;
@@ -1669,7 +1659,7 @@ mod guess_impl {
                     continue;
                 }
                 funnel.after_context += 1;
-                if list_like_context && !looks_like_multi_span_name_candidate(trimmed) {
+                if list_like_context && !looks_like_alpha_phrase_candidate(trimmed) {
                     continue;
                 }
                 funnel.after_shape += 1;
@@ -1735,11 +1725,6 @@ mod guess_impl {
                 .effective_error_pt
                 .partial_cmp(&right_candidate.effective_error_pt)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    let left_is_base = is_base_name(&left_candidate.text);
-                    let right_is_base = is_base_name(&right_candidate.text);
-                    right_is_base.cmp(&left_is_base)
-                })
                 .then_with(|| left_candidate.word_count.cmp(&right_candidate.word_count))
                 .then_with(|| left_candidate.text.cmp(&right_candidate.text))
         });
@@ -3184,11 +3169,13 @@ mod guess_impl {
             || left_lower.contains("included")
             || left_lower.contains("among")
             || left_lower.contains("served")
+            || left_lower.ends_with(',')
             || right_lower.starts_with(',')
+            || right_lower.ends_with(',')
             || right_lower.starts_with("and ")
     }
 
-    fn looks_like_multi_span_name_candidate(candidate: &str) -> bool {
+    fn looks_like_alpha_phrase_candidate(candidate: &str) -> bool {
         let trimmed = candidate.trim();
         if trimmed.is_empty() {
             return false;
@@ -3205,7 +3192,7 @@ mod guess_impl {
             return false;
         }
         let words = trimmed.split_whitespace().collect::<Vec<_>>();
-        if words.len() < 2 || words.len() > 4 {
+        if words.is_empty() || words.len() > 4 {
             return false;
         }
         words.iter().all(|word| {
@@ -3233,53 +3220,34 @@ mod guess_impl {
         let list_context = is_list_like_context(&left_lower, &right_lower);
 
         if list_context {
-            if word_count <= 1 {
-                penalty += 0.85_f64;
+            if word_count == 1 || word_count >= 5 {
+                penalty += 0.20_f64;
             }
-            if word_count >= 5 {
-                penalty += 0.40_f64;
+            if candidate_trim.contains('-') {
+                penalty += 0.30_f64;
             }
             if candidate_trim.contains(',') {
-                penalty += 0.55_f64;
-            }
-            if candidate_trim.contains('(') || candidate_trim.contains(')') {
                 penalty += 0.45_f64;
             }
-            if candidate_trim.contains('/') || candidate_trim.contains('&') {
-                penalty += 0.35_f64;
+            if candidate_trim.contains('(') || candidate_trim.contains(')') {
+                penalty += 0.40_f64;
             }
-            if word_count == 2 && !candidate_trim.contains(',') {
-                penalty -= 0.15_f64;
+            if candidate_trim.contains('/') || candidate_trim.contains('&') {
+                penalty += 0.50_f64;
             }
         }
 
         if (right_lower.starts_with(',') || right_lower.starts_with("and "))
             && (candidate_trim.ends_with(',') || candidate_trim.ends_with(';'))
         {
-            penalty += 0.35_f64;
+            penalty += 0.25_f64;
         }
 
         if candidate_trim.chars().any(|ch| ch.is_ascii_digit()) {
-            penalty += 0.35_f64;
+            penalty += 0.20_f64;
         }
 
         penalty.max(0.0)
-    }
-
-    fn is_base_name(value: &str) -> bool {
-        let set = base_name_set();
-        set.contains(&value.to_lowercase())
-    }
-
-    fn base_name_set() -> &'static std::collections::BTreeSet<String> {
-        static SET: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
-        SET.get_or_init(|| {
-            let raw = include_str!("../../assets/names.txt");
-            raw.lines()
-                .map(|line| line.trim().to_lowercase())
-                .filter(|line| !line.is_empty())
-                .collect::<std::collections::BTreeSet<String>>()
-        })
     }
 
     #[cfg(test)]
@@ -3358,11 +3326,13 @@ mod guess_impl {
         }
 
         #[test]
-        fn punctuation_penalty_prefers_full_name_for_list_context() {
-            let short = punctuation_context_penalty("those served included", ",", "MAXWELL");
-            let full =
-                punctuation_context_penalty("those served included", ",", "GHISLAINE MAXWELL");
-            assert!(short > full, "expected short token to be penalized more");
+        fn punctuation_penalty_prefers_clean_tokens_in_list_context() {
+            let clean = punctuation_context_penalty("those served included", ",", "MAXWELL");
+            let noisy = punctuation_context_penalty("those served included", ",", "A/B TEST");
+            assert!(
+                noisy > clean,
+                "expected punctuation-heavy token to be penalized more"
+            );
         }
 
         #[test]
@@ -3394,15 +3364,15 @@ mod guess_impl {
         }
 
         #[test]
-        fn list_context_name_filter_accepts_expected_name_shapes() {
-            assert!(looks_like_multi_span_name_candidate("SARAH KELLEN"));
-            assert!(looks_like_multi_span_name_candidate("JEAN LUC BRUNEL"));
-            assert!(looks_like_multi_span_name_candidate("ANNE-MARIE O'NEIL"));
-            assert!(!looks_like_multi_span_name_candidate("MAXWELL"));
-            assert!(!looks_like_multi_span_name_candidate("BARNETT, RICHARD"));
-            assert!(!looks_like_multi_span_name_candidate("(pilot)"));
-            assert!(!looks_like_multi_span_name_candidate("A/B TEST"));
-            assert!(!looks_like_multi_span_name_candidate("TOKEN123"));
+        fn list_context_filter_accepts_alpha_phrases() {
+            assert!(looks_like_alpha_phrase_candidate("SARAH KELLEN"));
+            assert!(looks_like_alpha_phrase_candidate("JEAN LUC BRUNEL"));
+            assert!(looks_like_alpha_phrase_candidate("ANNE-MARIE O'NEIL"));
+            assert!(looks_like_alpha_phrase_candidate("MAXWELL"));
+            assert!(!looks_like_alpha_phrase_candidate("BARNETT, RICHARD"));
+            assert!(!looks_like_alpha_phrase_candidate("(pilot)"));
+            assert!(!looks_like_alpha_phrase_candidate("A/B TEST"));
+            assert!(!looks_like_alpha_phrase_candidate("TOKEN123"));
         }
 
         #[test]
@@ -3491,10 +3461,10 @@ mod guess_impl {
                 .candidates
                 .iter()
                 .map(|candidate| candidate.text.as_str())
-                .all(looks_like_multi_span_name_candidate);
+                .all(looks_like_alpha_phrase_candidate);
             assert!(
                 names_only,
-                "expected single-span list context to keep only name-like candidates, got {:?}",
+                "expected single-span list context to keep only alpha-phrase candidates, got {:?}",
                 guess
                     .candidates
                     .iter()
@@ -3624,6 +3594,7 @@ mod guess_impl {
 mod redaction_impl {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+    use std::time::Instant;
 
     use crate::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
     use crate::types::redaction_types::{
@@ -3638,6 +3609,8 @@ mod redaction_impl {
     const MAX_CONTEXT_GAP_PT: f32 = 80.0;
     const LARGE_OVERLAP_PT: f32 = 20.0;
     const MAX_CONTEXT_WORDS_PER_SIDE: usize = 2;
+    const RASTER_TWO_PASS_MIN_PAGES: usize = 5;
+    const RASTER_PREPASS_DPI: f32 = 60.0;
     type LineMatchScore = (i32, i32, i32, i32);
     type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
 
@@ -3658,11 +3631,12 @@ mod redaction_impl {
     ) -> RedactionFinderOutput {
         let mut all: Vec<RedactionOccurrence> = Vec::new();
         let mut diagnostics: Vec<String> = Vec::new();
+        let page_indices = retriever.page_indices();
 
-        for page_index in retriever.page_indices() {
+        for page_index in &page_indices {
             match cfg.mode {
                 RedactionMode::Annotations | RedactionMode::All => {
-                    match retriever.annotation_redactions(page_index, cfg.include_details) {
+                    match retriever.annotation_redactions(*page_index, cfg.include_details) {
                         Ok(v) => all.extend(v),
                         Err(m) => diagnostics
                             .push(format!("page_index={page_index} annotation_error={m}")),
@@ -3673,7 +3647,7 @@ mod redaction_impl {
 
             match cfg.mode {
                 RedactionMode::Drawn | RedactionMode::All => match retriever.drawn_redactions(
-                    page_index,
+                    *page_index,
                     cfg.include_details,
                     cfg.include_full_page_rects,
                 ) {
@@ -3682,16 +3656,18 @@ mod redaction_impl {
                 },
                 RedactionMode::Annotations => {}
             }
+        }
 
-            if cfg.enable_image_analysis {
-                match retriever.raster_redactions(page_index, &cfg) {
-                    Ok(v) => all.extend(v),
-                    Err(m) => {
-                        diagnostics.push(format!("page_index={page_index} raster_page_error={m}"))
-                    }
-                }
-            }
+        if cfg.enable_image_analysis {
+            all.extend(collect_raster_redactions_two_pass(
+                retriever,
+                &page_indices,
+                &cfg,
+                &mut diagnostics,
+            ));
+        }
 
+        for page_index in page_indices {
             attach_underlying_text(retriever, page_index, &cfg, &mut all, &mut diagnostics);
         }
 
@@ -3757,6 +3733,124 @@ mod redaction_impl {
             }
         }
 
+        out
+    }
+
+    fn collect_raster_redactions_two_pass(
+        retriever: &dyn RedactionDataRetriever,
+        page_indices: &[u32],
+        cfg: &RedactionFinderConfig,
+        diagnostics: &mut Vec<String>,
+    ) -> Vec<RedactionOccurrence> {
+        if page_indices.is_empty() {
+            diagnostics.push("raster_two_pass=pages=0 mode=skipped_empty".to_owned());
+            return Vec::new();
+        }
+
+        if page_indices.len() < RASTER_TWO_PASS_MIN_PAGES {
+            let started = Instant::now();
+            let mut out = Vec::<RedactionOccurrence>::new();
+            for page_index in page_indices {
+                match retriever.raster_redactions(*page_index, cfg) {
+                    Ok(v) => out.extend(v),
+                    Err(m) => {
+                        diagnostics.push(format!("page_index={page_index} raster_page_error={m}"))
+                    }
+                }
+            }
+            diagnostics.push(format!(
+                "raster_two_pass=pages={} mode=single_pass_small_doc elapsed_ms={} threshold_pages={}",
+                page_indices.len(),
+                started.elapsed().as_millis(),
+                RASTER_TWO_PASS_MIN_PAGES
+            ));
+            return out;
+        }
+
+        let high_dpi = cfg.raster_dpi;
+        let low_dpi = high_dpi.min(RASTER_PREPASS_DPI);
+        if (low_dpi - high_dpi).abs() < f32::EPSILON {
+            let started = Instant::now();
+            let mut out = Vec::<RedactionOccurrence>::new();
+            for page_index in page_indices {
+                match retriever.raster_redactions(*page_index, cfg) {
+                    Ok(v) => out.extend(v),
+                    Err(m) => {
+                        diagnostics.push(format!("page_index={page_index} raster_page_error={m}"))
+                    }
+                }
+            }
+            diagnostics.push(format!(
+                "raster_two_pass=pages={} mode=single_pass_same_dpi elapsed_ms={} dpi={:.1}",
+                page_indices.len(),
+                started.elapsed().as_millis(),
+                high_dpi
+            ));
+            return out;
+        }
+
+        let prepass_cfg = RedactionFinderConfig {
+            raster_dpi: low_dpi,
+            ..*cfg
+        };
+        let prepass_started = Instant::now();
+        let mut prepass_by_page = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
+        let mut candidate_pages = Vec::<u32>::new();
+        for page_index in page_indices {
+            match retriever.raster_redactions(*page_index, &prepass_cfg) {
+                Ok(v) => {
+                    if !v.is_empty() {
+                        candidate_pages.push(*page_index);
+                        prepass_by_page.insert(*page_index, v);
+                    }
+                }
+                Err(m) => {
+                    diagnostics.push(format!("page_index={page_index} raster_prepass_error={m}"))
+                }
+            }
+        }
+        let prepass_ms = prepass_started.elapsed().as_millis();
+
+        let highpass_cfg = RedactionFinderConfig {
+            raster_dpi: high_dpi,
+            ..*cfg
+        };
+        let highpass_started = Instant::now();
+        let mut out = Vec::<RedactionOccurrence>::new();
+        let mut highpass_pages = 0_usize;
+        let mut highpass_fallback_pages = 0_usize;
+        for page_index in &candidate_pages {
+            highpass_pages += 1;
+            match retriever.raster_redactions(*page_index, &highpass_cfg) {
+                Ok(v) if !v.is_empty() => out.extend(v),
+                Ok(_) => {
+                    highpass_fallback_pages += 1;
+                    if let Some(prepass_hits) = prepass_by_page.remove(page_index) {
+                        out.extend(prepass_hits);
+                    }
+                }
+                Err(m) => {
+                    diagnostics.push(format!("page_index={page_index} raster_highpass_error={m}"));
+                    highpass_fallback_pages += 1;
+                    if let Some(prepass_hits) = prepass_by_page.remove(page_index) {
+                        out.extend(prepass_hits);
+                    }
+                }
+            }
+        }
+        let highpass_ms = highpass_started.elapsed().as_millis();
+        diagnostics.push(format!(
+            "raster_two_pass=pages={} candidate_pages={} non_candidate_pages={} prepass_dpi={:.1} highpass_dpi={:.1} prepass_ms={} highpass_pages={} highpass_ms={} highpass_fallback_pages={}",
+            page_indices.len(),
+            candidate_pages.len(),
+            page_indices.len().saturating_sub(candidate_pages.len()),
+            low_dpi,
+            high_dpi,
+            prepass_ms,
+            highpass_pages,
+            highpass_ms,
+            highpass_fallback_pages
+        ));
         out
     }
 
@@ -4227,14 +4321,26 @@ mod visual_guess_score_impl {
     const OVERLAY_BORDER_WIDTH: f32 = 1.0_f32;
     const CONTEXT_ALIGNMENT_MAX_DIFF: f32 = 0.22_f32;
     const MAX_VISUAL_SCORE_DPI: f32 = 72.0_f32;
+    const VISUAL_TILE_PAGE_PADDING_PT: f32 = 8.0_f32;
+    const VISUAL_TILE_MAX_COVERAGE_FOR_CROP: f32 = 0.92_f32;
     const ENABLE_VISUAL_RERANK: bool = false;
     const VISUAL_RERANK_TOP_K: usize = 3;
-    const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.35_f32;
-    const VISUAL_RERANK_MAX_BASE_GAP: f32 = 0.08_f32;
-    const VISUAL_RERANK_MAX_TOP_SCORE: f32 = 0.80_f32;
-    const VISUAL_RERANK_MIN_GAIN_TO_REORDER: f32 = 0.04_f32;
+    const VISUAL_RERANK_MAX_EVAL_CANDIDATES: usize = 8;
+    const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.92_f32;
+    const VISUAL_RERANK_MAX_BASE_GAP: f32 = 0.10_f32;
+    const VISUAL_RERANK_MAX_TOP_SCORE: f32 = 0.90_f32;
+    const VISUAL_RERANK_MAX_GEOMETRIC_GAP_FOR_EVAL: f32 = 0.12_f32;
+    const VISUAL_RERANK_MAX_SCORE_GAP_FOR_EXPANSION: f32 = 0.18_f32;
+    const VISUAL_RERANK_MAX_WIDTH_DELTA_RATIO_FOR_EXPANSION: f32 = 0.08_f32;
+    const VISUAL_RERANK_MIN_SHIFT_PX: f32 = 0.5_f32;
+    const VISUAL_RERANK_MIN_GAIN_TO_REORDER: f32 = 0.02_f32;
     const EDGE_BAND_PT: f32 = 1.5_f32;
     const EDGE_BAND_WEIGHT: f32 = 1.8_f32;
+    const EDGE_INTERIOR_WEIGHT: f32 = 2.2_f32;
+    const REDACTION_INTERIOR_IGNORE_DARK_LUMA: u8 = 8_u8;
+    const EDGE_INK_LUMA_THRESHOLD: u8 = 104_u8;
+    const EDGE_INK_MATCH_BASE_LUMA_THRESHOLD: u8 = 176_u8;
+    const EDGE_INK_MISMATCH_BASE_LUMA_THRESHOLD: u8 = 236_u8;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct VisualGuessScoreConfig {
@@ -4261,6 +4367,8 @@ mod visual_guess_score_impl {
         compared_pixels: u32,
         mean_abs_diff: f32,
         changed_pixel_ratio: f32,
+        edge_ink_overlap_ratio: f32,
+        edge_ink_mismatch_ratio: f32,
     }
 
     #[derive(Debug, Clone)]
@@ -4378,6 +4486,7 @@ mod visual_guess_score_impl {
             ((cfg.min_ink_pixels as f32 * dpi_ratio * dpi_ratio).round() as u32).max(8_u32);
         let overlays_by_redaction = group_overlays_by_redaction(&inputs.overlays);
         let page_boxes = build_page_boxes(&inputs.pdf_bytes)?;
+        let rerank_enabled = visual_rerank_enabled();
 
         let mut diagnostics = Vec::<String>::new();
         if overlays_by_redaction.is_empty() {
@@ -4409,11 +4518,29 @@ mod visual_guess_score_impl {
             (bytes, annotate_overlay_started.elapsed().as_millis())
         };
         let annotate_context_ms = 0_u128;
+        let page_crop_boxes = build_visual_page_crop_boxes(&overlays_by_redaction, &page_boxes);
+        let (base_pdf_bytes_for_visual, overlay_pdf_bytes_for_visual, crop_apply_ms) =
+            if page_crop_boxes.is_empty() {
+                (inputs.pdf_bytes.clone(), annotated_bytes.clone(), 0_u128)
+            } else {
+                let crop_started = Instant::now();
+                let base_cropped = apply_page_crop_boxes(&inputs.pdf_bytes, &page_crop_boxes)?;
+                let overlay_cropped = apply_page_crop_boxes(&annotated_bytes, &page_crop_boxes)?;
+                (
+                    base_cropped,
+                    overlay_cropped,
+                    crop_started.elapsed().as_millis(),
+                )
+            };
+        let mut scoring_page_boxes = page_boxes.clone();
+        for (page_index, crop_box) in &page_crop_boxes {
+            scoring_page_boxes.insert(*page_index, *crop_box);
+        }
 
         let (base_renderer, overlay_renderer, renderer_init_ms) = {
             let renderer_init_started = Instant::now();
-            let base_renderer = HayroRenderer::new_from_bytes(&inputs.pdf_bytes)?;
-            let overlay_renderer = HayroRenderer::new_from_bytes(&annotated_bytes)?;
+            let base_renderer = HayroRenderer::new_from_bytes(&base_pdf_bytes_for_visual)?;
+            let overlay_renderer = HayroRenderer::new_from_bytes(&overlay_pdf_bytes_for_visual)?;
             (
                 base_renderer,
                 overlay_renderer,
@@ -4447,6 +4574,8 @@ mod visual_guess_score_impl {
         let mut rerank_rows_scored = 0_usize;
         let mut rerank_top1_changed = 0_usize;
         let mut rerank_gain_sum = 0.0_f64;
+        let mut rerank_candidate_evals = 0_usize;
+        let mut rerank_eval_ms = 0_u128;
         let row_scoring_started = Instant::now();
         for (index, (guess, redaction)) in guesses
             .iter_mut()
@@ -4475,7 +4604,7 @@ mod visual_guess_score_impl {
                 continue;
             }
 
-            let Some(page_box) = page_boxes.get(&redaction.page_index).copied() else {
+            let Some(page_box) = scoring_page_boxes.get(&redaction.page_index).copied() else {
                 guess.visual_reason = Some("page_box_missing".to_owned());
                 continue;
             };
@@ -4519,11 +4648,12 @@ mod visual_guess_score_impl {
 
             let top_before = top_guess_text(guess).map(|value| value.to_owned());
             let mut row_scored = false;
-            if should_visual_rerank_row(guess, overlays) {
+            if rerank_enabled && should_visual_rerank_row(guess, overlays) {
                 rerank_rows_considered += 1;
+                let rerank_eval_started = Instant::now();
                 match score_top_k_candidates_for_row(
                     &annotator,
-                    &inputs.pdf_bytes,
+                    &base_pdf_bytes_for_visual,
                     redaction.page_index,
                     base_page,
                     page_box,
@@ -4534,7 +4664,9 @@ mod visual_guess_score_impl {
                     effective_min_ink_pixels,
                 ) {
                     Ok(mut candidate_scores) if !candidate_scores.is_empty() => {
+                        rerank_eval_ms += rerank_eval_started.elapsed().as_millis();
                         rerank_rows_scored += 1;
+                        rerank_candidate_evals += candidate_scores.len();
                         candidate_scores.sort_by(|left, right| {
                             right
                                 .blended_score
@@ -4588,8 +4720,11 @@ mod visual_guess_score_impl {
                             }
                         }
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        rerank_eval_ms += rerank_eval_started.elapsed().as_millis();
+                    }
                     Err(error) => {
+                        rerank_eval_ms += rerank_eval_started.elapsed().as_millis();
                         guess.visual_reason = Some(format!("visual_rerank_failed:{error}"));
                     }
                 }
@@ -4657,14 +4792,33 @@ mod visual_guess_score_impl {
             rerank_gain_sum / rerank_rows_scored as f64
         };
         diagnostics.push(format!(
-            "visual_rerank=rows_considered={} rows_scored={} top1_changed={} top1_changed_ratio={:.4} mean_gain={:.4} top_k={} blend_weight={:.3}",
+            "visual_rerank=enabled={} rows_considered={} rows_scored={} top1_changed={} top1_changed_ratio={:.4} mean_gain={:.4} top_k={} eval_cap={} blend_weight={:.3}",
+            rerank_enabled,
             rerank_rows_considered,
             rerank_rows_scored,
             rerank_top1_changed,
             rerank_changed_ratio,
             rerank_mean_gain,
             VISUAL_RERANK_TOP_K,
+            VISUAL_RERANK_MAX_EVAL_CANDIDATES,
             VISUAL_RERANK_BLEND_WEIGHT
+        ));
+        let rerank_mean_eval_ms_per_candidate = if rerank_candidate_evals == 0 {
+            0.0_f64
+        } else {
+            rerank_eval_ms as f64 / rerank_candidate_evals as f64
+        };
+        let rerank_mean_eval_ms_per_row = if rerank_rows_scored == 0 {
+            0.0_f64
+        } else {
+            rerank_eval_ms as f64 / rerank_rows_scored as f64
+        };
+        diagnostics.push(format!(
+            "visual_rerank_timing=candidate_evals={} eval_ms_total={} eval_ms_per_candidate={:.3} eval_ms_per_scored_row={:.3}",
+            rerank_candidate_evals,
+            rerank_eval_ms,
+            rerank_mean_eval_ms_per_candidate,
+            rerank_mean_eval_ms_per_row
         ));
         diagnostics.push(format!(
             "visual_score_timing=annotate_overlay_ms={} annotate_context_ms={} renderer_init_ms={} page_render_ms={} row_scoring_ms={} pages_rendered={}",
@@ -4674,6 +4828,13 @@ mod visual_guess_score_impl {
             page_render_ms,
             row_scoring_started.elapsed().as_millis(),
             base_pages.len()
+        ));
+        diagnostics.push(format!(
+            "visual_tile_rendering=pages_cropped={} crop_apply_ms={} tile_padding_pt={} max_crop_coverage={}",
+            page_crop_boxes.len(),
+            crop_apply_ms,
+            VISUAL_TILE_PAGE_PADDING_PT,
+            VISUAL_TILE_MAX_COVERAGE_FOR_CROP
         ));
         Ok(diagnostics)
     }
@@ -4769,11 +4930,83 @@ mod visual_guess_score_impl {
         out
     }
 
+    fn rerank_candidate_texts(guess: &RedactionGuess) -> Vec<String> {
+        let mut out = Vec::<String>::new();
+        let mut seen = BTreeSet::<String>::new();
+
+        for text in ordered_candidate_texts_top_k(guess, VISUAL_RERANK_TOP_K) {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_ascii_uppercase();
+            if seen.insert(key) {
+                out.push(trimmed.to_owned());
+            }
+            if out.len() >= VISUAL_RERANK_MAX_EVAL_CANDIDATES {
+                return out;
+            }
+        }
+        let Some(top_text) = out.first().cloned() else {
+            return out;
+        };
+
+        let top_geometric = geometric_score_for_text(guess, &top_text);
+        let top_width = candidate_width_pt_for_text(guess, &top_text).max(0.1_f32);
+        let mut expansion = Vec::<(f32, f32, String)>::new();
+
+        for candidate in &guess.candidates {
+            let trimmed = candidate.text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = trimmed.to_ascii_uppercase();
+            if seen.contains(&key) {
+                continue;
+            }
+            let width = candidate
+                .width_pt
+                .filter(|value| value.is_finite() && *value > 0.0_f32)
+                .unwrap_or_else(|| candidate_width_pt_for_text(guess, trimmed));
+            let width_delta_ratio =
+                ((width - top_width).abs() / top_width.max(1.0_f32)).max(0.0_f32);
+            if width_delta_ratio > VISUAL_RERANK_MAX_WIDTH_DELTA_RATIO_FOR_EXPANSION {
+                continue;
+            }
+            let score_gap = (top_geometric - candidate.score).max(0.0_f32);
+            if score_gap > VISUAL_RERANK_MAX_SCORE_GAP_FOR_EXPANSION {
+                continue;
+            }
+            expansion.push((width_delta_ratio, score_gap, trimmed.to_owned()));
+        }
+        expansion.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.1
+                        .partial_cmp(&right.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        for (_, _, text) in expansion {
+            let key = text.to_ascii_uppercase();
+            if seen.insert(key) {
+                out.push(text);
+            }
+            if out.len() >= VISUAL_RERANK_MAX_EVAL_CANDIDATES {
+                break;
+            }
+        }
+        out
+    }
+
     fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) -> bool {
-        if !ENABLE_VISUAL_RERANK {
+        if overlays.len() < 3 {
             return false;
         }
-        if overlays.len() < 3 {
+        if !guess.exact_matches.is_empty() {
             return false;
         }
         let mut ordered = overlays.to_vec();
@@ -4792,7 +5025,7 @@ mod visual_guess_score_impl {
             return false;
         }
 
-        let texts = ordered_candidate_texts_top_k(guess, VISUAL_RERANK_TOP_K);
+        let texts = rerank_candidate_texts(guess);
         if texts.len() < 2 {
             return false;
         }
@@ -4807,8 +5040,42 @@ mod visual_guess_score_impl {
         (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP
     }
 
-    fn visual_quality_from_diff(mean_abs_diff: f32) -> f32 {
-        (1.0_f32 - mean_abs_diff / 0.30_f32).clamp(0.0_f32, 1.0_f32)
+    fn visual_rerank_enabled() -> bool {
+        if ENABLE_VISUAL_RERANK {
+            return true;
+        }
+        env_flag_enabled("UNREDACT_ENABLE_VISUAL_RERANK")
+    }
+
+    fn env_flag_enabled(name: &str) -> bool {
+        match std::env::var(name) {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn visual_quality_from_score(score: &RowPixelScore) -> f32 {
+        let diff_quality = (1.0_f32 - score.mean_abs_diff / 0.30_f32).clamp(0.0_f32, 1.0_f32);
+        let changed_quality =
+            (1.0_f32 - score.changed_pixel_ratio / 0.45_f32).clamp(0.0_f32, 1.0_f32);
+        let edge_overlap_quality = if score.edge_ink_overlap_ratio.is_finite() {
+            score.edge_ink_overlap_ratio.clamp(0.0_f32, 1.0_f32)
+        } else {
+            0.5_f32
+        };
+        let edge_clean_quality = if score.edge_ink_mismatch_ratio.is_finite() {
+            (1.0_f32 - score.edge_ink_mismatch_ratio).clamp(0.0_f32, 1.0_f32)
+        } else {
+            0.5_f32
+        };
+        (diff_quality * 0.45_f32
+            + changed_quality * 0.20_f32
+            + edge_overlap_quality * 0.25_f32
+            + edge_clean_quality * 0.10_f32)
+            .clamp(0.0_f32, 1.0_f32)
     }
 
     fn geometric_score_for_text(guess: &RedactionGuess, text: &str) -> f32 {
@@ -4871,20 +5138,18 @@ mod visual_guess_score_impl {
         let mut left = ordered.first()?.clone();
         let mut guess = ordered.get(1)?.clone();
         let mut right = ordered.get(2)?.clone();
+        let template_bbox = union_overlay_bbox(&ordered)?;
 
         let top_width = top_width_pt.max(0.1_f32);
         let right_space = (right.x - (guess.x + top_width)).max(0.0_f32);
         let new_right_x = guess.x + candidate_width_pt.max(0.1_f32) + right_space;
-        let delta = new_right_x - right.x;
 
         guess.text = candidate_text.to_owned();
         right.x = new_right_x;
 
-        let mut bbox = left.bbox;
-        bbox.x1 = (bbox.x1 + delta).max(bbox.x0 + 1.0_f32);
-        left.bbox = bbox;
-        guess.bbox = bbox;
-        right.bbox = bbox;
+        left.bbox = template_bbox;
+        guess.bbox = template_bbox;
+        right.bbox = template_bbox;
         Some(vec![left, guess, right])
     }
 
@@ -4901,15 +5166,44 @@ mod visual_guess_score_impl {
         dpi: f32,
         min_ink_pixels: u32,
     ) -> Result<Vec<CandidateVisualScore>, String> {
-        let texts = ordered_candidate_texts_top_k(guess, VISUAL_RERANK_TOP_K);
+        let texts = rerank_candidate_texts(guess);
         if texts.len() < 2 {
             return Ok(Vec::new());
         }
+        let Some(template_bbox) = union_overlay_bbox(template_overlays) else {
+            return Ok(Vec::new());
+        };
         let top_text = texts.first().cloned().unwrap_or_default();
         let top_width = candidate_width_pt_for_text(guess, &top_text);
+        let max_positive_shift_pt = texts
+            .iter()
+            .map(|text| (candidate_width_pt_for_text(guess, text) - top_width).max(0.0_f32))
+            .fold(0.0_f32, f32::max);
+        let fixed_window_bbox = pad_rect(
+            Rect::new(
+                template_bbox.x0,
+                template_bbox.y0,
+                template_bbox.x1 + max_positive_shift_pt,
+                template_bbox.y1,
+            ),
+            page_box,
+        );
+        let top_geometric = geometric_score_for_text(guess, &top_text);
+        let min_shift_pt =
+            ((72.0_f32 / dpi.max(1.0_f32)) * VISUAL_RERANK_MIN_SHIFT_PX).max(0.25_f32);
         let mut out = Vec::<CandidateVisualScore>::new();
         for text in texts {
             let candidate_width = candidate_width_pt_for_text(guess, &text);
+            let geometric = geometric_score_for_text(guess, &text);
+            if !text.eq_ignore_ascii_case(&top_text) {
+                let geometric_gap = (top_geometric - geometric).max(0.0_f32);
+                if geometric_gap > VISUAL_RERANK_MAX_GEOMETRIC_GAP_FOR_EVAL {
+                    continue;
+                }
+                if (candidate_width - top_width).abs() < min_shift_pt {
+                    continue;
+                }
+            }
             let Some(overlays) = build_candidate_overlays_from_template(
                 template_overlays,
                 &text,
@@ -4928,23 +5222,17 @@ mod visual_guess_score_impl {
             )?;
             let renderer = HayroRenderer::new_from_bytes(&annotated)?;
             let overlaid_page = renderer.render_page_to_rgba(page_index as usize, dpi)?;
-            let Some(window_bbox) =
-                union_overlay_bbox(&overlays).map(|bbox| pad_rect(bbox, page_box))
-            else {
-                continue;
-            };
             let Some(score) = score_row_overlay(
                 base_page,
                 &overlaid_page,
                 page_box,
-                window_bbox,
+                fixed_window_bbox,
                 redaction_bbox,
                 min_ink_pixels,
             ) else {
                 continue;
             };
-            let geometric = geometric_score_for_text(guess, &text);
-            let visual = visual_quality_from_diff(score.mean_abs_diff);
+            let visual = visual_quality_from_score(&score);
             let blended = geometric * (1.0_f32 - VISUAL_RERANK_BLEND_WEIGHT)
                 + visual * VISUAL_RERANK_BLEND_WEIGHT;
             out.push(CandidateVisualScore {
@@ -4992,6 +5280,90 @@ mod visual_guess_score_impl {
         )
     }
 
+    fn pad_rect_with_padding(rect: Rect, page_box: Rect, padding_pt: f32) -> Rect {
+        Rect::new(
+            (rect.x0 - padding_pt).max(page_box.x0),
+            (rect.y0 - padding_pt).max(page_box.y0),
+            (rect.x1 + padding_pt).min(page_box.x1),
+            (rect.y1 + padding_pt).min(page_box.y1),
+        )
+    }
+
+    fn merge_rect(left: Rect, right: Rect) -> Rect {
+        Rect::new(
+            left.x0.min(right.x0),
+            left.y0.min(right.y0),
+            left.x1.max(right.x1),
+            left.y1.max(right.y1),
+        )
+    }
+
+    fn build_visual_page_crop_boxes(
+        overlays_by_redaction: &BTreeMap<usize, Vec<TextOverlay>>,
+        page_boxes: &BTreeMap<u32, Rect>,
+    ) -> BTreeMap<u32, Rect> {
+        let mut out = BTreeMap::<u32, Rect>::new();
+        for overlays in overlays_by_redaction.values() {
+            let Some(first) = overlays.first() else {
+                continue;
+            };
+            let page_index = first.page_index;
+            let Some(page_box) = page_boxes.get(&page_index).copied() else {
+                continue;
+            };
+            let Some(row_bbox) = union_overlay_bbox(overlays) else {
+                continue;
+            };
+            let padded = pad_rect_with_padding(row_bbox, page_box, VISUAL_TILE_PAGE_PADDING_PT);
+            out.entry(page_index)
+                .and_modify(|existing| *existing = merge_rect(*existing, padded))
+                .or_insert(padded);
+        }
+        for (page_index, crop_box) in out.iter_mut() {
+            if let Some(page_box) = page_boxes.get(page_index).copied() {
+                let coverage = crop_box.area() / page_box.area().max(0.0001_f32);
+                if coverage >= VISUAL_TILE_MAX_COVERAGE_FOR_CROP {
+                    *crop_box = page_box;
+                }
+            }
+        }
+        out
+    }
+
+    fn apply_page_crop_boxes(
+        pdf_bytes: &[u8],
+        page_crop_boxes: &BTreeMap<u32, Rect>,
+    ) -> Result<Vec<u8>, String> {
+        if page_crop_boxes.is_empty() {
+            return Ok(pdf_bytes.to_vec());
+        }
+        let mut doc = Document::load_mem(pdf_bytes).map_err(|error| error.to_string())?;
+        for (page_no, page_id) in doc.get_pages() {
+            let page_index = page_no.saturating_sub(1);
+            let Some(crop) = page_crop_boxes.get(&page_index).copied() else {
+                continue;
+            };
+            let page_object = doc
+                .get_object_mut(page_id)
+                .map_err(|error| error.to_string())?;
+            let page_dict = match page_object {
+                Object::Dictionary(value) => value,
+                _ => continue,
+            };
+            let box_array = Object::Array(vec![
+                Object::Real(crop.x0),
+                Object::Real(crop.y0),
+                Object::Real(crop.x1),
+                Object::Real(crop.y1),
+            ]);
+            page_dict.set("CropBox", box_array.clone());
+            page_dict.set("MediaBox", box_array);
+        }
+        let mut out = Vec::<u8>::new();
+        doc.save_to(&mut out).map_err(|error| error.to_string())?;
+        Ok(out)
+    }
+
     fn score_row_overlay(
         base: &RenderedPage,
         overlaid: &RenderedPage,
@@ -5027,13 +5399,23 @@ mod visual_guess_score_impl {
         let mut changed_weight = 0.0_f32;
         let mut compared_weight = 0.0_f32;
         let mut diff_sum = 0.0_f32;
+        let mut edge_ink_weight = 0.0_f32;
+        let mut edge_ink_overlap_weight = 0.0_f32;
+        let mut edge_ink_mismatch_weight = 0.0_f32;
         let edge_band_px = ((EDGE_BAND_PT / 72.0_f32) * base.dpi).ceil().max(0.0_f32) as u32;
 
         for y in window.1..window.3 {
             for x in window.0..window.2 {
+                let mut inside_redaction_edge_band = false;
+                let mut outside_redaction_edge_band = false;
                 if let Some(red_box) = redaction {
                     if point_in_rect_px(x, y, red_box) {
-                        continue;
+                        if !point_in_inner_edge_band_px(x, y, red_box, edge_band_px) {
+                            continue;
+                        }
+                        inside_redaction_edge_band = true;
+                    } else if point_in_edge_band_px(x, y, red_box, edge_band_px) {
+                        outside_redaction_edge_band = true;
                     }
                 }
                 let index = ((y as usize * width) + x as usize) * 4;
@@ -5046,17 +5428,31 @@ mod visual_guess_score_impl {
                 {
                     continue;
                 }
+                if inside_redaction_edge_band
+                    && base_luma <= REDACTION_INTERIOR_IGNORE_DARK_LUMA
+                    && over_luma <= REDACTION_INTERIOR_IGNORE_DARK_LUMA
+                {
+                    continue;
+                }
 
                 compared_pixels = compared_pixels.saturating_add(1);
-                let edge_weight = if let Some(red_box) = redaction {
-                    if point_in_edge_band_px(x, y, red_box, edge_band_px) {
-                        EDGE_BAND_WEIGHT
-                    } else {
-                        1.0_f32
-                    }
+                let edge_weight = if inside_redaction_edge_band {
+                    EDGE_INTERIOR_WEIGHT
+                } else if outside_redaction_edge_band {
+                    EDGE_BAND_WEIGHT
                 } else {
                     1.0_f32
                 };
+                if (inside_redaction_edge_band || outside_redaction_edge_band)
+                    && over_luma <= EDGE_INK_LUMA_THRESHOLD
+                {
+                    edge_ink_weight += edge_weight;
+                    if base_luma <= EDGE_INK_MATCH_BASE_LUMA_THRESHOLD {
+                        edge_ink_overlap_weight += edge_weight;
+                    } else if base_luma >= EDGE_INK_MISMATCH_BASE_LUMA_THRESHOLD {
+                        edge_ink_mismatch_weight += edge_weight;
+                    }
+                }
                 compared_weight += edge_weight;
                 let delta = base_luma.abs_diff(over_luma);
                 diff_sum += (delta as f32 / 255.0_f32) * edge_weight;
@@ -5070,10 +5466,21 @@ mod visual_guess_score_impl {
             return None;
         }
         let denom = compared_weight.max(0.0001_f32);
+        let (edge_ink_overlap_ratio, edge_ink_mismatch_ratio) = if edge_ink_weight <= 0.0_f32 {
+            (0.5_f32, 0.5_f32)
+        } else {
+            let edge_denom = edge_ink_weight.max(0.0001_f32);
+            (
+                edge_ink_overlap_weight / edge_denom,
+                edge_ink_mismatch_weight / edge_denom,
+            )
+        };
         Some(RowPixelScore {
             compared_pixels,
             mean_abs_diff: diff_sum / denom,
             changed_pixel_ratio: changed_weight / denom,
+            edge_ink_overlap_ratio,
+            edge_ink_mismatch_ratio,
         })
     }
 
@@ -5107,6 +5514,25 @@ mod visual_guess_score_impl {
         let right_max = rect.2.saturating_add(band_px);
         let right_band = x >= rect.2 && x < right_max;
         left_band || right_band
+    }
+
+    fn point_in_inner_edge_band_px(
+        x: u32,
+        y: u32,
+        rect: (u32, u32, u32, u32),
+        band_px: u32,
+    ) -> bool {
+        if band_px == 0 {
+            return false;
+        }
+        if !point_in_rect_px(x, y, rect) {
+            return false;
+        }
+        let near_left = x < rect.0.saturating_add(band_px);
+        let near_right = x >= rect.2.saturating_sub(band_px);
+        let near_top = y < rect.1.saturating_add(band_px);
+        let near_bottom = y >= rect.3.saturating_sub(band_px);
+        near_left || near_right || near_top || near_bottom
     }
 
     fn rect_pdf_to_pixels(

@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use unredact::data::DEFAULT_NAME_DICTIONARY;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -804,8 +805,8 @@ fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
         .map(|value| value.to_ascii_uppercase())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for line in include_str!("../../assets/names.txt").lines() {
-        let trimmed = line.trim();
+    for value in DEFAULT_NAME_DICTIONARY {
+        let trimmed = value.trim();
         if trimmed.is_empty() {
             continue;
         }

@@ -541,10 +541,16 @@ fn additional_epstein_files_run_without_file_specific_tuning() {
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
+    let dictionary_path = Path::new("assets/names.txt");
+    assert!(
+        dictionary_path.exists(),
+        "missing dictionary input: {}",
+        dictionary_path.display()
+    );
 
     for input in inputs {
         assert!(input.exists(), "missing test input: {}", input.display());
-        let run_result = run_from_paths(input, &output_dir, None, cfg.clone());
+        let run_result = run_from_paths(input, &output_dir, Some(dictionary_path), cfg.clone());
         assert!(
             run_result.is_ok(),
             "pipeline run failed for {}: {:?}",
