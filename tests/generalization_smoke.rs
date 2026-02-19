@@ -524,19 +524,11 @@ fn additional_epstein_files_run_without_file_specific_tuning() {
 
     let cfg = UnredactServiceConfig {
         include_details: false,
-        include_full_page_rects: false,
         enable_image_analysis: true,
         raster_dpi: 180.0_f32,
         guess: GuessConfig {
-            max_words: 4,
-            max_candidates: 200,
-            max_dictionary: 5_000,
-            tol_pt: 100.0,
-            max_nodes: 200_000,
             visual_score: true,
             visual_score_dpi: 200.0_f32,
-            visual_min_ink_pixels: 64_u32,
-            visual_drop_threshold: None,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),
@@ -667,15 +659,8 @@ fn synthetic_redactions_are_guessed_from_noisy_dictionary() {
     );
 
     let guess_cfg = GuessConfig {
-        max_words: 4,
-        max_candidates: 500,
-        max_dictionary: 5_000,
-        tol_pt: 100.0,
-        max_nodes: 200_000,
         visual_score: true,
         visual_score_dpi: 200.0_f32,
-        visual_min_ink_pixels: 64_u32,
-        visual_drop_threshold: None,
     };
     let guess_data = GuessValidationData::new();
     let dictionary_data = DictionaryData::new();

@@ -12,7 +12,6 @@ pub enum DictionaryListInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DictionaryListRequest {
     pub dictionary_input: DictionaryListInput,
-    pub max_dictionary: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,15 +27,14 @@ pub fn run_dictionary_list_convertion_component(
     let dictionary_data = DictionaryData::new();
     let (dictionary_entries, dictionary_diagnostics) = match req.dictionary_input {
         DictionaryListInput::FilePath(path) => {
-            dictionary_data.build_dictionary(Some(path.as_path()), req.max_dictionary)?
+            dictionary_data.build_dictionary(Some(path.as_path()))?
         }
         DictionaryListInput::FileBytes(bytes) => {
-            let inputs = dictionary_data
-                .load_dictionary_from_bytes(Some(bytes.as_slice()), req.max_dictionary)?;
+            let inputs = dictionary_data.load_dictionary_from_bytes(Some(bytes.as_slice()))?;
             (inputs.dictionary, inputs.diagnostics)
         }
         DictionaryListInput::Missing => {
-            let inputs = dictionary_data.load_dictionary_from_bytes(None, req.max_dictionary)?;
+            let inputs = dictionary_data.load_dictionary_from_bytes(None)?;
             (inputs.dictionary, inputs.diagnostics)
         }
     };
@@ -56,7 +54,6 @@ mod tests {
             dictionary_input: DictionaryListInput::FileBytes(
                 b"SARAH KELLEN\nNADIA MARCINKOVA\n".to_vec(),
             ),
-            max_dictionary: 100,
         };
         let out = run_dictionary_list_convertion_component(req)
             .expect("dictionary conversion should succeed");
@@ -74,7 +71,6 @@ mod tests {
     fn missing_dictionary_bytes_uses_default_fallback() {
         let req = DictionaryListRequest {
             dictionary_input: DictionaryListInput::Missing,
-            max_dictionary: 100,
         };
         let out = run_dictionary_list_convertion_component(req)
             .expect("fallback dictionary conversion should succeed");
@@ -104,7 +100,6 @@ mod tests {
 
         let req = DictionaryListRequest {
             dictionary_input: DictionaryListInput::FilePath(path.clone()),
-            max_dictionary: 100,
         };
         let out = run_dictionary_list_convertion_component(req)
             .expect("path dictionary conversion should succeed");

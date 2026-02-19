@@ -4,34 +4,18 @@ use crate::types::redaction_types::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GuessConfig {
-    pub max_words: usize,
-    pub max_candidates: usize,
-    pub max_dictionary: usize,
-    pub tol_pt: f64,
-    pub max_nodes: usize,
     #[serde(default = "default_visual_score_enabled")]
     pub visual_score: bool,
     #[serde(default = "default_visual_score_dpi")]
     pub visual_score_dpi: f32,
-    #[serde(default = "default_visual_min_ink_pixels")]
-    pub visual_min_ink_pixels: u32,
-    #[serde(default)]
-    pub visual_drop_threshold: Option<f32>,
 }
 
 impl Default for GuessConfig {
     #[inline]
     fn default() -> Self {
         Self {
-            max_words: 4,
-            max_candidates: 50,
-            max_dictionary: 2000,
-            tol_pt: 4.0,
-            max_nodes: 50_000,
             visual_score: default_visual_score_enabled(),
             visual_score_dpi: default_visual_score_dpi(),
-            visual_min_ink_pixels: default_visual_min_ink_pixels(),
-            visual_drop_threshold: None,
         }
     }
 }
@@ -123,8 +107,4 @@ fn default_visual_score_enabled() -> bool {
 
 fn default_visual_score_dpi() -> f32 {
     200.0_f32
-}
-
-fn default_visual_min_ink_pixels() -> u32 {
-    64_u32
 }

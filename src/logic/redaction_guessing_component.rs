@@ -6,6 +6,8 @@ use crate::data::visualization_data::VisualizationData;
 use crate::logic::types::{BytesPipelineOutputs, BytesPipelineRequest};
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 
+const INCLUDE_FULL_PAGE_RECTS: bool = false;
+
 #[inline]
 pub fn run_redaction_guessing_component(
     req: BytesPipelineRequest,
@@ -19,7 +21,7 @@ pub fn run_redaction_guessing_component(
     let redaction_cfg = RedactionFinderConfig {
         include_details: req.cfg.include_details,
         mode: RedactionMode::All,
-        include_full_page_rects: req.cfg.include_full_page_rects,
+        include_full_page_rects: INCLUDE_FULL_PAGE_RECTS,
         enable_image_analysis: req.cfg.enable_image_analysis,
         raster_dpi: req.cfg.raster_dpi,
     };
@@ -132,9 +134,7 @@ mod guess_impl {
         let reports = req
             .report_data
             .load_reports(req.redactions_path, req.fonts_path)?;
-        let dictionary = req
-            .dictionary_data
-            .load_dictionary(req.dictionary_path, req.cfg.max_dictionary)?;
+        let dictionary = req.dictionary_data.load_dictionary(req.dictionary_path)?;
         let font_runs = req.font_run_data.load_font_runs(req.pdf_path)?;
         let width_tables = build_pdf_width_table_map(req.pdf_path).unwrap_or_default();
         let pdf_bytes = std::fs::read(req.pdf_path).ok();
@@ -221,8 +221,8 @@ mod guess_impl {
             let visual_cfg = VisualGuessScoreConfig {
                 enabled: cfg.visual_score,
                 dpi: cfg.visual_score_dpi,
-                min_ink_pixels: cfg.visual_min_ink_pixels,
-                drop_threshold: cfg.visual_drop_threshold,
+                min_ink_pixels: FIXED_VISUAL_MIN_INK_PIXELS,
+                drop_threshold: FIXED_VISUAL_DROP_THRESHOLD,
             };
             let visual_result = if let Some(pdf_bytes) = inputs.pdf_bytes {
                 apply_visual_scores_from_bytes(
@@ -407,6 +407,10 @@ mod guess_impl {
     }
 
     const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
+    const FIXED_MAX_CANDIDATES: usize = 50;
+    const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
+    const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
+    const FIXED_VISUAL_DROP_THRESHOLD: Option<f32> = None;
     const GLYPH_UNITS_SCALE: f64 = 64.0_f64;
     const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
     const MULTI_SPAN_ANCHOR_PRIOR_WEIGHT: f64 = 0.15_f64;
@@ -585,7 +589,7 @@ mod guess_impl {
                             right_bbox,
                             redaction.bbox,
                         ) as f32,
-                        tol_pt: cfg.tol_pt as f32,
+                        tol_pt: FIXED_TOLERANCE_PT as f32,
                         anchor_left_x: None,
                         anchor_right_x: None,
                         anchor_font_key: None,
@@ -1377,7 +1381,7 @@ mod guess_impl {
     fn build_guess_for_anchor(
         redaction: &RedactionOccurrence,
         dictionary: &[String],
-        cfg: &GuessConfig,
+        _cfg: &GuessConfig,
         anchor: &AnchorPairData,
         assets: &std::collections::BTreeMap<String, FontAsset>,
         width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
@@ -1539,10 +1543,10 @@ mod guess_impl {
         let (min_char_units, max_char_units) = char_unit_band(
             redaction_width_pt,
             fallback_char_width.max(0.1_f64),
-            anchor.epsilon_pt.max(cfg.tol_pt),
+            anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
         );
         let anchor_filter_limit_pt =
-            (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(cfg.tol_pt.max(4.0_f64));
+            (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(FIXED_TOLERANCE_PT.max(4.0_f64));
         let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
             + MULTI_SPAN_BOX_ERROR_PAD_PT)
             .max(anchor.epsilon_pt.max(2.5_f64));
@@ -1617,7 +1621,7 @@ mod guess_impl {
                 });
             }
         } else {
-            let single_span_width_slack_pt = (anchor.epsilon_pt.max(cfg.tol_pt) * 1.75_f64)
+            let single_span_width_slack_pt = (anchor.epsilon_pt.max(FIXED_TOLERANCE_PT) * 1.75_f64)
                 .max(redaction_width_pt * 0.45_f64)
                 .max(12.0_f64);
             let lower_width = (redaction_width_pt - single_span_width_slack_pt).max(0.0_f64);
@@ -1737,19 +1741,19 @@ mod guess_impl {
         let selected = if exact_scored.is_empty() {
             scored
                 .iter()
-                .take(cfg.max_candidates)
+                .take(FIXED_MAX_CANDIDATES)
                 .cloned()
                 .collect::<Vec<_>>()
         } else {
             exact_scored
                 .iter()
-                .take(cfg.max_candidates)
+                .take(FIXED_MAX_CANDIDATES)
                 .cloned()
                 .collect::<Vec<_>>()
         };
 
         let denom = if exact_scored.is_empty() {
-            cfg.tol_pt.max(0.0001)
+            FIXED_TOLERANCE_PT.max(0.0001)
         } else {
             epsilon.max(0.0001)
         };
@@ -3428,15 +3432,8 @@ mod guess_impl {
                 "WILLIAM HAMMOND".to_owned(),
             ];
             let cfg = GuessConfig {
-                max_words: 4,
-                max_candidates: 10,
-                max_dictionary: 100,
-                tol_pt: 100.0,
-                max_nodes: 1_000,
                 visual_score: false,
                 visual_score_dpi: 200.0_f32,
-                visual_min_ink_pixels: 64_u32,
-                visual_drop_threshold: None,
             };
             let assets = BTreeMap::new();
             let width_tables = BTreeMap::new();
@@ -3640,14 +3637,14 @@ mod redaction_impl {
             }
 
             match cfg.mode {
-                RedactionMode::Drawn | RedactionMode::All => match retriever.drawn_redactions(
-                    *page_index,
-                    cfg.include_details,
-                    cfg.include_full_page_rects,
-                ) {
-                    Ok(v) => all.extend(v),
-                    Err(m) => diagnostics.push(format!("page_index={page_index} drawn_error={m}")),
-                },
+                RedactionMode::Drawn | RedactionMode::All => {
+                    match retriever.drawn_redactions(*page_index, cfg.include_details, false) {
+                        Ok(v) => all.extend(v),
+                        Err(m) => {
+                            diagnostics.push(format!("page_index={page_index} drawn_error={m}"))
+                        }
+                    }
+                }
                 RedactionMode::Annotations => {}
             }
         }
@@ -4317,7 +4314,6 @@ mod visual_guess_score_impl {
     const MAX_VISUAL_SCORE_DPI: f32 = 72.0_f32;
     const VISUAL_TILE_PAGE_PADDING_PT: f32 = 8.0_f32;
     const VISUAL_TILE_MAX_COVERAGE_FOR_CROP: f32 = 0.92_f32;
-    const ENABLE_VISUAL_RERANK: bool = false;
     const VISUAL_RERANK_TOP_K: usize = 3;
     const VISUAL_RERANK_MAX_EVAL_CANDIDATES: usize = 8;
     const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.92_f32;
@@ -4480,7 +4476,7 @@ mod visual_guess_score_impl {
             ((cfg.min_ink_pixels as f32 * dpi_ratio * dpi_ratio).round() as u32).max(8_u32);
         let overlays_by_redaction = group_overlays_by_redaction(&inputs.overlays);
         let page_boxes = build_page_boxes(&inputs.pdf_bytes)?;
-        let rerank_enabled = visual_rerank_enabled();
+        let rerank_enabled = cfg.enabled;
 
         let mut diagnostics = Vec::<String>::new();
         if overlays_by_redaction.is_empty() {
@@ -5032,23 +5028,6 @@ mod visual_guess_score_impl {
             return false;
         }
         (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP
-    }
-
-    fn visual_rerank_enabled() -> bool {
-        if ENABLE_VISUAL_RERANK {
-            return true;
-        }
-        env_flag_enabled("UNREDACT_ENABLE_VISUAL_RERANK")
-    }
-
-    fn env_flag_enabled(name: &str) -> bool {
-        match std::env::var(name) {
-            Ok(value) => {
-                let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-            }
-            Err(_) => false,
-        }
     }
 
     fn visual_quality_from_score(score: &RowPixelScore) -> f32 {

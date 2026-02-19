@@ -200,8 +200,8 @@ fn run(options: CliOptions) -> Result<(), String> {
         options.seed,
     );
     let dictionary_raw = dictionary_words.join("\n");
-    let dictionary_inputs = dictionary_data
-        .load_dictionary_from_bytes(Some(dictionary_raw.as_bytes()), options.dictionary_size)?;
+    let dictionary_inputs =
+        dictionary_data.load_dictionary_from_bytes(Some(dictionary_raw.as_bytes()))?;
     let dictionary = dictionary_inputs.dictionary;
     let dictionary_diagnostics = dictionary_inputs.diagnostics;
 
@@ -555,15 +555,8 @@ fn run_guess_report(
     visual_score: bool,
 ) -> Result<unredact::types::guess_types::GuessReport, String> {
     let cfg = GuessConfig {
-        max_words: 4,
-        max_candidates: 1_200,
-        max_dictionary: dictionary.len().max(1),
-        tol_pt: 100.0_f64,
-        max_nodes: 200_000,
         visual_score,
         visual_score_dpi: 200.0_f32,
-        visual_min_ink_pixels: 64_u32,
-        visual_drop_threshold: None,
     };
     run_guess_from_bytes(RunGuessFromBytesRequest {
         pdf_name: &input_path.to_string_lossy(),

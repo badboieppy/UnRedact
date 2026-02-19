@@ -11,11 +11,7 @@ pub struct DictionaryInputs {
 }
 
 pub trait DictionaryDataSource {
-    fn load_dictionary(
-        &self,
-        dictionary_path: Option<&Path>,
-        max_dictionary: usize,
-    ) -> Result<DictionaryInputs, String>;
+    fn load_dictionary(&self, dictionary_path: Option<&Path>) -> Result<DictionaryInputs, String>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,9 +31,8 @@ impl DictionaryData {
     pub fn build_dictionary(
         &self,
         dictionary_path: Option<&Path>,
-        max_dictionary: usize,
     ) -> Result<(Vec<String>, Vec<String>), String> {
-        let inputs = self.load_dictionary(dictionary_path, max_dictionary)?;
+        let inputs = self.load_dictionary(dictionary_path)?;
         Ok((inputs.dictionary, inputs.diagnostics))
     }
 
@@ -50,9 +45,8 @@ impl DictionaryData {
     pub fn load_dictionary_from_bytes(
         &self,
         dictionary_bytes: Option<&[u8]>,
-        max_dictionary: usize,
     ) -> Result<DictionaryInputs, String> {
-        load_dictionary_from_bytes(dictionary_bytes, max_dictionary)
+        load_dictionary_from_bytes(dictionary_bytes)
     }
 }
 
@@ -67,19 +61,17 @@ impl Default for DictionaryData {
 pub fn load_dictionary(
     file_store: &FileStore,
     dictionary_path: Option<&Path>,
-    max_dictionary: usize,
 ) -> Result<DictionaryInputs, String> {
     let dictionary_bytes = match dictionary_path {
         Some(path) => Some(file_store.read(path)?),
         None => None,
     };
-    load_dictionary_from_bytes(dictionary_bytes.as_deref(), max_dictionary)
+    load_dictionary_from_bytes(dictionary_bytes.as_deref())
 }
 
 #[inline]
 pub fn load_dictionary_from_bytes(
     dictionary_bytes: Option<&[u8]>,
-    max_dictionary: usize,
 ) -> Result<DictionaryInputs, String> {
     let mut diagnostics = Vec::<String>::new();
     let dictionary = if let Some(bytes) = dictionary_bytes {
@@ -93,10 +85,10 @@ pub fn load_dictionary_from_bytes(
             entries.extend(case_variants(trimmed));
         }
         diagnostics.push("dictionary_source=file".to_owned());
-        normalize_dictionary(entries, max_dictionary)
+        normalize_dictionary(entries)
     } else {
         diagnostics.push("dictionary_source=default_names".to_owned());
-        build_default_name_dictionary(max_dictionary)
+        build_default_name_dictionary()
     };
     diagnostics.push(format!("dictionary_size={}", dictionary.len()));
     Ok(DictionaryInputs {
@@ -107,17 +99,13 @@ pub fn load_dictionary_from_bytes(
 
 impl DictionaryDataSource for DictionaryData {
     #[inline]
-    fn load_dictionary(
-        &self,
-        dictionary_path: Option<&Path>,
-        max_dictionary: usize,
-    ) -> Result<DictionaryInputs, String> {
-        load_dictionary(&self.file_store, dictionary_path, max_dictionary)
+    fn load_dictionary(&self, dictionary_path: Option<&Path>) -> Result<DictionaryInputs, String> {
+        load_dictionary(&self.file_store, dictionary_path)
     }
 }
 
 #[inline]
-fn normalize_dictionary(words: Vec<String>, max_dictionary: usize) -> Vec<String> {
+fn normalize_dictionary(words: Vec<String>) -> Vec<String> {
     let mut set = BTreeSet::<String>::new();
     for word in words {
         let trimmed = word.trim();
@@ -125,9 +113,6 @@ fn normalize_dictionary(words: Vec<String>, max_dictionary: usize) -> Vec<String
             continue;
         }
         set.insert(trimmed.to_owned());
-        if set.len() >= max_dictionary {
-            break;
-        }
     }
     set.into_iter().collect::<Vec<_>>()
 }
@@ -147,7 +132,7 @@ fn case_variants(value: &str) -> Vec<String> {
 }
 
 #[inline]
-fn build_default_name_dictionary(max_dictionary: usize) -> Vec<String> {
+fn build_default_name_dictionary() -> Vec<String> {
     let mut entries = Vec::<String>::new();
     for value in DEFAULT_NAME_DICTIONARY {
         let trimmed = value.trim();
@@ -156,7 +141,7 @@ fn build_default_name_dictionary(max_dictionary: usize) -> Vec<String> {
         }
         entries.extend(case_variants(trimmed));
     }
-    normalize_dictionary(entries, max_dictionary)
+    normalize_dictionary(entries)
 }
 
 fn title_case(value: &str) -> String {
@@ -185,7 +170,7 @@ mod tests {
     #[test]
     fn normalize_dictionary_dedupes_and_orders() {
         let words = vec!["b".to_owned(), "a".to_owned(), "b".to_owned()];
-        let out = normalize_dictionary(words, 10);
+        let out = normalize_dictionary(words);
         assert_eq!(out, vec!["a".to_owned(), "b".to_owned()]);
     }
 
@@ -209,7 +194,7 @@ mod tests {
             write_result.err()
         );
 
-        let loaded = load_dictionary(&FileStore, Some(&tmp_path), 200);
+        let loaded = load_dictionary(&FileStore, Some(&tmp_path));
         assert!(
             loaded.is_ok(),
             "expected file dictionary to load in test, got {:?}",
@@ -230,7 +215,7 @@ mod tests {
 
     #[test]
     fn missing_dictionary_falls_back_to_default_names() {
-        let loaded = load_dictionary(&FileStore, None, 100);
+        let loaded = load_dictionary(&FileStore, None);
         assert!(
             loaded.is_ok(),
             "expected fallback dictionary when missing input"

@@ -50,15 +50,14 @@ This also creates:
 You can pass a folder instead of a single file:
 
 ```bash
-cargo run --bin unredact -- path/to/folder --output-dir path/to/output --recursive --glob *.pdf
+cargo run --bin unredact -- path/to/folder --output-dir path/to/output
 ```
 
-Useful batch options:
-- `--recursive`: include subfolders
-- `--glob`: filename filter (`*` and `?` supported), default `*.pdf`
-- `--jobs`: number of parallel workers
-- `--fail-fast`: stop at the first failed file
-- `--batch-manifest`: write a JSON summary report
+Batch mode now:
+- scans subfolders automatically,
+- processes supported files (`.pdf`) only,
+- runs serially,
+- always writes a JSON batch manifest to `output_dir/batch_manifest.json`.
 
 The batch manifest includes per-file success/failure and runtime.
 
@@ -72,12 +71,9 @@ cargo run --bin unredact -- path/to/file.pdf --dictionary path/to/dictionary.txt
 If you do not provide one, UnRedact uses the built-in names list.
 
 ## Most Useful Runtime Controls
-- `--max-candidates`: number of guesses to keep per redaction
-- `--max-dictionary`: maximum dictionary size loaded
-- `--tol-pt`: width tolerance
-- `--no-visual-score`: disable visual scoring
-- `--visual-score-dpi`: render DPI for visual scoring
-- `--visual-drop-threshold`: drop guesses above a visual error threshold
+- `--no-image-analysis`: disable raster/image-based redaction detection and run text/shape analysis only
+- `--should-visually-score true|false`: enable/disable visual scoring
+- `--visualize`: write a visualized PDF with overlay guides
 
 Show all `unredact` options:
 

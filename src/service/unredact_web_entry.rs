@@ -24,15 +24,12 @@ pub struct UnredactWebOutputs {
 
 #[inline]
 pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
-    let max_dictionary = req.cfg.guess.max_dictionary;
     let dictionary_input = req
         .dictionary_file_bytes
         .map(DictionaryListInput::FileBytes)
         .unwrap_or(DictionaryListInput::Missing);
-    let dictionary_outputs = run_dictionary_list_convertion_component(DictionaryListRequest {
-        dictionary_input,
-        max_dictionary,
-    })?;
+    let dictionary_outputs =
+        run_dictionary_list_convertion_component(DictionaryListRequest { dictionary_input })?;
     let outputs = run_redaction_guessing_component(BytesPipelineRequest {
         input_name: req.input_name,
         pdf_bytes: req.pdf_bytes,
