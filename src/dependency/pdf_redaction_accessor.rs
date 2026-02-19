@@ -1,23 +1,11 @@
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use crate::types::redaction_types::{
     PdfRenderer, Rect, RedactionFinderConfig, RedactionKind, RedactionOccurrence, UnderlyingTextHit,
 };
 
-const OCR_WINDOW_MIN_WIDTH_PT: f32 = 64.0;
-const OCR_WINDOW_MAX_WIDTH_PT: f32 = 220.0;
-const OCR_WINDOW_PADDING_PT: f32 = 2.0;
 const MAX_RASTER_ANALYSIS_DPI: f32 = 120.0;
-const OCR_ENABLE_ENV: &str = "UNREDACT_ENABLE_LOCAL_OCR";
-const OCR_CMD_ENV: &str = "UNREDACT_TESSERACT_CMD";
-static OCR_TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub trait RedactionDataRetriever {
     fn page_indices(&self) -> Vec<u32>;
@@ -38,15 +26,6 @@ pub trait RedactionDataRetriever {
         cfg: &RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String>;
-    #[inline]
-    fn ocr_context_hits(
-        &self,
-        _page_index: u32,
-        _red_bbox: &Rect,
-        _cfg: &RedactionFinderConfig,
-    ) -> Result<Vec<UnderlyingTextHit>, String> {
-        Ok(Vec::new())
-    }
 }
 
 pub struct PdfFileRetriever<'renderer> {
@@ -148,16 +127,6 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
             .ok_or_else(|| format!("page_missing:index={page_index}"))?;
 
         extract_page_text_runs(&self.doc, page_id, page_index)
-    }
-
-    #[inline]
-    fn ocr_context_hits(
-        &self,
-        page_index: u32,
-        red_bbox: &Rect,
-        cfg: &RedactionFinderConfig,
-    ) -> Result<Vec<UnderlyingTextHit>, String> {
-        extract_ocr_context_hits(self, page_index, red_bbox, cfg)
     }
 }
 fn extract_annotation_redactions(
@@ -946,243 +915,6 @@ fn rect_pixels_to_pdf(
 /// Map a rectangle in PDF user-space coordinates to rendered-page pixel
 /// coordinates (top-left origin). Returns `None` when the input cannot be
 /// represented as a non-empty pixel rect.
-fn rect_pdf_to_pixels(
-    rect: &Rect,
-    page_box: Rect,
-    dpi: f32,
-    width_px: u32,
-    height_px: u32,
-) -> Option<(u32, u32, u32, u32)> {
-    if dpi <= 0.0 || width_px == 0 || height_px == 0 {
-        return None;
-    }
-
-    let x0 = (((rect.x0 - page_box.x0) / 72.0) * dpi).floor();
-    let x1 = (((rect.x1 - page_box.x0) / 72.0) * dpi).ceil();
-    let y0 = (((page_box.y1 - rect.y1) / 72.0) * dpi).floor();
-    let y1 = (((page_box.y1 - rect.y0) / 72.0) * dpi).ceil();
-
-    let x0_px = x0.clamp(0.0, width_px as f32) as u32;
-    let x1_px = x1.clamp(0.0, width_px as f32) as u32;
-    let y0_px = y0.clamp(0.0, height_px as f32) as u32;
-    let y1_px = y1.clamp(0.0, height_px as f32) as u32;
-
-    if x1_px <= x0_px || y1_px <= y0_px {
-        return None;
-    }
-    Some((x0_px, y0_px, x1_px, y1_px))
-}
-
-fn build_ocr_context_windows(red_bbox: &Rect, page_box: Rect) -> Vec<Rect> {
-    let mut windows = Vec::with_capacity(2);
-    let red_width = red_bbox.width().abs().max(1.0);
-    let window_width_pt = (red_width * 1.4).clamp(OCR_WINDOW_MIN_WIDTH_PT, OCR_WINDOW_MAX_WIDTH_PT);
-    let y0 = (red_bbox.y0 - OCR_WINDOW_PADDING_PT).max(page_box.y0);
-    let y1 = (red_bbox.y1 + OCR_WINDOW_PADDING_PT).min(page_box.y1);
-    if y1 <= y0 {
-        return windows;
-    }
-
-    let left_x0 = (red_bbox.x0 - window_width_pt).max(page_box.x0);
-    let left_x1 = red_bbox.x0.min(page_box.x1);
-    if left_x1 - left_x0 >= 2.0 {
-        windows.push(Rect::new(left_x0, y0, left_x1, y1));
-    }
-
-    let right_x0 = red_bbox.x1.max(page_box.x0);
-    let right_x1 = (red_bbox.x1 + window_width_pt).min(page_box.x1);
-    if right_x1 - right_x0 >= 2.0 {
-        windows.push(Rect::new(right_x0, y0, right_x1, y1));
-    }
-
-    windows
-}
-
-fn ocr_enabled_from_env() -> bool {
-    static OCR_ENABLED: OnceLock<bool> = OnceLock::new();
-    *OCR_ENABLED.get_or_init(|| {
-        std::env::var(OCR_ENABLE_ENV)
-            .map(|raw| {
-                let value = raw.trim().to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
-    })
-}
-
-fn ocr_command_from_env() -> OsString {
-    static OCR_COMMAND: OnceLock<OsString> = OnceLock::new();
-    OCR_COMMAND
-        .get_or_init(|| {
-            std::env::var_os(OCR_CMD_ENV).unwrap_or_else(|| OsString::from("tesseract"))
-        })
-        .clone()
-}
-
-fn write_temp_pgm(
-    gray: &[u8],
-    width: u32,
-    height: u32,
-    page_index: u32,
-) -> Result<PathBuf, String> {
-    let seq = OCR_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let name = format!(
-        "unredact_ocr_p{page_index}_{}_{}.pgm",
-        std::process::id(),
-        seq
-    );
-    let path = std::env::temp_dir().join(name);
-
-    let mut bytes = format!("P5\n{} {}\n255\n", width, height).into_bytes();
-    bytes.extend_from_slice(gray);
-    fs::write(&path, bytes).map_err(|e| format!("ocr_temp_write_failed:{e}"))?;
-    Ok(path)
-}
-
-fn normalize_ocr_text(raw: &str) -> String {
-    raw.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn run_local_ocr(image_path: &Path, dpi: f32) -> Result<String, String> {
-    let command = ocr_command_from_env();
-    let output = Command::new(command)
-        .arg(image_path)
-        .arg("stdout")
-        .arg("--psm")
-        .arg("7")
-        .arg("--oem")
-        .arg("1")
-        .arg("-l")
-        .arg("eng")
-        .arg("--dpi")
-        .arg(format!("{:.0}", dpi.max(72.0)))
-        .output()
-        .map_err(|e| format!("ocr_exec_failed:{e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(format!(
-            "ocr_failed:status={} stderr={stderr}",
-            output.status
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn crop_gray_region(
-    gray: &[u8],
-    image_width: usize,
-    image_height: usize,
-    x0_px: u32,
-    y0_px: u32,
-    x1_px: u32,
-    y1_px: u32,
-) -> Option<Vec<u8>> {
-    if gray.len() < image_width.saturating_mul(image_height) {
-        return None;
-    }
-    let x0 = x0_px.min(image_width as u32) as usize;
-    let y0 = y0_px.min(image_height as u32) as usize;
-    let x1 = x1_px.min(image_width as u32) as usize;
-    let y1 = y1_px.min(image_height as u32) as usize;
-    if x1 <= x0 || y1 <= y0 {
-        return None;
-    }
-    let crop_w = x1 - x0;
-    let crop_h = y1 - y0;
-    let mut out = Vec::with_capacity(crop_w.saturating_mul(crop_h));
-    for y in y0..y1 {
-        let row_start = y.saturating_mul(image_width);
-        out.extend_from_slice(&gray[row_start + x0..row_start + x1]);
-    }
-    Some(out)
-}
-
-fn extract_ocr_context_hits(
-    retriever: &PdfFileRetriever<'_>,
-    page_index: u32,
-    red_bbox: &Rect,
-    cfg: &RedactionFinderConfig,
-) -> Result<Vec<UnderlyingTextHit>, String> {
-    if !ocr_enabled_from_env() {
-        return Err(format!(
-            "ocr_disabled:set {OCR_ENABLE_ENV}=1 to enable local OCR context"
-        ));
-    }
-
-    let Some(renderer) = retriever.renderer else {
-        return Err("ocr_renderer_unavailable".to_owned());
-    };
-    let Some(page_id) = retriever.page_id(page_index) else {
-        return Err("ocr_page_missing".to_owned());
-    };
-
-    let page_box = page_render_box_from_page(&retriever.doc, page_id)
-        .unwrap_or(Rect::new(0.0, 0.0, 612.0, 792.0));
-
-    let effective_dpi = cfg.raster_dpi.min(MAX_RASTER_ANALYSIS_DPI);
-    let rendered = renderer
-        .render_page_to_rgba(page_index as usize, effective_dpi)
-        .map_err(|e| format!("ocr_render_failed:{e}"))?;
-    if rendered.width_px == 0 || rendered.height_px == 0 {
-        return Err("ocr_empty_render".to_owned());
-    }
-
-    let gray = rgba_to_grayscale(&rendered.pixels, rendered.width_px, rendered.height_px);
-    if gray.is_empty() {
-        return Err("ocr_gray_conversion_empty".to_owned());
-    }
-
-    let windows = build_ocr_context_windows(red_bbox, page_box);
-    if windows.is_empty() {
-        return Err("ocr_windows_empty".to_owned());
-    }
-
-    let mut hits = Vec::new();
-    for window in windows {
-        let Some((x0_px, y0_px, x1_px, y1_px)) = rect_pdf_to_pixels(
-            &window,
-            page_box,
-            rendered.dpi,
-            rendered.width_px,
-            rendered.height_px,
-        ) else {
-            continue;
-        };
-        let crop = crop_gray_region(
-            &gray,
-            rendered.width_px as usize,
-            rendered.height_px as usize,
-            x0_px,
-            y0_px,
-            x1_px,
-            y1_px,
-        );
-        let Some(crop) = crop else {
-            continue;
-        };
-        let crop_w = x1_px.saturating_sub(x0_px);
-        let crop_h = y1_px.saturating_sub(y0_px);
-        if crop_w < 8 || crop_h < 8 {
-            continue;
-        }
-
-        let path = write_temp_pgm(&crop, crop_w, crop_h, page_index)?;
-        let ocr_text = run_local_ocr(&path, rendered.dpi);
-        drop(fs::remove_file(&path));
-        let text = normalize_ocr_text(&ocr_text?);
-        if text.is_empty() {
-            continue;
-        }
-        hits.push(UnderlyingTextHit {
-            page_index,
-            bbox: window,
-            text,
-        });
-    }
-
-    Ok(hits)
-}
-
 #[derive(Debug, Clone)]
 
 struct ImageDetectionResult {

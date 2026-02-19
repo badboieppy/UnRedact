@@ -3659,7 +3659,7 @@ mod redaction_impl {
         }
 
         for page_index in page_indices {
-            attach_underlying_text(retriever, page_index, &cfg, &mut all, &mut diagnostics);
+            attach_underlying_text(retriever, page_index, &mut all, &mut diagnostics);
         }
 
         RedactionFinderOutput {
@@ -3848,11 +3848,9 @@ mod redaction_impl {
     fn attach_underlying_text(
         retriever: &dyn RedactionDataRetriever,
         page_index: u32,
-        cfg: &RedactionFinderConfig,
         occs: &mut [RedactionOccurrence],
         diagnostics: &mut Vec<String>,
     ) {
-        let mut ocr_diagnostics_seen = BTreeSet::<String>::new();
         let page_redactions = occs
             .iter_mut()
             .filter(|occurrence| occurrence.page_index == page_index)
@@ -3875,65 +3873,7 @@ mod redaction_impl {
         }
 
         for redaction in page_redactions {
-            let mut context = collect_context_hits_for_redaction(&hits, &redaction.bbox);
-            if should_try_ocr(redaction, &context) {
-                match retriever.ocr_context_hits(page_index, &redaction.bbox, cfg) {
-                    Ok(ocr_hits) => merge_ocr_context_hits(&mut context, &ocr_hits),
-                    Err(message) => {
-                        if ocr_diagnostics_seen.insert(message.clone()) {
-                            diagnostics.push(format!(
-                                "page_index={page_index} ocr_context_error={message}"
-                            ));
-                        }
-                    }
-                }
-            }
-            redaction.underlying_text = context;
-        }
-    }
-
-    fn should_try_ocr(redaction: &RedactionOccurrence, context: &[UnderlyingTextHit]) -> bool {
-        if redaction.kind != crate::types::redaction_types::RedactionKind::RasterDarkRegion {
-            return false;
-        }
-        let left = context
-            .first()
-            .map(|hit| hit.text.as_str())
-            .unwrap_or_default();
-        let right = context
-            .get(1)
-            .map(|hit| hit.text.as_str())
-            .unwrap_or_default();
-        is_weak_anchor_text(left) || is_weak_anchor_text(right)
-    }
-
-    fn is_weak_anchor_text(text: &str) -> bool {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return true;
-        }
-        let alpha_count = trimmed
-            .chars()
-            .filter(|ch| ch.is_ascii_alphabetic())
-            .count();
-        alpha_count < 2
-    }
-
-    fn merge_ocr_context_hits(
-        context: &mut Vec<UnderlyingTextHit>,
-        ocr_hits: &[UnderlyingTextHit],
-    ) {
-        for (idx, ocr_hit) in ocr_hits.iter().enumerate() {
-            if ocr_hit.text.trim().is_empty() {
-                continue;
-            }
-            if idx < context.len() {
-                if is_weak_anchor_text(&context[idx].text) {
-                    context[idx] = ocr_hit.clone();
-                }
-            } else {
-                context.push(ocr_hit.clone());
-            }
+            redaction.underlying_text = collect_context_hits_for_redaction(&hits, &redaction.bbox);
         }
     }
 
