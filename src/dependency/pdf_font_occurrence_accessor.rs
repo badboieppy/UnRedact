@@ -638,7 +638,7 @@ fn classify_kind_from_path(path: &Path) -> InputFileKind {
 fn default_text_source_for_kind(kind: InputFileKind) -> TextSourceKind {
     match kind {
         InputFileKind::Pdf => TextSourceKind::EmbeddedText,
-        InputFileKind::Image => TextSourceKind::Ocr,
+        InputFileKind::Image => TextSourceKind::ImageRaster,
         InputFileKind::Unknown => TextSourceKind::Unknown,
     }
 }
@@ -893,7 +893,7 @@ mod tests {
         .expect("expected value in test");
 
         assert_eq!(report.kind, InputFileKind::Image);
-        assert_eq!(report.text_source, TextSourceKind::Ocr);
+        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
         assert_eq!(
             report.occurrences.expect("expected value in test").items,
             vec![]
@@ -975,7 +975,7 @@ mod tests {
         .expect("expected value in test");
 
         assert_eq!(pdf.text_source, TextSourceKind::EmbeddedText);
-        assert_eq!(img.text_source, TextSourceKind::Ocr);
+        assert_eq!(img.text_source, TextSourceKind::ImageRaster);
         assert_eq!(unk.text_source, TextSourceKind::Unknown);
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
         .expect("expected value in test");
         assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
         assert_eq!(report.kind, InputFileKind::Image);
-        assert_eq!(report.text_source, TextSourceKind::Ocr);
+        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
     }
 
     #[test]

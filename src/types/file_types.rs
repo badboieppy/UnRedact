@@ -35,7 +35,7 @@ pub enum InputFileKind {
 #[serde(rename_all = "snake_case")]
 pub enum TextSourceKind {
     EmbeddedText,
-    Ocr,
+    ImageRaster,
     Unknown,
 }
 
@@ -402,5 +402,12 @@ mod tests {
         assert!(run.measured_dpi.is_none());
         assert!(run.char_advances_pt.is_empty());
         assert!(run.char_advances_px.is_empty());
+    }
+
+    #[test]
+    fn text_source_kind_serializes_image_raster() {
+        let value = TextSourceKind::ImageRaster;
+        let json = serde_json::to_string(&value).expect("expected value in test");
+        assert_eq!(json, "\"image_raster\"");
     }
 }
