@@ -4206,6 +4206,7 @@ pub use redaction_impl::{
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+    use std::time::Instant;
 
     use lopdf::{Document, Object, ObjectId};
 
@@ -4225,7 +4226,7 @@ mod visual_guess_score_impl {
     const OVERLAY_TEXT_COLOR: [f32; 3] = [0.0_f32, 0.0_f32, 0.0_f32];
     const OVERLAY_BORDER_WIDTH: f32 = 1.0_f32;
     const CONTEXT_ALIGNMENT_MAX_DIFF: f32 = 0.22_f32;
-    const MAX_VISUAL_SCORE_DPI: f32 = 96.0_f32;
+    const MAX_VISUAL_SCORE_DPI: f32 = 72.0_f32;
     const ENABLE_VISUAL_RERANK: bool = false;
     const VISUAL_RERANK_TOP_K: usize = 3;
     const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.35_f32;
@@ -4395,36 +4396,29 @@ mod visual_guess_score_impl {
         let annotator = PdfAnnotator;
         let context_overlays_by_redaction =
             build_context_overlays_by_redaction(&overlays_by_redaction);
-        let context_overlays = context_overlays_by_redaction
-            .values()
-            .flat_map(|items| items.iter().cloned())
-            .collect::<Vec<_>>();
-        let annotated_bytes = annotator.annotate(
-            &inputs.pdf_bytes,
-            &[],
-            &inputs.overlays,
-            OVERLAY_TEXT_COLOR,
-            OVERLAY_TEXT_COLOR,
-            OVERLAY_BORDER_WIDTH,
-        )?;
-        let context_annotated_bytes = if context_overlays.is_empty() {
-            None
-        } else {
-            Some(annotator.annotate(
+        let (annotated_bytes, annotate_overlay_ms) = {
+            let annotate_overlay_started = Instant::now();
+            let bytes = annotator.annotate(
                 &inputs.pdf_bytes,
                 &[],
-                &context_overlays,
+                &inputs.overlays,
                 OVERLAY_TEXT_COLOR,
                 OVERLAY_TEXT_COLOR,
                 OVERLAY_BORDER_WIDTH,
-            )?)
+            )?;
+            (bytes, annotate_overlay_started.elapsed().as_millis())
         };
+        let annotate_context_ms = 0_u128;
 
-        let base_renderer = HayroRenderer::new_from_bytes(&inputs.pdf_bytes)?;
-        let overlay_renderer = HayroRenderer::new_from_bytes(&annotated_bytes)?;
-        let context_renderer = match context_annotated_bytes.as_deref() {
-            Some(bytes) => Some(HayroRenderer::new_from_bytes(bytes)?),
-            None => None,
+        let (base_renderer, overlay_renderer, renderer_init_ms) = {
+            let renderer_init_started = Instant::now();
+            let base_renderer = HayroRenderer::new_from_bytes(&inputs.pdf_bytes)?;
+            let overlay_renderer = HayroRenderer::new_from_bytes(&annotated_bytes)?;
+            (
+                base_renderer,
+                overlay_renderer,
+                renderer_init_started.elapsed().as_millis(),
+            )
         };
         let mut pages_to_render = BTreeSet::<u32>::new();
         for overlays in overlays_by_redaction.values() {
@@ -4434,18 +4428,15 @@ mod visual_guess_score_impl {
         }
         let mut base_pages = BTreeMap::<u32, RenderedPage>::new();
         let mut overlay_pages = BTreeMap::<u32, RenderedPage>::new();
-        let mut context_pages = BTreeMap::<u32, RenderedPage>::new();
+        let pages_render_started = Instant::now();
         for page_index in pages_to_render {
             let base = base_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
             let overlay =
                 overlay_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
             base_pages.insert(page_index, base);
             overlay_pages.insert(page_index, overlay);
-            if let Some(renderer) = &context_renderer {
-                let context = renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
-                context_pages.insert(page_index, context);
-            }
         }
+        let page_render_ms = pages_render_started.elapsed().as_millis();
 
         let mut rows_with_top_guess = 0_usize;
         let mut context_rows_scored = 0_usize;
@@ -4456,6 +4447,7 @@ mod visual_guess_score_impl {
         let mut rerank_rows_scored = 0_usize;
         let mut rerank_top1_changed = 0_usize;
         let mut rerank_gain_sum = 0.0_f64;
+        let row_scoring_started = Instant::now();
         for (index, (guess, redaction)) in guesses
             .iter_mut()
             .zip(redactions.redactions.iter())
@@ -4504,24 +4496,22 @@ mod visual_guess_score_impl {
             };
 
             if let Some(context_overlays) = context_overlays_by_redaction.get(&index) {
-                if let Some(context_page) = context_pages.get(&redaction.page_index) {
-                    if let Some(context_window_bbox) =
-                        union_overlay_bbox(context_overlays).map(|bbox| pad_rect(bbox, page_box))
-                    {
-                        if let Some(context_score) = score_row_overlay(
-                            base_page,
-                            context_page,
-                            page_box,
-                            context_window_bbox,
-                            redaction.bbox,
-                            effective_min_ink_pixels,
-                        ) {
-                            context_rows_scored += 1;
-                            if context_score.mean_abs_diff > CONTEXT_ALIGNMENT_MAX_DIFF {
-                                context_rows_rejected += 1;
-                                guess.visual_reason = Some("context_alignment_failed".to_owned());
-                                continue;
-                            }
+                if let Some(context_window_bbox) =
+                    union_overlay_bbox(context_overlays).map(|bbox| pad_rect(bbox, page_box))
+                {
+                    if let Some(context_score) = score_row_overlay(
+                        base_page,
+                        overlay_page,
+                        page_box,
+                        context_window_bbox,
+                        redaction.bbox,
+                        effective_min_ink_pixels,
+                    ) {
+                        context_rows_scored += 1;
+                        if context_score.mean_abs_diff > CONTEXT_ALIGNMENT_MAX_DIFF {
+                            context_rows_rejected += 1;
+                            guess.visual_reason = Some("context_alignment_failed".to_owned());
+                            continue;
                         }
                     }
                 }
@@ -4675,6 +4665,15 @@ mod visual_guess_score_impl {
             rerank_mean_gain,
             VISUAL_RERANK_TOP_K,
             VISUAL_RERANK_BLEND_WEIGHT
+        ));
+        diagnostics.push(format!(
+            "visual_score_timing=annotate_overlay_ms={} annotate_context_ms={} renderer_init_ms={} page_render_ms={} row_scoring_ms={} pages_rendered={}",
+            annotate_overlay_ms,
+            annotate_context_ms,
+            renderer_init_ms,
+            page_render_ms,
+            row_scoring_started.elapsed().as_millis(),
+            base_pages.len()
         ));
         Ok(diagnostics)
     }
