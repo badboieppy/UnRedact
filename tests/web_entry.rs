@@ -41,7 +41,7 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
     let web_result = run(UnredactWebRequest {
         input_name: input.to_string_lossy().to_string(),
         pdf_bytes,
-        dictionary_bytes: None,
+        dictionary_file_bytes: None,
         cfg,
     });
     assert!(

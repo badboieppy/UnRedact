@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::logic::{
-    encode_outputs, run_redaction_guessing_component, BytesPipelineRequest, EncodedPipelineOutputs,
+    encode_outputs, run_dictionary_list_convertion_component, run_redaction_guessing_component,
+    BytesPipelineRequest, DictionaryListInput, DictionaryListRequest, EncodedPipelineOutputs,
     PipelineConfig,
 };
 
@@ -9,7 +10,7 @@ use crate::logic::{
 pub struct UnredactWebRequest {
     pub input_name: String,
     pub pdf_bytes: Vec<u8>,
-    pub dictionary_bytes: Option<Vec<u8>>,
+    pub dictionary_file_bytes: Option<Vec<u8>>,
     pub cfg: PipelineConfig,
 }
 
@@ -23,10 +24,20 @@ pub struct UnredactWebOutputs {
 
 #[inline]
 pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
+    let max_dictionary = req.cfg.guess.max_dictionary;
+    let dictionary_input = req
+        .dictionary_file_bytes
+        .map(DictionaryListInput::FileBytes)
+        .unwrap_or(DictionaryListInput::Missing);
+    let dictionary_outputs = run_dictionary_list_convertion_component(DictionaryListRequest {
+        dictionary_input,
+        max_dictionary,
+    })?;
     let outputs = run_redaction_guessing_component(BytesPipelineRequest {
         input_name: req.input_name,
         pdf_bytes: req.pdf_bytes,
-        dictionary_bytes: req.dictionary_bytes,
+        dictionary_entries: dictionary_outputs.dictionary_entries,
+        dictionary_diagnostics: dictionary_outputs.dictionary_diagnostics,
         cfg: req.cfg,
     })?;
     let encoded: EncodedPipelineOutputs = encode_outputs(&outputs)?;

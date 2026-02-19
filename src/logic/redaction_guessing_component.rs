@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use crate::data::dictionary_data::DictionaryData;
 use crate::data::fonts_data::FontsData;
 use crate::data::redactions_data::RedactionsData;
 use crate::data::visualization_data::VisualizationData;
@@ -11,10 +10,9 @@ use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 pub fn run_redaction_guessing_component(
     req: BytesPipelineRequest,
 ) -> Result<BytesPipelineOutputs, String> {
-    let component_started = Instant::now(); 
+    let component_started = Instant::now();
     let redactions_data = RedactionsData::new();
     let fonts_data = FontsData::new();
-    let dictionary_data = DictionaryData::new();
     let visualization_data = VisualizationData::new();
 
     let redactions_started = Instant::now();
@@ -43,16 +41,12 @@ pub fn run_redaction_guessing_component(
     let fonts_ms = fonts_started.elapsed().as_millis();
 
     let guess_started = Instant::now();
-    let dictionary_inputs = dictionary_data.load_dictionary_from_bytes(
-        req.dictionary_bytes.as_deref(),
-        req.cfg.guess.max_dictionary,
-    )?;
     let mut guess_report = run_guess_from_bytes(RunGuessFromBytesRequest {
         pdf_name: &req.input_name,
         pdf_bytes: &req.pdf_bytes,
         redactions: &redactions,
-        dictionary: &dictionary_inputs.dictionary,
-        diagnostics: &dictionary_inputs.diagnostics,
+        dictionary: &req.dictionary_entries,
+        diagnostics: &req.dictionary_diagnostics,
         cfg: &req.cfg.guess,
     })?;
     let guess_ms = guess_started.elapsed().as_millis();

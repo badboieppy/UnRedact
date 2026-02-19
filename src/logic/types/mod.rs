@@ -43,7 +43,8 @@ pub struct OutputFilePaths {
 pub struct BytesPipelineRequest {
     pub input_name: String,
     pub pdf_bytes: Vec<u8>,
-    pub dictionary_bytes: Option<Vec<u8>>,
+    pub dictionary_entries: Vec<String>,
+    pub dictionary_diagnostics: Vec<String>,
     pub cfg: PipelineConfig,
 }
 

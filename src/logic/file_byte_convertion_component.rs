@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use crate::data::dictionary_data::DictionaryData;
 use crate::data::redactions_data::RedactionsData;
 use crate::data::visualization_data::VisualizationData;
 use crate::logic::types::{BytesPipelineOutputs, OutputFilePaths};
@@ -17,15 +16,6 @@ pub struct EncodedPipelineOutputs {
 pub fn read_input_pdf_bytes(input: &Path) -> Result<Vec<u8>, String> {
     let redactions_data = RedactionsData::new();
     redactions_data.read_input_bytes(input)
-}
-
-#[inline]
-pub fn read_dictionary_bytes(dictionary_path: Option<&Path>) -> Result<Option<Vec<u8>>, String> {
-    let dictionary_data = DictionaryData::new();
-    match dictionary_path {
-        Some(path) => dictionary_data.read_dictionary_bytes(path).map(Some),
-        None => Ok(None),
-    }
 }
 
 #[inline]

@@ -6,9 +6,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::logic::{
-    build_output_file_paths, read_dictionary_bytes, read_input_pdf_bytes,
-    run_redaction_guessing_component, write_encoded_outputs, BytesPipelineRequest, OutputFilePaths,
-    PipelineConfig,
+    build_output_file_paths, read_input_pdf_bytes, run_dictionary_list_convertion_component,
+    run_redaction_guessing_component, write_encoded_outputs, BytesPipelineRequest,
+    DictionaryListInput, DictionaryListRequest, OutputFilePaths, PipelineConfig,
 };
 use crate::types::guess_types::GuessConfig;
 use crate::types::visualizer_config::VisualizerConfig;
@@ -138,6 +138,7 @@ pub fn run_batch_from_paths(
 
 #[inline]
 pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String> {
+    let max_dictionary = req.cfg.guess.max_dictionary;
     let pipeline_cfg = PipelineConfig {
         include_details: req.cfg.include_details,
         include_full_page_rects: req.cfg.include_full_page_rects,
@@ -148,10 +149,20 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         visualizer: req.cfg.visualizer,
     };
     let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
+    let dictionary_input = req
+        .dictionary_path
+        .clone()
+        .map(DictionaryListInput::FilePath)
+        .unwrap_or(DictionaryListInput::Missing);
+    let dictionary_outputs = run_dictionary_list_convertion_component(DictionaryListRequest {
+        dictionary_input,
+        max_dictionary,
+    })?;
     let bytes_req = BytesPipelineRequest {
         input_name: req.input.to_string_lossy().to_string(),
         pdf_bytes: read_input_pdf_bytes(&req.input)?,
-        dictionary_bytes: read_dictionary_bytes(req.dictionary_path.as_deref())?,
+        dictionary_entries: dictionary_outputs.dictionary_entries,
+        dictionary_diagnostics: dictionary_outputs.dictionary_diagnostics,
         cfg: pipeline_cfg,
     };
     let bytes_outputs = run_redaction_guessing_component(bytes_req)?;
