@@ -2,8 +2,7 @@ use std::time::Instant;
 
 use crate::data::fonts_data::FontsData;
 use crate::data::redactions_data::RedactionsData;
-use crate::data::visualization_data::VisualizationData;
-use crate::logic::types::{BytesPipelineOutputs, BytesPipelineRequest};
+use crate::logic::types::{BytesPipelineOutputs, BytesPipelineRequest, VisualizationPayload};
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 
 const INCLUDE_FULL_PAGE_RECTS: bool = false;
@@ -12,44 +11,46 @@ const INCLUDE_FULL_PAGE_RECTS: bool = false;
 pub fn run_redaction_guessing_component(
     req: BytesPipelineRequest,
 ) -> Result<BytesPipelineOutputs, String> {
+    let BytesPipelineRequest {
+        input_name,
+        pdf_bytes,
+        dictionary_entries,
+        dictionary_diagnostics,
+        cfg,
+    } = req;
     let component_started = Instant::now();
     let redactions_data = RedactionsData::new();
     let fonts_data = FontsData::new();
-    let visualization_data = VisualizationData::new();
 
     let redactions_started = Instant::now();
     let redaction_cfg = RedactionFinderConfig {
-        include_details: req.cfg.include_details,
+        include_details: cfg.include_details,
         mode: RedactionMode::All,
         include_full_page_rects: INCLUDE_FULL_PAGE_RECTS,
-        enable_image_analysis: req.cfg.enable_image_analysis,
-        raster_dpi: req.cfg.raster_dpi,
+        enable_image_analysis: cfg.enable_image_analysis,
+        raster_dpi: cfg.raster_dpi,
     };
-    let output = if req.cfg.enable_image_analysis {
-        let renderer = redactions_data.build_renderer(&req.pdf_bytes)?;
-        run_redaction_scan_from_bytes(&req.pdf_bytes, Some(&renderer), redaction_cfg)?
+    let output = if cfg.enable_image_analysis {
+        let renderer = redactions_data.build_renderer(&pdf_bytes)?;
+        run_redaction_scan_from_bytes(&pdf_bytes, Some(&renderer), redaction_cfg)?
     } else {
-        run_redaction_scan_from_bytes(&req.pdf_bytes, None, redaction_cfg)?
+        run_redaction_scan_from_bytes(&pdf_bytes, None, redaction_cfg)?
     };
-    let redactions = build_report_from_input_name(&req.input_name, output);
+    let redactions = build_report_from_input_name(&input_name, output);
     let redactions_ms = redactions_started.elapsed().as_millis();
 
     let fonts_started = Instant::now();
-    let fonts = fonts_data.detect_fonts_from_bytes(
-        &req.input_name,
-        &req.pdf_bytes,
-        req.cfg.include_details,
-    )?;
+    let fonts = fonts_data.detect_fonts_from_bytes(&input_name, &pdf_bytes, cfg.include_details)?;
     let fonts_ms = fonts_started.elapsed().as_millis();
 
     let guess_started = Instant::now();
     let mut guess_report = run_guess_from_bytes(RunGuessFromBytesRequest {
-        pdf_name: &req.input_name,
-        pdf_bytes: &req.pdf_bytes,
+        pdf_name: &input_name,
+        pdf_bytes: &pdf_bytes,
         redactions: &redactions,
-        dictionary: &req.dictionary_entries,
-        diagnostics: &req.dictionary_diagnostics,
-        cfg: &req.cfg.guess,
+        dictionary: &dictionary_entries,
+        diagnostics: &dictionary_diagnostics,
+        cfg: &cfg.guess,
     })?;
     let guess_ms = guess_started.elapsed().as_millis();
     guess_report
@@ -62,25 +63,22 @@ pub fn run_redaction_guessing_component(
         .diagnostics
         .push(format!("timing_ms stage=guess value={guess_ms}"));
 
-    let mut visualize_ms = 0_u128;
-    let mut visualized_pdf_bytes = None::<Vec<u8>>;
-    if req.cfg.visualize {
-        let visualize_started = Instant::now();
+    let visualization_payload = if cfg.visualize {
+        let visualize_payload_started = Instant::now();
         let font_runs = fonts_data
-            .load_font_runs_from_bytes(&req.input_name, &req.pdf_bytes)?
+            .load_font_runs_from_bytes(&input_name, &pdf_bytes)?
             .report;
-        visualized_pdf_bytes = Some(visualization_data.render_visualized_pdf_from_bytes(
-            &req.pdf_bytes,
-            &redactions,
-            Some(&guess_report),
-            Some(&font_runs),
-            req.cfg.visualizer,
-        )?);
-        visualize_ms = visualize_started.elapsed().as_millis();
-    }
-    guess_report
-        .diagnostics
-        .push(format!("timing_ms stage=visualize value={visualize_ms}"));
+        guess_report.diagnostics.push(format!(
+            "timing_ms stage=visualize_payload value={}",
+            visualize_payload_started.elapsed().as_millis()
+        ));
+        Some(VisualizationPayload {
+            pdf_bytes,
+            font_runs,
+        })
+    } else {
+        None
+    };
     guess_report.diagnostics.push(format!(
         "timing_ms stage=orchestrator_total value={}",
         component_started.elapsed().as_millis()
@@ -90,7 +88,8 @@ pub fn run_redaction_guessing_component(
         redactions,
         fonts,
         guesses: guess_report,
-        visualized_pdf_bytes,
+        visualization_payload,
+        visualized_pdf_bytes: None,
     })
 }
 

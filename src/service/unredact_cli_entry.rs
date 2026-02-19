@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::logic::{
     build_output_file_paths, read_input_pdf_bytes, run_dictionary_list_convertion_component,
-    run_redaction_guessing_component, write_encoded_outputs, BytesPipelineRequest,
-    DictionaryListInput, DictionaryListRequest, OutputFilePaths, PipelineConfig,
+    run_redaction_guessing_component, run_visualization_render_component, write_encoded_outputs,
+    BytesPipelineRequest, DictionaryListInput, DictionaryListRequest, OutputFilePaths,
+    PipelineConfig, VisualizationRenderRequest,
 };
 use crate::types::guess_types::GuessConfig;
 use crate::types::visualizer_config::VisualizerConfig;
@@ -141,7 +142,25 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         dictionary_diagnostics: dictionary_outputs.dictionary_diagnostics,
         cfg: pipeline_cfg,
     };
-    let bytes_outputs = run_redaction_guessing_component(bytes_req)?;
+    let mut bytes_outputs = run_redaction_guessing_component(bytes_req)?;
+    let visualize_ms = if req.cfg.visualize {
+        let visualize_started = Instant::now();
+        let rendered = run_visualization_render_component(VisualizationRenderRequest {
+            redactions: &bytes_outputs.redactions,
+            guesses: &bytes_outputs.guesses,
+            payload: bytes_outputs.visualization_payload.as_ref(),
+            visualizer: req.cfg.visualizer,
+        })?;
+        bytes_outputs.visualized_pdf_bytes = rendered;
+        visualize_started.elapsed().as_millis()
+    } else {
+        0_u128
+    };
+    bytes_outputs
+        .guesses
+        .diagnostics
+        .push(format!("timing_ms stage=visualize value={visualize_ms}"));
+    bytes_outputs.visualization_payload = None;
     let encoded_outputs = crate::logic::encode_outputs(&bytes_outputs)?;
     write_encoded_outputs(&output_paths, &encoded_outputs)?;
     Ok(UnredactServiceOutputs {

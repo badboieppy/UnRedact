@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::types::file_types::FontDetectionReport;
+use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
 use crate::types::visualizer_config::VisualizerConfig;
@@ -47,9 +47,16 @@ pub struct BytesPipelineRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VisualizationPayload {
+    pub pdf_bytes: Vec<u8>,
+    pub font_runs: FontRunReport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BytesPipelineOutputs {
     pub redactions: RedactionReport,
     pub fonts: FontDetectionReport,
     pub guesses: GuessReport,
+    pub visualization_payload: Option<VisualizationPayload>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }

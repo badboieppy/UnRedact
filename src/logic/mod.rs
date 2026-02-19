@@ -2,6 +2,7 @@ pub mod dictionary_list_convertion_component;
 pub mod file_byte_convertion_component;
 pub mod redaction_guessing_component;
 pub mod types;
+pub mod visualization_render_component;
 pub use dictionary_list_convertion_component::{
     run_dictionary_list_convertion_component, DictionaryListInput, DictionaryListOutputs,
     DictionaryListRequest,
@@ -15,4 +16,10 @@ pub use redaction_guessing_component::{
     run_redaction_guessing_component, run_redaction_scan, run_redaction_scan_from_bytes,
     RunGuessFromBytesRequest, RunGuessRequest,
 };
-pub use types::{BytesPipelineOutputs, BytesPipelineRequest, OutputFilePaths, PipelineConfig};
+pub use types::{
+    BytesPipelineOutputs, BytesPipelineRequest, OutputFilePaths, PipelineConfig,
+    VisualizationPayload,
+};
+pub use visualization_render_component::{
+    run_visualization_render_component, VisualizationRenderRequest,
+};
