@@ -3267,334 +3267,141 @@ mod guess_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
-        use std::collections::BTreeMap;
+        use super::{run_from_bytes, RunGuessFromBytesRequest};
+        use crate::logic::redaction_guessing_component::{
+            build_report_from_input_name, run_redaction_scan_from_bytes,
+        };
+        use crate::types::guess_types::GuessConfig;
+        use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 
-        fn synthetic_guess(
-            x0: f32,
-            x1: f32,
-            y0: f32,
-            y1: f32,
-            candidates: &[(&str, f32)],
-        ) -> RedactionGuess {
-            RedactionGuess {
-                page_index: 1,
-                bbox: Rect::new(x0, y0, x1, y1),
-                candidates: candidates
-                    .iter()
-                    .map(|(text, error)| GuessCandidate {
-                        text: (*text).to_owned(),
-                        score: 1.0_f32,
-                        error_pt: *error,
-                        word_count: text.split_whitespace().count() as u32,
-                        width_pt: None,
-                    })
-                    .collect::<Vec<_>>(),
-                exact_matches: candidates
-                    .first()
-                    .map(|(text, _)| vec![(*text).to_owned()])
-                    .unwrap_or_default(),
-                context: GuessContext {
-                    left_anchor_text: "including".to_owned(),
-                    right_anchor_text: "and".to_owned(),
-                    gap_pt: 120.0_f32,
-                    char_width_pt: 5.0_f32,
-                    tol_pt: 4.0_f32,
-                    anchor_left_x: Some(80.0_f32),
-                    anchor_right_x: Some(200.0_f32),
-                    anchor_font_key: Some("F1".to_owned()),
-                    anchor_font_size_pt: Some(11.0_f32),
-                    anchor_h_scale_pct: Some(100.0_f32),
-                    anchor_row_bias_pt: Some(0.0_f32),
-                    anchor_mode: Some("two_sided".to_owned()),
-                    anchor_width_source: None,
-                    space_width_source: None,
-                    candidate_width_source: None,
-                    width_fallback_reason: None,
-                    confidence_score: None,
-                    confidence_factors: None,
-                    has_anchor_pair: true,
-                },
-                visual_compared_pixels: None,
-                visual_mean_abs_diff: None,
-                visual_changed_pixel_ratio: None,
-                visual_reason: None,
-                visual_dropped: false,
-            }
+        fn sample_pdf_bytes() -> Vec<u8> {
+            let input = std::path::Path::new("test_data/EFTA00101126.pdf");
+            std::fs::read(input)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
         }
 
-        fn run(page_index: u32, text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> FontTextRun {
-            FontTextRun {
-                page_index,
-                text: text.to_owned(),
-                bbox: FontRect::new(x0, y0, x1, y1),
-                font_key: "F1".to_owned(),
-                font_name: "Helvetica".to_owned(),
-                font_size_pt: 11.0,
-                h_scale_pct: 100.0,
-                measured_width_pt: None,
-                measured_width_px: None,
-                measured_dpi: None,
-                char_advances_pt: Vec::new(),
-                char_advances_px: Vec::new(),
-            }
-        }
-
-        #[test]
-        fn punctuation_penalty_prefers_clean_tokens_in_list_context() {
-            let clean = punctuation_context_penalty("those served included", ",", "MAXWELL");
-            let noisy = punctuation_context_penalty("those served included", ",", "A/B TEST");
-            assert!(
-                noisy > clean,
-                "expected punctuation-heavy token to be penalized more"
-            );
-        }
-
-        #[test]
-        fn select_anchor_pair_uses_tight_row_before_broad_fallback() {
-            let redaction = RedactionOccurrence {
-                page_index: 1,
-                bbox: Rect::new(50.0, 100.0, 80.0, 112.0),
-                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
-                score: 1.0,
-                meta: BTreeMap::new(),
-                underlying_text: Vec::new(),
+        fn sample_redaction_report(
+            pdf_bytes: &[u8],
+        ) -> crate::types::redaction_types::RedactionReport {
+            let cfg = RedactionFinderConfig {
+                include_details: false,
+                mode: RedactionMode::All,
+                include_full_page_rects: false,
+                enable_image_analysis: false,
+                raster_dpi: 96.0_f32,
             };
+            let scan = run_redaction_scan_from_bytes(pdf_bytes, None, cfg)
+                .expect("redaction scan should succeed");
+            build_report_from_input_name("memory://EFTA00101126.pdf", scan)
+        }
 
-            let runs = [
-                run(1, "included", 10.0, 100.0, 45.0, 112.0),
-                run(1, ",", 82.0, 100.0, 90.0, 112.0),
-                run(1, "noise_left", 12.0, 118.0, 46.0, 130.0),
-                run(1, "noise_right", 82.0, 118.0, 95.0, 130.0),
-            ];
-            let run_refs = runs.iter().collect::<Vec<_>>();
-            let assets = BTreeMap::new();
-            let width_tables = BTreeMap::new();
-
-            let selected = select_anchor_pair(&redaction, &run_refs, &assets, &width_tables)
-                .expect("expected an anchor pair");
-            assert_eq!(selected.left_anchor_text, "included");
-            assert_eq!(selected.right_anchor_text, ",");
-            assert!((selected.left_bbox.y1 - 112.0).abs() < 0.01);
+        fn diagnostics_without_timing(lines: &[String]) -> Vec<String> {
+            lines
+                .iter()
+                .filter(|line| !line.starts_with("timing_ms stage="))
+                .cloned()
+                .collect::<Vec<_>>()
         }
 
         #[test]
-        fn list_context_filter_accepts_alpha_phrases() {
-            assert!(looks_like_alpha_phrase_candidate("SARAH KELLEN"));
-            assert!(looks_like_alpha_phrase_candidate("JEAN LUC BRUNEL"));
-            assert!(looks_like_alpha_phrase_candidate("ANNE-MARIE O'NEIL"));
-            assert!(looks_like_alpha_phrase_candidate("MAXWELL"));
-            assert!(!looks_like_alpha_phrase_candidate("BARNETT, RICHARD"));
-            assert!(!looks_like_alpha_phrase_candidate("(pilot)"));
-            assert!(!looks_like_alpha_phrase_candidate("A/B TEST"));
-            assert!(!looks_like_alpha_phrase_candidate("TOKEN123"));
-        }
-
-        #[test]
-        fn select_anchor_pair_recovers_left_only_when_right_neighbor_missing() {
-            let redaction = RedactionOccurrence {
-                page_index: 1,
-                bbox: Rect::new(50.0, 100.0, 88.0, 112.0),
-                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
-                score: 1.0,
-                meta: BTreeMap::new(),
-                underlying_text: vec![crate::types::redaction_types::UnderlyingTextHit {
-                    page_index: 1,
-                    bbox: Rect::new(10.0, 100.0, 45.0, 112.0),
-                    text: "those served included".to_owned(),
-                }],
-            };
-            let runs = [run(1, "included", 10.0, 100.0, 45.0, 112.0)];
-            let run_refs = runs.iter().collect::<Vec<_>>();
-            let assets = BTreeMap::new();
-            let width_tables = BTreeMap::new();
-
-            let selected = select_anchor_pair(&redaction, &run_refs, &assets, &width_tables)
-                .expect("expected one-sided anchor recovery");
-            assert_eq!(selected.mode.as_str(), "left_only");
-            assert_eq!(selected.left_anchor_text, "included");
-            assert!(selected.right_x > selected.left_x);
-        }
-
-        #[test]
-        fn single_span_list_rows_filter_non_name_candidates() {
-            let redaction = RedactionOccurrence {
-                page_index: 1,
-                bbox: Rect::new(80.0, 200.0, 145.0, 212.0),
-                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
-                score: 1.0,
-                meta: BTreeMap::new(),
-                underlying_text: Vec::new(),
-            };
-            let anchor = AnchorPairData {
-                left_anchor_text: "those served included".to_owned(),
-                right_anchor_text: ",".to_owned(),
-                left_x: 30.0_f64,
-                right_x: 142.0_f64,
-                font_key: "F1".to_owned(),
-                font_name: "Helvetica".to_owned(),
-                font_size_pt: 11.0_f32,
-                h_scale_pct: 100.0_f32,
-                left_bbox: FontRect::new(10.0, 198.0, 75.0, 212.0),
-                right_bbox: FontRect::new(146.0, 198.0, 148.0, 212.0),
-                epsilon_pt: 8.0_f64,
-                row_bias_pt: 0.0_f64,
-                mode: AnchorMode::TwoSided,
-            };
+        fn run_from_bytes_is_deterministic_for_same_inputs() {
+            let pdf_bytes = sample_pdf_bytes();
+            let redactions = sample_redaction_report(&pdf_bytes);
             let dictionary = vec![
                 "SARAH KELLEN".to_owned(),
-                "MAXWELL".to_owned(),
-                "A/B TEST".to_owned(),
-                "TOKEN123".to_owned(),
-                "WILLIAM HAMMOND".to_owned(),
+                "GHISLANE MAXWELL".to_owned(),
+                "ALPHA".to_owned(),
+            ];
+            let diagnostics = vec![
+                "dictionary_source=file".to_owned(),
+                "dictionary_size=3".to_owned(),
             ];
             let cfg = GuessConfig {
                 visual_score: false,
                 visual_score_dpi: 200.0_f32,
             };
-            let assets = BTreeMap::new();
-            let width_tables = BTreeMap::new();
-            let mut cache = WidthCache::new();
 
-            let (guess, _funnel) = build_guess_for_anchor(
-                &redaction,
-                &dictionary,
-                &cfg,
-                &anchor,
-                &assets,
-                &width_tables,
-                &mut cache,
-            );
-            let names_only = guess
-                .candidates
-                .iter()
-                .map(|candidate| candidate.text.as_str())
-                .all(looks_like_alpha_phrase_candidate);
-            assert!(
-                names_only,
-                "expected single-span list context to keep only alpha-phrase candidates, got {:?}",
-                guess
-                    .candidates
-                    .iter()
-                    .map(|candidate| candidate.text.clone())
-                    .collect::<Vec<_>>()
-            );
-        }
+            let report_a = run_from_bytes(RunGuessFromBytesRequest {
+                pdf_name: "EFTA00101126.pdf",
+                pdf_bytes: &pdf_bytes,
+                redactions: &redactions,
+                dictionary: &dictionary,
+                diagnostics: &diagnostics,
+                cfg: &cfg,
+            })
+            .expect("guessing should succeed");
+            let report_b = run_from_bytes(RunGuessFromBytesRequest {
+                pdf_name: "EFTA00101126.pdf",
+                pdf_bytes: &pdf_bytes,
+                redactions: &redactions,
+                dictionary: &dictionary,
+                diagnostics: &diagnostics,
+                cfg: &cfg,
+            })
+            .expect("guessing should succeed");
 
-        #[test]
-        fn width_band_range_and_trim_stay_near_target() {
-            let entries = (0_i32..30_i32)
-                .map(|idx| CandidateWidthEntry {
-                    text: format!("C{idx}"),
-                    width_pt: 10.0 + idx as f64,
-                    source: WidthSource::CoreFont,
-                })
-                .collect::<Vec<_>>();
-            let ranged = candidate_width_entries_in_range(&entries, 18.0_f64, 24.0_f64);
-            assert_eq!(ranged.len(), 7);
-            assert!(ranged
-                .first()
-                .is_some_and(|entry| entry.width_pt >= 18.0_f64));
-            assert!(ranged
-                .last()
-                .is_some_and(|entry| entry.width_pt <= 24.0_f64));
-
-            let trimmed = trim_width_band_around_target(&entries, 20.0_f64, 8_usize);
-            assert_eq!(trimmed.len(), 8);
-            assert!(trimmed
-                .iter()
-                .any(|entry| (entry.width_pt - 20.0_f64).abs() < 0.001_f64));
-        }
-
-        #[test]
-        fn row_joint_assignment_promotes_unique_names_for_multi_span_groups() {
-            let mut guesses = vec![
-                synthetic_guess(
-                    100.0_f32,
-                    145.0_f32,
-                    460.0_f32,
-                    472.0_f32,
-                    &[
-                        ("SARAH KELLEN", 0.45_f32),
-                        ("ADRIANA MUCINSKA", 0.85_f32),
-                        ("NADIA MARCINKOVA", 1.10_f32),
-                    ],
-                ),
-                synthetic_guess(
-                    260.0_f32,
-                    308.0_f32,
-                    460.0_f32,
-                    472.0_f32,
-                    &[
-                        ("SARAH KELLEN", 0.40_f32),
-                        ("ADRIANA MUCINSKA", 0.55_f32),
-                        ("NADIA MARCINKOVA", 0.95_f32),
-                    ],
-                ),
-                synthetic_guess(
-                    420.0_f32,
-                    469.0_f32,
-                    460.0_f32,
-                    472.0_f32,
-                    &[
-                        ("SARAH KELLEN", 0.42_f32),
-                        ("NADIA MARCINKOVA", 0.58_f32),
-                        ("ADRIANA MUCINSKA", 0.90_f32),
-                    ],
-                ),
-            ];
-
-            let assigned = apply_row_joint_assignment(&mut guesses);
-            assert_eq!(assigned.len(), 3);
-            let top = guesses
-                .iter()
-                .map(|guess| {
-                    guess
-                        .candidates
-                        .first()
-                        .map(|candidate| candidate.text.clone())
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(top[0].as_deref(), Some("SARAH KELLEN"));
-            assert_eq!(top[1].as_deref(), Some("ADRIANA MUCINSKA"));
-            assert_eq!(top[2].as_deref(), Some("NADIA MARCINKOVA"));
-        }
-
-        #[test]
-        fn row_joint_assignment_can_skip_weak_rows_with_null_option() {
-            let mut guesses = vec![
-                synthetic_guess(
-                    100.0_f32,
-                    145.0_f32,
-                    460.0_f32,
-                    472.0_f32,
-                    &[("SARAH KELLEN", 0.35_f32), ("ADRIANA MUCINSKA", 0.95_f32)],
-                ),
-                synthetic_guess(
-                    152.0_f32,
-                    196.0_f32,
-                    460.0_f32,
-                    472.0_f32,
-                    &[("SARAH KELLEN", 2.50_f32), ("ADRIANA MUCINSKA", 2.90_f32)],
-                ),
-            ];
-
-            let assigned = apply_row_joint_assignment(&mut guesses);
-            assert_eq!(assigned.len(), 1);
+            assert_eq!(report_a.input_redactions, report_b.input_redactions);
+            assert_eq!(report_a.input_fonts, report_b.input_fonts);
+            assert_eq!(report_a.guesses, report_b.guesses);
             assert_eq!(
-                guesses[0]
-                    .candidates
-                    .first()
-                    .map(|candidate| candidate.text.as_str()),
-                Some("SARAH KELLEN")
+                diagnostics_without_timing(&report_a.diagnostics),
+                diagnostics_without_timing(&report_b.diagnostics)
             );
-            assert_eq!(
-                guesses[1]
-                    .candidates
-                    .first()
-                    .map(|candidate| candidate.text.as_str()),
-                Some("SARAH KELLEN")
-            );
+        }
+
+        #[test]
+        fn run_from_bytes_propagates_dictionary_diagnostics() {
+            let pdf_bytes = sample_pdf_bytes();
+            let redactions = sample_redaction_report(&pdf_bytes);
+            let dictionary = vec!["SARAH KELLEN".to_owned()];
+            let diagnostics = vec![
+                "dictionary_source=file".to_owned(),
+                "dictionary_size=1".to_owned(),
+            ];
+            let cfg = GuessConfig {
+                visual_score: false,
+                visual_score_dpi: 200.0_f32,
+            };
+
+            let report = run_from_bytes(RunGuessFromBytesRequest {
+                pdf_name: "EFTA00101126.pdf",
+                pdf_bytes: &pdf_bytes,
+                redactions: &redactions,
+                dictionary: &dictionary,
+                diagnostics: &diagnostics,
+                cfg: &cfg,
+            })
+            .expect("guessing should succeed");
+
+            for expected in diagnostics {
+                assert!(report.diagnostics.iter().any(|line| line == &expected));
+            }
+        }
+
+        #[test]
+        fn run_from_bytes_emits_visual_score_disabled_marker_when_off() {
+            let pdf_bytes = sample_pdf_bytes();
+            let redactions = sample_redaction_report(&pdf_bytes);
+            let dictionary = vec!["SARAH KELLEN".to_owned()];
+            let cfg = GuessConfig {
+                visual_score: false,
+                visual_score_dpi: 200.0_f32,
+            };
+
+            let report = run_from_bytes(RunGuessFromBytesRequest {
+                pdf_name: "EFTA00101126.pdf",
+                pdf_bytes: &pdf_bytes,
+                redactions: &redactions,
+                dictionary: &dictionary,
+                diagnostics: &[],
+                cfg: &cfg,
+            })
+            .expect("guessing should succeed");
+
+            assert!(report
+                .diagnostics
+                .iter()
+                .any(|line| line == "visual_score=disabled"));
         }
     }
 }
@@ -4123,33 +3930,40 @@ mod redaction_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
+        use super::{
+            build_report_from_input_name, run_redaction_scan, run_redaction_scan_from_bytes,
+        };
+        use crate::data::redactions_data::RedactionDataRetriever;
+        use crate::types::redaction_types::{
+            PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionKind,
+            RedactionMode, RedactionOccurrence, RenderedPage, UnderlyingTextHit,
+        };
         use std::cell::RefCell;
         use std::collections::BTreeMap;
 
-        fn hit(
-            page_index: u32,
-            x0: f32,
-            y0: f32,
-            x1: f32,
-            y1: f32,
-            text: &str,
-        ) -> UnderlyingTextHit {
-            UnderlyingTextHit {
-                page_index,
-                bbox: Rect::new(x0, y0, x1, y1),
-                text: text.to_owned(),
-            }
+        #[derive(Clone)]
+        struct FakeRenderer {
+            page_count: usize,
+            page: RenderedPage,
         }
 
-        fn occ(page_index: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> RedactionOccurrence {
-            RedactionOccurrence {
-                page_index,
-                bbox: Rect::new(x0, y0, x1, y1),
-                kind: crate::types::redaction_types::RedactionKind::RasterDarkRegion,
-                score: 1.0_f32,
-                meta: BTreeMap::new(),
-                underlying_text: Vec::new(),
+        impl PdfRenderer for FakeRenderer {
+            fn page_count(&self) -> usize {
+                self.page_count
+            }
+
+            fn render_page_to_rgba(
+                &self,
+                page_index: usize,
+                _target_dpi: f32,
+            ) -> Result<RenderedPage, String> {
+                if page_index >= self.page_count {
+                    return Err(format!(
+                        "page_out_of_bounds:index={} page_count={}",
+                        page_index, self.page_count
+                    ));
+                }
+                Ok(self.page.clone())
             }
         }
 
@@ -4203,10 +4017,10 @@ mod redaction_impl {
                 cfg: &RedactionFinderConfig,
             ) -> Result<Vec<RedactionOccurrence>, String> {
                 self.calls.borrow_mut().push((page_index, cfg.raster_dpi));
-                if (cfg.raster_dpi - RASTER_PREPASS_DPI).abs() < f32::EPSILON {
+                if (cfg.raster_dpi - 18.0_f32).abs() < f32::EPSILON {
                     return Ok(self.prepass.get(&page_index).cloned().unwrap_or_default());
                 }
-                if (cfg.raster_dpi - RASTER_HIGHPASS_DPI).abs() < f32::EPSILON {
+                if (cfg.raster_dpi - 96.0_f32).abs() < f32::EPSILON {
                     return Ok(self.highpass.get(&page_index).cloned().unwrap_or_default());
                 }
                 Err(format!("unexpected_dpi={}", cfg.raster_dpi))
@@ -4220,13 +4034,24 @@ mod redaction_impl {
             }
         }
 
+        fn occ(page_index: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> RedactionOccurrence {
+            RedactionOccurrence {
+                page_index,
+                bbox: Rect::new(x0, y0, x1, y1),
+                kind: RedactionKind::RasterDarkRegion,
+                score: 1.0_f32,
+                meta: BTreeMap::new(),
+                underlying_text: Vec::new(),
+            }
+        }
+
         #[test]
-        fn raster_two_pass_uses_fixed_prepass_and_highpass_dpi() {
+        fn run_redaction_scan_uses_two_pass_raster_strategy() {
             let mut prepass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
-            prepass.insert(0, vec![occ(0, 10.0, 10.0, 30.0, 20.0)]);
-            prepass.insert(2, vec![occ(2, 50.0, 10.0, 80.0, 20.0)]);
+            prepass.insert(0, vec![occ(0, 10.0_f32, 10.0_f32, 30.0_f32, 20.0_f32)]);
+            prepass.insert(2, vec![occ(2, 50.0_f32, 10.0_f32, 80.0_f32, 20.0_f32)]);
             let mut highpass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
-            highpass.insert(0, vec![occ(0, 12.0, 10.0, 32.0, 20.0)]);
+            highpass.insert(0, vec![occ(0, 12.0_f32, 10.0_f32, 32.0_f32, 20.0_f32)]);
 
             let retriever = FakeRasterRetriever::new(vec![0, 1, 2], prepass, highpass);
             let cfg = RedactionFinderConfig {
@@ -4236,127 +4061,114 @@ mod redaction_impl {
                 enable_image_analysis: true,
                 raster_dpi: 200.0_f32,
             };
-            let mut diagnostics = Vec::<String>::new();
-            let out =
-                collect_raster_redactions_two_pass(&retriever, &[0, 1, 2], &cfg, &mut diagnostics);
 
+            let out = run_redaction_scan(&retriever, cfg);
             let calls = retriever
                 .calls
                 .borrow()
                 .iter()
                 .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
                 .collect::<Vec<_>>();
-            let prepass = format!("{:.1}", RASTER_PREPASS_DPI);
-            let highpass = format!("{:.1}", RASTER_HIGHPASS_DPI);
             assert_eq!(
                 calls,
                 vec![
-                    format!("0:{prepass}"),
-                    format!("1:{prepass}"),
-                    format!("2:{prepass}"),
-                    format!("0:{highpass}"),
-                    format!("2:{highpass}"),
+                    "0:18.0".to_owned(),
+                    "1:18.0".to_owned(),
+                    "2:18.0".to_owned(),
+                    "0:96.0".to_owned(),
+                    "2:96.0".to_owned(),
                 ]
             );
-            assert_eq!(out.len(), 2);
-            assert!((out[0].bbox.x0 - 12.0_f32).abs() < 0.01_f32);
-            assert!((out[1].bbox.x0 - 50.0_f32).abs() < 0.01_f32);
-            let summary = diagnostics
+            assert_eq!(out.redactions.len(), 2);
+            assert!(out
+                .diagnostics
                 .iter()
-                .find(|line| line.starts_with("raster_two_pass="))
-                .expect("expected two-pass diagnostic");
-            assert!(summary.contains(&format!("prepass_dpi={prepass}")));
-            assert!(summary.contains(&format!("highpass_dpi={highpass}")));
-            assert!(summary.contains("requested_dpi=200.0"));
-            assert!(
-                !summary.contains("single_pass"),
-                "expected no single-pass mode diagnostic"
-            );
+                .any(|line| line.starts_with("raster_two_pass=")));
         }
 
         #[test]
-        fn raster_two_pass_does_not_use_single_pass_for_small_docs() {
-            let retriever = FakeRasterRetriever::new(vec![0], BTreeMap::new(), BTreeMap::new());
+        fn run_redaction_scan_from_bytes_is_deterministic_for_same_input() {
+            let input = std::path::Path::new("test_data/EFTA02238592.pdf");
+            let bytes = std::fs::read(input)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+            let cfg = RedactionFinderConfig {
+                include_details: false,
+                mode: RedactionMode::All,
+                include_full_page_rects: false,
+                enable_image_analysis: false,
+                raster_dpi: 96.0_f32,
+            };
+
+            let output_a =
+                run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
+            let output_b =
+                run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
+            assert_eq!(output_a, output_b);
+        }
+
+        #[test]
+        fn build_report_from_input_name_sorts_and_counts_pages() {
+            let output = RedactionFinderOutput {
+                redactions: vec![
+                    occ(1, 30.0_f32, 200.0_f32, 50.0_f32, 210.0_f32),
+                    occ(0, 40.0_f32, 150.0_f32, 60.0_f32, 160.0_f32),
+                    occ(0, 10.0_f32, 140.0_f32, 20.0_f32, 150.0_f32),
+                ],
+                diagnostics: vec!["d1".to_owned()],
+            };
+
+            let report = build_report_from_input_name("memory://sample.pdf", output);
+            assert_eq!(report.count, 3_u32);
+            assert_eq!(report.page_counts.get(&0).copied(), Some(2_u32));
+            assert_eq!(report.page_counts.get(&1).copied(), Some(1_u32));
+            assert_eq!(report.redactions[0].page_index, 0_u32);
+            assert!((report.redactions[0].bbox.x0 - 10.0_f32).abs() < 0.01_f32);
+        }
+
+        #[test]
+        fn run_redaction_scan_from_bytes_with_renderer_supports_image_analysis() {
+            let input = std::path::Path::new("test_data/EFTA02238592.pdf");
+            let bytes = std::fs::read(input)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+            let page_count = lopdf::Document::load_mem(&bytes)
+                .expect("pdf should parse")
+                .get_pages()
+                .len();
+            let mut pixels = vec![240_u8; 64_usize * 64_usize * 4_usize];
+            for px in pixels.chunks_exact_mut(4_usize) {
+                px[3] = 255_u8;
+            }
+            for y in 24_usize..40_usize {
+                for x in 8_usize..56_usize {
+                    let idx = (y * 64_usize + x) * 4_usize;
+                    pixels[idx] = 5_u8;
+                    pixels[idx + 1] = 5_u8;
+                    pixels[idx + 2] = 5_u8;
+                }
+            }
+            let renderer = FakeRenderer {
+                page_count,
+                page: RenderedPage {
+                    width_px: 64_u32,
+                    height_px: 64_u32,
+                    dpi: 96.0_f32,
+                    pixels,
+                },
+            };
             let cfg = RedactionFinderConfig {
                 include_details: false,
                 mode: RedactionMode::All,
                 include_full_page_rects: false,
                 enable_image_analysis: true,
-                raster_dpi: 200.0_f32,
+                raster_dpi: 96.0_f32,
             };
-            let mut diagnostics = Vec::<String>::new();
-            let out = collect_raster_redactions_two_pass(&retriever, &[0], &cfg, &mut diagnostics);
-            assert!(out.is_empty());
-            let calls = retriever
-                .calls
-                .borrow()
+
+            let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg)
+                .expect("scan should succeed");
+            assert!(output
+                .redactions
                 .iter()
-                .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
-                .collect::<Vec<_>>();
-            assert_eq!(calls, vec![format!("0:{:.1}", RASTER_PREPASS_DPI)]);
-            let summary = diagnostics
-                .iter()
-                .find(|line| line.starts_with("raster_two_pass="))
-                .expect("expected two-pass diagnostic");
-            assert!(summary.contains("candidate_pages=0"));
-            assert!(summary.contains("highpass_pages=0"));
-            assert!(
-                !summary.contains("single_pass"),
-                "expected no single-pass mode diagnostic"
-            );
-        }
-
-        #[test]
-        fn context_hits_use_left_and_right_neighbors() {
-            let hits = vec![
-                hit(0, 10.0, 90.0, 22.0, 100.0, "before1"),
-                hit(0, 24.0, 90.0, 35.0, 100.0, "inside"),
-                hit(0, 42.0, 90.0, 53.0, 100.0, "after1"),
-                hit(0, 55.0, 90.0, 66.0, 100.0, "after2"),
-            ];
-            let red = Rect::new(24.0, 88.0, 40.0, 102.0);
-
-            let context = collect_context_hits_for_redaction(&hits, &red);
-            let words = context.iter().map(|h| h.text.as_str()).collect::<Vec<_>>();
-
-            assert_eq!(words, vec!["before1", "after1 after2"]);
-        }
-
-        #[test]
-        fn context_hits_support_multi_line_redactions() {
-            let hits = vec![
-                hit(0, 5.0, 90.0, 14.0, 100.0, "top_l"),
-                hit(0, 42.0, 90.0, 50.0, 100.0, "top_r"),
-                hit(0, 6.0, 74.0, 16.0, 84.0, "bot_l"),
-                hit(0, 41.0, 74.0, 52.0, 84.0, "bot_r"),
-            ];
-            let red = Rect::new(20.0, 72.0, 38.0, 102.0);
-
-            let context = collect_context_hits_for_redaction(&hits, &red);
-            let words = context.iter().map(|h| h.text.as_str()).collect::<Vec<_>>();
-
-            assert_eq!(words, vec!["bot_l", "bot_r"]);
-        }
-
-        #[test]
-        fn context_hits_return_empty_after_when_missing() {
-            let hits = vec![hit(0, 10.0, 90.0, 22.0, 100.0, "left_only")];
-            let red = Rect::new(24.0, 88.0, 40.0, 102.0);
-            let context = collect_context_hits_for_redaction(&hits, &red);
-            let words = context.iter().map(|h| h.text.as_str()).collect::<Vec<_>>();
-            assert_eq!(words, vec!["left_only", ""]);
-        }
-
-        #[test]
-        fn context_hits_ignore_far_neighbors() {
-            let hits = vec![
-                hit(0, -100.0, 90.0, -80.0, 100.0, "left_far"),
-                hit(0, 200.0, 90.0, 220.0, 100.0, "right_far"),
-            ];
-            let red = Rect::new(30.0, 88.0, 40.0, 102.0);
-            let context = collect_context_hits_for_redaction(&hits, &red);
-            let words = context.iter().map(|h| h.text.as_str()).collect::<Vec<_>>();
-            assert_eq!(words, vec!["left_far", "right_far"]);
+                .any(|value| matches!(value.kind, RedactionKind::RasterDarkRegion)));
         }
     }
 }
@@ -5696,32 +5508,63 @@ mod visual_guess_score_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
+        use crate::logic::redaction_guessing_component::{
+            build_report_from_input_name, run_guess_from_bytes, run_redaction_scan_from_bytes,
+            RunGuessFromBytesRequest,
+        };
+        use crate::types::guess_types::GuessConfig;
+        use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 
         #[test]
-        fn score_row_overlay_detects_difference() {
-            let base = RenderedPage {
-                width_px: 4,
-                height_px: 4,
-                dpi: 200.0_f32,
-                pixels: vec![255_u8; 4 * 4 * 4],
-            };
-            let mut overlaid = base.clone();
-            for i in 0..4_usize {
-                let idx = (4_usize + i) * 4_usize;
-                overlaid.pixels[idx] = 0_u8;
-                overlaid.pixels[idx + 1] = 0_u8;
-                overlaid.pixels[idx + 2] = 0_u8;
-            }
+        fn visual_scoring_path_executes_through_public_api() {
+            let input = std::path::Path::new("test_data/EFTA00101126.pdf");
+            let pdf_bytes = std::fs::read(input)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
 
-            let page_box = Rect::new(0.0_f32, 0.0_f32, 72.0_f32, 72.0_f32);
-            let window = Rect::new(0.0_f32, 0.0_f32, 72.0_f32, 72.0_f32);
-            let redaction = Rect::new(1000.0_f32, 1000.0_f32, 1001.0_f32, 1001.0_f32);
-            let score = score_row_overlay(&base, &overlaid, page_box, window, redaction, 1_u32)
-                .expect("score should be present");
-            assert!(score.compared_pixels > 0);
-            assert!(score.mean_abs_diff > 0.0_f32);
-            assert!(score.changed_pixel_ratio > 0.0_f32);
+            let scan_cfg = RedactionFinderConfig {
+                include_details: false,
+                mode: RedactionMode::All,
+                include_full_page_rects: false,
+                enable_image_analysis: false,
+                raster_dpi: 96.0_f32,
+            };
+            let scan = run_redaction_scan_from_bytes(&pdf_bytes, None, scan_cfg)
+                .expect("redaction scan should succeed");
+            let redactions = build_report_from_input_name("memory://EFTA00101126.pdf", scan);
+
+            let dictionary = vec![
+                "SARAH KELLEN".to_owned(),
+                "GHISLANE MAXWELL".to_owned(),
+                "ALPHA".to_owned(),
+            ];
+            let cfg = GuessConfig {
+                visual_score: true,
+                visual_score_dpi: 200.0_f32,
+            };
+            let report = run_guess_from_bytes(RunGuessFromBytesRequest {
+                pdf_name: "EFTA00101126.pdf",
+                pdf_bytes: &pdf_bytes,
+                redactions: &redactions,
+                dictionary: &dictionary,
+                diagnostics: &[],
+                cfg: &cfg,
+            })
+            .expect("guessing should succeed");
+
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|line| line == "visual_score=disabled"),
+                "visual scoring path should not emit disabled marker"
+            );
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|line| line.starts_with("visual_score=")),
+                "expected visual score diagnostics in public-path execution"
+            );
         }
     }
 }

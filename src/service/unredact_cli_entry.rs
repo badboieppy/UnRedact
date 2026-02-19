@@ -377,23 +377,102 @@ fn is_supported_batch_input(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
 
-    #[test]
-    fn supported_batch_input_only_accepts_pdf_files() {
-        assert!(is_supported_batch_input(Path::new("A.pdf")));
-        assert!(is_supported_batch_input(Path::new("A.PDF")));
-        assert!(!is_supported_batch_input(Path::new("A.txt")));
-        assert!(!is_supported_batch_input(Path::new("A")));
+    use super::{run_batch_from_paths, BatchFileStatus, UnredactServiceConfig};
+
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "unredact_service_batch_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            stamp
+        ))
     }
 
     #[test]
-    fn batch_output_dir_for_input_preserves_relative_path() {
-        let input_root = Path::new("C:/data/in");
-        let output_root = std::env::temp_dir().join("unredact_batch_path_test");
-        let input = Path::new("C:/data/in/a/b/report.pdf");
-        let out =
-            batch_output_dir_for_input(&output_root, input_root, input).expect("path should map");
-        assert!(out.ends_with(Path::new("a/b/report")));
+    fn run_batch_errors_when_directory_has_no_supported_files() {
+        let input_dir = test_dir("no_supported_files_input");
+        let output_dir = test_dir("no_supported_files_output");
+        std::fs::create_dir_all(&input_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", input_dir.display()));
+        std::fs::create_dir_all(&output_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+        std::fs::write(input_dir.join("notes.txt"), b"not a pdf").unwrap_or_else(|error| {
+            panic!(
+                "failed to create {}: {error}",
+                input_dir.join("notes.txt").display()
+            )
+        });
+
+        let result = run_batch_from_paths(
+            &input_dir,
+            &output_dir,
+            None,
+            UnredactServiceConfig::default(),
+        );
+        let error = result.expect_err("batch run should fail when no PDF files are present");
+        assert!(
+            error.contains("no supported input files found"),
+            "expected unsupported-input error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn run_batch_recurses_pdf_inputs_and_preserves_relative_output_paths() {
+        let input_dir = test_dir("nested_input");
+        let output_dir = test_dir("nested_output");
+        let nested_dir = input_dir.join("a").join("b");
+        std::fs::create_dir_all(&nested_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", nested_dir.display()));
+        std::fs::create_dir_all(&output_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+
+        let sample = Path::new("test_data/EFTA00101126.pdf");
+        let sample_bytes = std::fs::read(sample)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", sample.display()));
+        let nested_pdf = nested_dir.join("report.pdf");
+        std::fs::write(&nested_pdf, sample_bytes)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", nested_pdf.display()));
+        std::fs::write(input_dir.join("ignored.txt"), b"not a pdf").unwrap_or_else(|error| {
+            panic!(
+                "failed to write {}: {error}",
+                input_dir.join("ignored.txt").display()
+            )
+        });
+
+        let outputs = run_batch_from_paths(
+            &input_dir,
+            &output_dir,
+            Some(Path::new("assets/names.txt")),
+            UnredactServiceConfig::default(),
+        )
+        .expect("batch run should succeed");
+
+        assert_eq!(
+            outputs.results.len(),
+            1,
+            "expected only one supported PDF input"
+        );
+        assert_eq!(outputs.success_count, 1, "expected one successful item");
+        assert_eq!(outputs.failure_count, 0, "expected no failed items");
+
+        let item = &outputs.results[0];
+        assert_eq!(item.status, BatchFileStatus::Ok);
+        assert!(item.input.ends_with(Path::new("a/b/report.pdf")));
+        let guesses_path = item
+            .guesses_path
+            .as_ref()
+            .expect("batch output should include guesses path");
+        assert!(
+            guesses_path.exists(),
+            "expected output file {}",
+            guesses_path.display()
+        );
+        assert!(guesses_path.ends_with(Path::new("a/b/report/report.guesses.json")));
     }
 }

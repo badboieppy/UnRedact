@@ -1,7 +1,6 @@
 use std::path::Path;
 
-use unredact::logic::PipelineConfig;
-use unredact::service::unredact_web_entry::{run, UnredactWebRequest};
+use unredact::service::unredact_web_entry::{run, UnredactWebConfig, UnredactWebRequest};
 use unredact::types::guess_types::{GuessConfig, GuessReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
@@ -18,7 +17,7 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
     );
     let pdf_bytes = pdf_bytes_result.expect("pdf bytes should exist");
 
-    let cfg = PipelineConfig {
+    let cfg = UnredactWebConfig {
         include_details: false,
         enable_image_analysis: true,
         raster_dpi: 200.0_f32,

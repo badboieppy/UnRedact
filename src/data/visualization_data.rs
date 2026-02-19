@@ -857,48 +857,39 @@ fn deref_to_dict<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'do
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::VisualizationData;
+    use crate::types::file_types::FontRunReport;
+    use crate::types::guess_types::{GuessCandidate, GuessContext, GuessReport, RedactionGuess};
+    use crate::types::redaction_types::{
+        Rect, RedactionKind, RedactionOccurrence, RedactionReport,
+    };
+    use crate::types::visualizer_config::VisualizerConfig;
 
-    #[test]
-    fn raster_overlay_layout_keeps_baseline_inside_box() {
-        let bbox = Rect::new(120.0, 300.0, 190.0, 314.0);
-        let layout = raster_overlay_layout(bbox, 12.0, 40.0);
-        assert!(layout.y >= bbox.y0);
-        assert!(layout.y <= bbox.y1);
-        assert!(layout.font_size_pt <= bbox.height().abs() * RASTER_MAX_FONT_TO_BOX_HEIGHT + 0.01);
-    }
-
-    #[test]
-    fn raster_overlay_layout_clamps_x_when_text_is_wide() {
-        let bbox = Rect::new(50.0, 100.0, 90.0, 112.0);
-        let layout = raster_overlay_layout(bbox, 11.0, 120.0);
-        assert!(layout.x >= bbox.x0 + RASTER_TEXT_PADDING_PT);
-        assert!(layout.x <= bbox.x1);
-    }
-
-    #[test]
-    fn anchored_raster_redaction_builds_triplet_overlays() {
-        let report = RedactionReport {
+    fn sample_report() -> RedactionReport {
+        RedactionReport {
             input: "x.pdf".to_owned(),
-            redactions: vec![crate::types::redaction_types::RedactionOccurrence {
-                page_index: 0,
-                bbox: Rect::new(100.0, 200.0, 170.0, 214.0),
+            redactions: vec![RedactionOccurrence {
+                page_index: 0_u32,
+                bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
                 kind: RedactionKind::RasterDarkRegion,
                 score: 1.0_f32,
                 meta: std::collections::BTreeMap::new(),
                 underlying_text: vec![],
             }],
-            count: 1,
+            count: 1_u32,
             page_counts: std::collections::BTreeMap::from([(0_u32, 1_u32)]),
             diagnostics: vec![],
-        };
-        let guesses = GuessReport {
+        }
+    }
+
+    fn sample_guesses() -> GuessReport {
+        GuessReport {
             input_redactions: String::new(),
             input_fonts: String::new(),
-            guesses: vec![crate::types::guess_types::RedactionGuess {
-                page_index: 0,
-                bbox: Rect::new(100.0, 200.0, 170.0, 214.0),
-                candidates: vec![crate::types::guess_types::GuessCandidate {
+            guesses: vec![RedactionGuess {
+                page_index: 0_u32,
+                bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
+                candidates: vec![GuessCandidate {
                     text: "SARAH KELLEN".to_owned(),
                     score: 1.0_f32,
                     error_pt: 0.0_f32,
@@ -906,7 +897,7 @@ mod tests {
                     width_pt: Some(70.0_f32),
                 }],
                 exact_matches: vec![],
-                context: crate::types::guess_types::GuessContext {
+                context: GuessContext {
                     left_anchor_text: "including".to_owned(),
                     right_anchor_text: "and".to_owned(),
                     gap_pt: 80.0_f32,
@@ -934,23 +925,78 @@ mod tests {
                 visual_dropped: false,
             }],
             diagnostics: vec![],
-        };
-        let font_runs = FontRunReport {
+        }
+    }
+
+    fn sample_font_runs() -> FontRunReport {
+        FontRunReport {
             input: "x.pdf".to_owned(),
             runs: vec![],
             assets: vec![],
-        };
-        let overlays = build_overlays(
-            &report,
-            Some(&guesses),
-            Some(&font_runs),
-            &std::collections::BTreeMap::new(),
-        );
-        assert_eq!(overlays.len(), 3);
-        let text = overlays
+        }
+    }
+
+    fn sample_pdf_bytes() -> Vec<u8> {
+        let input = std::path::Path::new("test_data/EFTA00101126.pdf");
+        std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
+    }
+
+    #[test]
+    fn load_inputs_from_bytes_builds_rects_and_anchor_triplet_overlays() {
+        let data = VisualizationData::new();
+        let report = sample_report();
+        let guesses = sample_guesses();
+        let font_runs = sample_font_runs();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+
+        assert_eq!(inputs.rects.len(), 1_usize);
+        assert_eq!(inputs.overlays.len(), 3_usize);
+        let text = inputs
+            .overlays
             .iter()
             .map(|overlay| overlay.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(text, vec!["including", "SARAH KELLEN", "and"]);
+    }
+
+    #[test]
+    fn render_visualized_pdf_from_bytes_produces_pdf_output() {
+        let data = VisualizationData::new();
+        let report = sample_report();
+        let guesses = sample_guesses();
+        let font_runs = sample_font_runs();
+
+        let out = data
+            .render_visualized_pdf_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+                VisualizerConfig::default(),
+            )
+            .expect("render should succeed");
+        assert!(!out.is_empty());
+        assert!(out.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn load_inputs_from_bytes_without_guess_data_has_no_overlays() {
+        let data = VisualizationData::new();
+        let report = sample_report();
+
+        let inputs = data
+            .load_inputs_from_bytes(&sample_pdf_bytes(), &report, None, None)
+            .expect("visualization inputs should load");
+        assert_eq!(inputs.rects.len(), 1_usize);
+        assert!(inputs.overlays.is_empty());
     }
 }

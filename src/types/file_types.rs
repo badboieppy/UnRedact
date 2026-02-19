@@ -177,7 +177,26 @@ pub fn aggregate_counts(occurrences: &[FontOccurrence]) -> Vec<FontCount> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::aggregate_counts;
+    use super::distinct_fonts_from_counts;
+    use super::DocumentLocation;
+    use super::EncodedOutput;
+    use super::FileFontReport;
+    use super::FontCount;
+    use super::FontDetectionReport;
+    use super::FontId;
+    use super::FontOccurrence;
+    use super::FontOccurrences;
+    use super::FontProcessInput;
+    use super::FontTextRun;
+    use super::FontsFound;
+    use super::InputFileKind;
+    use super::OutputFormat;
+    use super::Rect;
+    use super::Region;
+    use super::TextSourceKind;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     #[test]
     fn output_format_serializes_json() {

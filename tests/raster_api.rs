@@ -1,121 +1,86 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use lopdf::Document;
-use unredact::dependency::hayro_renderer::HayroRenderer;
-use unredact::logic::run_redaction_scan_from_bytes;
-use unredact::types::redaction_types::{
-    PdfRenderer, RedactionFinderConfig, RedactionKind, RedactionMode, RenderedPage,
-};
+use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::types::guess_types::GuessConfig;
+use unredact::types::redaction_types::{RedactionKind, RedactionReport};
+use unredact::types::visualizer_config::VisualizerConfig;
 
-#[derive(Clone)]
-struct FakeRenderer {
-    page_count: usize,
-    page: RenderedPage,
+fn output_dir(tag: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "unredact_raster_api_blackbox_{}_{}_{}",
+        tag,
+        std::process::id(),
+        stamp
+    ))
 }
 
-impl PdfRenderer for FakeRenderer {
-    fn page_count(&self) -> usize {
-        self.page_count
-    }
-
-    fn render_page_to_rgba(
-        &self,
-        page_index: usize,
-        _target_dpi: f32,
-    ) -> Result<RenderedPage, String> {
-        if page_index >= self.page_count {
-            return Err(format!(
-                "page_out_of_bounds:index={} page_count={}",
-                page_index, self.page_count
-            ));
-        }
-        Ok(self.page.clone())
-    }
-}
-
-fn synthetic_rendered_page() -> RenderedPage {
-    let width_px = 220u32;
-    let height_px = 140u32;
-    let mut pixels = vec![230u8; (width_px as usize) * (height_px as usize) * 4];
-
-    for px in pixels.chunks_exact_mut(4) {
-        px[3] = 255;
-    }
-
-    for y in 44usize..94usize {
-        for x in 30usize..190usize {
-            let idx = (y * (width_px as usize) + x) * 4;
-            pixels[idx] = 4;
-            pixels[idx + 1] = 4;
-            pixels[idx + 2] = 4;
-            pixels[idx + 3] = 255;
-        }
-    }
-
-    RenderedPage {
-        width_px,
-        height_px,
-        dpi: 200.0,
-        pixels,
-    }
+fn load_redactions(path: &Path) -> RedactionReport {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("failed to read redactions {}: {error}", path.display()));
+    serde_json::from_slice::<RedactionReport>(&bytes).unwrap_or_else(|error| {
+        panic!(
+            "failed to parse redactions report {}: {error}",
+            path.display()
+        )
+    })
 }
 
 #[test]
-fn bytes_api_with_renderer_detects_raster_region_on_real_pdf() {
-    let path = Path::new("test_data/EFTA02238592.pdf");
-    let bytes = std::fs::read(path).unwrap();
-    let page_count = Document::load_mem(&bytes).unwrap().get_pages().len();
+fn service_image_analysis_toggle_controls_raster_detection() {
+    let input = Path::new("test_data/EFTA02238592.pdf");
+    assert!(input.exists(), "missing test input: {}", input.display());
 
-    let renderer = FakeRenderer {
-        page_count,
-        page: synthetic_rendered_page(),
-    };
-    let cfg = RedactionFinderConfig {
+    let out_on = output_dir("image_on");
+    let out_off = output_dir("image_off");
+    std::fs::create_dir_all(&out_on)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", out_on.display()));
+    std::fs::create_dir_all(&out_off)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", out_off.display()));
+
+    let cfg_on = UnredactServiceConfig {
+        include_details: false,
         enable_image_analysis: true,
-        ..RedactionFinderConfig::default()
+        raster_dpi: 96.0_f32,
+        guess: GuessConfig {
+            visual_score: true,
+            visual_score_dpi: 200.0_f32,
+        },
+        visualize: false,
+        visualizer: VisualizerConfig::default(),
+    };
+    let cfg_off = UnredactServiceConfig {
+        enable_image_analysis: false,
+        ..cfg_on.clone()
     };
 
-    let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg).unwrap();
-    assert!(output
+    let outputs_on = run_from_paths(input, &out_on, None, cfg_on)
+        .unwrap_or_else(|error| panic!("pipeline run with image analysis enabled failed: {error}"));
+    let outputs_off = run_from_paths(input, &out_off, None, cfg_off).unwrap_or_else(|error| {
+        panic!("pipeline run with image analysis disabled failed: {error}")
+    });
+
+    let report_on = load_redactions(&outputs_on.redactions_path);
+    let report_off = load_redactions(&outputs_off.redactions_path);
+
+    let has_raster_on = report_on
         .redactions
         .iter()
-        .any(|r| matches!(r.kind, RedactionKind::RasterDarkRegion)));
-}
-
-#[test]
-fn vector_only_api_parses_real_pdf() {
-    let path = Path::new("test_data/EFTA02238592.pdf");
-    let bytes = std::fs::read(path).unwrap();
-    let cfg = RedactionFinderConfig {
-        enable_image_analysis: false,
-        mode: RedactionMode::All,
-        ..RedactionFinderConfig::default()
-    };
-
-    let output_a = run_redaction_scan_from_bytes(&bytes, None, cfg).unwrap();
-    let output_b = run_redaction_scan_from_bytes(&bytes, None, cfg).unwrap();
-
-    assert_eq!(output_a.redactions.len(), output_b.redactions.len());
-    assert_eq!(output_a.diagnostics, output_b.diagnostics);
-}
-
-#[test]
-fn hayro_renderer_real_pdf_smoke_if_available() {
-    if !HayroRenderer::is_available() {
-        return;
-    }
-
-    let path = Path::new("test_data/EFTA02238592.pdf");
-    let renderer = HayroRenderer::new(path).unwrap();
-    let cfg = RedactionFinderConfig {
-        enable_image_analysis: true,
-        ..RedactionFinderConfig::default()
-    };
-
-    let bytes = std::fs::read(path).unwrap();
-    let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg).unwrap();
-    assert!(!output
-        .diagnostics
+        .any(|value| matches!(value.kind, RedactionKind::RasterDarkRegion));
+    let has_raster_off = report_off
+        .redactions
         .iter()
-        .any(|d| d.contains("raster_page_error=")));
+        .any(|value| matches!(value.kind, RedactionKind::RasterDarkRegion));
+
+    assert!(
+        has_raster_on,
+        "expected at least one raster dark region with image analysis enabled"
+    );
+    assert!(
+        !has_raster_off,
+        "expected no raster dark regions with image analysis disabled"
+    );
 }

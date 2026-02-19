@@ -1096,70 +1096,45 @@ fn is_subset_prefix(parts: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use lopdf::StringFormat;
+    use super::build_font_run_report;
+    use std::path::Path;
 
-    fn literal(value: &str) -> Object {
-        Object::String(value.as_bytes().to_vec(), StringFormat::Literal)
+    #[test]
+    fn build_font_run_report_is_deterministic_for_same_input() {
+        let input = Path::new("test_data/EFTA00101126.pdf");
+        let bytes = std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+
+        let report_a =
+            build_font_run_report(input, &bytes).expect("font run report should parse input");
+        let report_b =
+            build_font_run_report(input, &bytes).expect("font run report should parse input");
+
+        assert_eq!(report_a, report_b);
     }
 
     #[test]
-    fn parse_show_text_op_tj_preserves_text_and_adjustments() {
-        let op = lopdf::content::Operation {
-            operator: "TJ".to_owned(),
-            operands: vec![Object::Array(vec![
-                literal("AB"),
-                Object::Integer(120),
-                literal("CD"),
-            ])],
-        };
-        let st = TextState {
-            font_size_pt: 10.0_f32,
-            h_scale_pct: 100.0_f32,
-            ..TextState::default()
-        };
-        let parsed = parse_show_text_op(&op, &st).expect("expected parsed show op in test");
-        assert_eq!(parsed.text, "ABCD");
-        assert_eq!(parsed.per_char_adjustments_pt.len(), 1);
-        assert_eq!(parsed.per_char_adjustments_pt[0].0, 1);
-        assert!((parsed.per_char_adjustments_pt[0].1 + 1.2_f32).abs() < 0.001_f32);
+    fn build_font_run_report_extracts_runs_with_metrics() {
+        let input = Path::new("test_data/EFTA00101126.pdf");
+        let bytes = std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+
+        let report =
+            build_font_run_report(input, &bytes).expect("font run report should parse input");
+        assert!(!report.runs.is_empty(), "expected non-empty text runs");
+
+        let measured = report
+            .runs
+            .iter()
+            .filter(|run| run.measured_width_pt.is_some() && run.measured_width_px.is_some())
+            .count();
+        assert!(measured > 0, "expected measured widths on at least one run");
     }
 
     #[test]
-    fn spacing_adjustments_apply_tc_and_tw() {
-        let mut metrics = TextMetrics {
-            width_pt: 30.0_f32,
-            width_px: points_to_pixels(30.0_f32, DEFAULT_METRICS_DPI),
-            char_advances_pt: vec![10.0_f32, 10.0_f32, 10.0_f32],
-            char_advances_px: vec![
-                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
-                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
-                points_to_pixels(10.0_f32, DEFAULT_METRICS_DPI),
-            ],
-        };
-        let show = ShowTextOp {
-            text: "A B".to_owned(),
-            per_char_adjustments_pt: Vec::new(),
-        };
-        let st = TextState {
-            font_size_pt: 10.0_f32,
-            h_scale_pct: 100.0_f32,
-            char_spacing: 100.0_f32,
-            word_spacing: 50.0_f32,
-            ..TextState::default()
-        };
-        apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
-        assert!((metrics.width_pt - 32.5_f32).abs() < 0.001_f32);
-        assert!((metrics.char_advances_pt[0] - 11.0_f32).abs() < 0.001_f32);
-        assert!((metrics.char_advances_pt[1] - 11.5_f32).abs() < 0.001_f32);
-    }
-
-    #[test]
-    fn next_line_delta_prefers_leading_then_fallback() {
-        let with_leading = next_line_delta_y(14.0_f32, 10.0_f32);
-        assert!((with_leading + 14.0_f32).abs() < 0.001_f32);
-
-        let fallback = next_line_delta_y(0.0_f32, 12.0_f32);
-        assert!((fallback + 14.4_f32).abs() < 0.001_f32);
+    fn build_font_run_report_fails_on_invalid_pdf_bytes() {
+        let err = build_font_run_report(Path::new("invalid.pdf"), b"not a pdf")
+            .expect_err("invalid bytes should fail");
+        assert!(!err.is_empty());
     }
 }

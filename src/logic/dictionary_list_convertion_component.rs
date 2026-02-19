@@ -46,7 +46,9 @@ pub fn run_dictionary_list_convertion_component(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        run_dictionary_list_convertion_component, DictionaryListInput, DictionaryListRequest,
+    };
 
     #[test]
     fn bytes_dictionary_is_converted_to_entries() {

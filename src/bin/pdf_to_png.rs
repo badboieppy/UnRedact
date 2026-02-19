@@ -129,14 +129,14 @@ fn write_png(path: &Path, width: u32, height: u32, pixels: Vec<u8>) -> Result<()
         .map_err(|e| format!("failed to write png {}: {e}", path.display()))
 }
 
-fn default_output_dir(input: &Path) -> PathBuf {
+pub fn default_output_dir(input: &Path) -> PathBuf {
     input
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_single_page_path(input: &Path, output_dir: &Path, page: usize) -> PathBuf {
+pub fn default_single_page_path(input: &Path, output_dir: &Path, page: usize) -> PathBuf {
     let stem = file_stem_or_default(input);
     if page == 1 {
         output_dir.join(format!("{stem}.png"))
@@ -145,7 +145,7 @@ fn default_single_page_path(input: &Path, output_dir: &Path, page: usize) -> Pat
     }
 }
 
-fn default_all_pages_path(input: &Path, output_dir: &Path, page: usize) -> PathBuf {
+pub fn default_all_pages_path(input: &Path, output_dir: &Path, page: usize) -> PathBuf {
     let stem = file_stem_or_default(input);
     output_dir.join(format!("{stem}.p{page:03}.png"))
 }
@@ -160,7 +160,9 @@ fn file_stem_or_default(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::default_all_pages_path;
+    use super::default_single_page_path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn single_page_default_path_uses_plain_png_for_page_one() {

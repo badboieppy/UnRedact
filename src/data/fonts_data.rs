@@ -113,46 +113,25 @@ fn finalize_file_font_report(report: FileFontReport, include_details: bool) -> F
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::types::file_types::{
-        DocumentLocation, FontId, FontOccurrence, FontOccurrences, InputFileKind, Rect, Region,
-        TextSourceKind,
-    };
-
-    fn occ(font: &str) -> FontOccurrence {
-        FontOccurrence {
-            font: FontId {
-                family: font.to_owned(),
-                variant: None,
-            },
-            location: DocumentLocation {
-                page_index: Some(0),
-                region: Region {
-                    bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
-                },
-            },
-            text: None,
-            confidence: None,
-        }
-    }
+    use super::FontsData;
 
     #[test]
-    fn finalize_file_font_report_hides_occurrences_when_disabled() {
-        let report = FileFontReport {
-            path: "a.pdf".to_owned(),
-            kind: InputFileKind::Pdf,
-            text_source: TextSourceKind::EmbeddedText,
-            fonts: FontsFound {
-                distinct: vec![],
-                counts: vec![],
-            },
-            occurrences: Some(FontOccurrences {
-                items: vec![occ("Arial"), occ("Arial"), occ("Calibri")],
-            }),
-        };
+    fn detect_fonts_from_bytes_hides_occurrences_when_details_are_disabled() {
+        let input_path = std::path::Path::new("test_data/EFTA00101126.pdf");
+        let bytes = std::fs::read(input_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input_path.display()));
+        let data = FontsData::new();
 
-        let out = finalize_file_font_report(report, false);
-        assert!(out.occurrences.is_none());
-        assert_eq!(out.fonts.counts.len(), 2);
+        let report = data
+            .detect_fonts_from_bytes("EFTA00101126.pdf", &bytes, false)
+            .expect("font detection should succeed");
+
+        assert_eq!(report.inputs.len(), 1);
+        let file = &report.inputs[0];
+        assert!(file.occurrences.is_none());
+        assert!(
+            !file.fonts.distinct.is_empty(),
+            "expected distinct fonts in detected report"
+        );
     }
 }

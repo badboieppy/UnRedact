@@ -165,13 +165,20 @@ fn title_case(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{DictionaryData, DictionaryDataSource as _};
+    use std::path::Path;
 
     #[test]
-    fn normalize_dictionary_dedupes_and_orders() {
-        let words = vec!["b".to_owned(), "a".to_owned(), "b".to_owned()];
-        let out = normalize_dictionary(words);
-        assert_eq!(out, vec!["a".to_owned(), "b".to_owned()]);
+    fn load_dictionary_from_bytes_dedupes_and_adds_case_variants() {
+        let data = DictionaryData::new();
+        let loaded = data
+            .load_dictionary_from_bytes(Some(b"b\na\nb\n"))
+            .expect("expected dictionary bytes to parse");
+        assert_eq!(loaded.dictionary, vec!["A", "B", "a", "b"]);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|value| value == "dictionary_source=file"));
     }
 
     #[test]
@@ -194,7 +201,8 @@ mod tests {
             write_result.err()
         );
 
-        let loaded = load_dictionary(&FileStore, Some(&tmp_path));
+        let data = DictionaryData::new();
+        let loaded = data.load_dictionary(Some(&tmp_path));
         assert!(
             loaded.is_ok(),
             "expected file dictionary to load in test, got {:?}",
@@ -215,7 +223,8 @@ mod tests {
 
     #[test]
     fn missing_dictionary_falls_back_to_default_names() {
-        let loaded = load_dictionary(&FileStore, None);
+        let data = DictionaryData::new();
+        let loaded = data.load_dictionary(None::<&Path>);
         assert!(
             loaded.is_ok(),
             "expected fallback dictionary when missing input"

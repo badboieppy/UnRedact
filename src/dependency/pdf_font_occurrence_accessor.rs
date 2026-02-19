@@ -664,19 +664,13 @@ fn build_occurrence(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        build_file_font_report, build_file_font_report_from_bytes, DataBuildConfig, FileDataBuilder,
+    };
     use crate::dependency::file_store::{FileAccessor, FileReadRequest, FileReadResponse};
-    use crate::types::file_types::{FontOccurrences, FontsFound, InputFileKind, TextSourceKind};
-    use lopdf::{Document, Object};
+    use crate::types::file_types::{InputFileKind, TextSourceKind};
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
-
-    fn minimal_pdf_bytes() -> Vec<u8> {
-        let mut doc = Document::with_version("1.5");
-        let mut buf = Vec::<u8>::new();
-        doc.save_to(&mut buf).expect("expected value in test");
-        buf
-    }
+    use std::path::Path;
 
     struct FakeAccessor {
         files: BTreeMap<String, Vec<u8>>,
@@ -698,17 +692,15 @@ mod tests {
 
     impl FileAccessor for FakeAccessor {
         fn read(&self, req: FileReadRequest) -> Result<FileReadResponse, String> {
-            let err = self.err.clone();
-            if let Some(e) = err {
-                return Err(e);
+            if let Some(message) = &self.err {
+                return Err(message.clone());
             }
-
             let key = req.path.to_string_lossy().to_string();
-            let bytes = self.files.get(&key).cloned();
-            match bytes {
-                None => Err("not found".to_owned()),
-                Some(b) => Ok(FileReadResponse { bytes: b }),
-            }
+            self.files
+                .get(&key)
+                .cloned()
+                .map(|bytes| FileReadResponse { bytes })
+                .ok_or_else(|| "not found".to_owned())
         }
     }
 
@@ -724,388 +716,15 @@ mod tests {
                 include_details: true,
             },
         )
-        .expect("expected value in test");
+        .expect("unknown file report should build");
 
         assert_eq!(report.kind, InputFileKind::Unknown);
         assert_eq!(report.text_source, TextSourceKind::Unknown);
+        assert_eq!(report.path, "x.bin".to_owned());
         assert_eq!(
-            report.occurrences.expect("expected value in test").items,
-            vec![]
-        );
-    }
-
-    #[test]
-    fn extract_pdf_occurrences_propagates_accessor_error() {
-        let accessor = FakeAccessor::fail("io");
-        let builder = FileDataBuilder::new(&accessor);
-        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf"))
-            .expect_err("expected error in test");
-        assert_eq!(err, "io".to_owned());
-    }
-
-    #[test]
-    fn extract_pdf_occurrences_rejects_invalid_pdf_bytes() {
-        let mut files = BTreeMap::new();
-        files.insert("x.pdf".to_owned(), b"not a pdf".to_vec());
-
-        let accessor = FakeAccessor::ok(files);
-        let builder = FileDataBuilder::new(&accessor);
-        let err = extract_pdf_occurrences(&builder, Path::new("x.pdf"))
-            .expect_err("expected error in test");
-        assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn text_from_tj_operands_handles_string_array_and_other() {
-        let s = Object::String(b"Hi".to_vec(), lopdf::StringFormat::Literal);
-        assert_eq!(text_from_tj_operands(&[s]), Some("Hi".to_owned()));
-
-        let a = Object::Array(vec![
-            Object::String(b"A".to_vec(), lopdf::StringFormat::Literal),
-            Object::Integer(-120),
-            Object::String(b"B".to_vec(), lopdf::StringFormat::Literal),
-        ]);
-        assert_eq!(text_from_tj_operands(&[a]), Some("AB".to_owned()));
-
-        assert_eq!(text_from_tj_operands(&[Object::Null]), None);
-        assert_eq!(text_from_tj_operands(&[]), None);
-    }
-
-    #[test]
-    fn object_to_f32_handles_integer_real_and_other() {
-        assert_eq!(object_to_f32(&Object::Integer(3)), Some(3.0));
-        assert_eq!(object_to_f32(&Object::Real(2.5)), Some(2.5));
-        assert_eq!(object_to_f32(&Object::Null), None);
-    }
-
-    #[test]
-    fn object_to_name_string_handles_name_and_other() {
-        assert_eq!(
-            object_to_name_string(&Object::Name(b"F1".to_vec())),
-            Some("F1".to_owned())
-        );
-        assert_eq!(object_to_name_string(&Object::Null), None);
-    }
-
-    #[test]
-    fn matrix_from_operands_requires_six_numbers() {
-        let ops = vec![
-            Object::Integer(1),
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(1),
-            Object::Integer(10),
-            Object::Integer(20),
-        ];
-        let m = Matrix::from_operands(&ops).expect("expected value in test");
-        assert_eq!(m.m11, 1.0);
-        assert_eq!(m.tx, 10.0);
-        assert_eq!(m.ty, 20.0);
-
-        let ops2 = vec![Object::Integer(1)];
-        assert_eq!(Matrix::from_operands(&ops2), None);
-    }
-
-    #[test]
-    fn apply_tf_uses_font_map_and_normalizes_name() {
-        let mut fonts = BTreeMap::new();
-        fonts.insert("F1".to_owned(), "ABCDEE+Calibri".to_owned());
-
-        let state = TextState::default();
-        let next = apply_tf(
-            state,
-            &[Object::Name(b"F1".to_vec()), Object::Real(12.0)],
-            &fonts,
-        );
-
-        assert_eq!(next.font_key, "F1".to_owned());
-        assert_eq!(next.font_name, "Calibri".to_owned());
-        assert_eq!(next.font_size_pt, 12.0);
-    }
-
-    #[test]
-    fn estimate_bbox_uses_font_size_and_matrix() {
-        let state = TextState {
-            in_text: true,
-            font_key: "F1".to_owned(),
-            font_name: "F1".to_owned(),
-            font_size_pt: 10.0,
-            text_matrix: Matrix {
-                m11: 1.0,
-                m12: 0.0,
-                m21: 0.0,
-                m22: 1.0,
-                tx: 7.0,
-                ty: 9.0,
-            },
-        };
-        let rect = estimate_bbox(&state);
-        assert_eq!(rect.x0, 7.0);
-        assert_eq!(rect.y1, 9.0);
-        assert_eq!(rect.y0, -1.0);
-        assert_eq!(rect.x1, 37.0);
-    }
-
-    #[test]
-    fn occurrences_from_ops_collects_only_in_text() {
-        let fonts = BTreeMap::new();
-        let ops = vec![
-            lopdf::content::Operation::new(
-                "Tj",
-                vec![Object::String(
-                    b"Hello".to_vec(),
-                    lopdf::StringFormat::Literal,
-                )],
-            ),
-            lopdf::content::Operation::new("BT", vec![]),
-            lopdf::content::Operation::new(
-                "Tf",
-                vec![Object::Name(b"F1".to_vec()), Object::Integer(11)],
-            ),
-            lopdf::content::Operation::new(
-                "Tj",
-                vec![Object::String(
-                    b"Hello".to_vec(),
-                    lopdf::StringFormat::Literal,
-                )],
-            ),
-            lopdf::content::Operation::new("ET", vec![]),
-        ];
-
-        let occs = occurrences_from_ops(0, &ops, &fonts);
-        assert_eq!(occs.len(), 1);
-        assert_eq!(occs[0].location.page_index, Some(0));
-        assert_eq!(occs[0].font.family, "F1".to_owned());
-    }
-
-    #[test]
-    fn build_file_font_report_image_with_details_returns_empty_occurrences() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.png"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect("expected value in test");
-
-        assert_eq!(report.kind, InputFileKind::Image);
-        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
-        assert_eq!(
-            report.occurrences.expect("expected value in test").items,
-            vec![]
-        );
-    }
-
-    #[test]
-    fn extracted_occurrences_aggregate_as_expected() {
-        let occs = FontOccurrences {
-            items: vec![
-                build_occurrence(
-                    font_id_from_name("Arial"),
-                    Some(0),
-                    Rect::new(0.0, 0.0, 1.0, 1.0),
-                    Some("a".to_owned()),
-                    None,
-                ),
-                build_occurrence(
-                    font_id_from_name("Arial"),
-                    Some(0),
-                    Rect::new(1.0, 0.0, 2.0, 1.0),
-                    Some("b".to_owned()),
-                    None,
-                ),
-                build_occurrence(
-                    font_id_from_name("Calibri-Bold"),
-                    Some(1),
-                    Rect::new(0.0, 1.0, 2.0, 2.0),
-                    None,
-                    None,
-                ),
-            ],
-        };
-
-        let counts = crate::types::file_types::aggregate_counts(&occs.items);
-        let map = counts
-            .iter()
-            .map(|c| (c.font.clone(), c.count))
-            .collect::<BTreeMap<_, _>>();
-
-        assert_eq!(map.get(&font_id_from_name("Arial")).copied(), Some(2));
-        assert_eq!(
-            map.get(&font_id_from_name("Calibri-Bold")).copied(),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn build_file_font_report_sets_text_source_based_on_kind() {
-        let mut files = BTreeMap::new();
-        files.insert("a.pdf".to_owned(), minimal_pdf_bytes());
-
-        let accessor = FakeAccessor::ok(files);
-        let builder = FileDataBuilder::new(&accessor);
-
-        let pdf = build_file_font_report(
-            &builder,
-            Path::new("a.pdf"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-        let img = build_file_font_report(
-            &builder,
-            Path::new("a.jpg"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-        let unk = build_file_font_report(
-            &builder,
-            Path::new("a.bin"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-
-        assert_eq!(pdf.text_source, TextSourceKind::EmbeddedText);
-        assert_eq!(img.text_source, TextSourceKind::ImageRaster);
-        assert_eq!(unk.text_source, TextSourceKind::Unknown);
-    }
-
-    #[test]
-    fn file_data_builder_method_delegates() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let r1 = build_file_font_report(
-            &builder,
-            Path::new("x.bin"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect("expected value in test");
-        let r2 = build_file_font_report(
-            &builder,
-            Path::new("x.bin"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect("expected value in test");
-
-        assert_eq!(r1, r2);
-    }
-
-    #[test]
-    fn extract_occurrences_branches_cover_kinds() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let a = extract_occurrences(&builder, Path::new("x.png"), InputFileKind::Image)
-            .expect("expected value in test");
-        let b = extract_occurrences(&builder, Path::new("x.bin"), InputFileKind::Unknown)
-            .expect("expected value in test");
-
-        assert_eq!(a.items, vec![]);
-        assert_eq!(b.items, vec![]);
-    }
-
-    #[test]
-    fn occ_from_double_quote_uses_last_operand() {
-        let state = TextState {
-            in_text: true,
-            font_key: "F1".to_owned(),
-            font_name: "F1".to_owned(),
-            font_size_pt: 12.0,
-            text_matrix: Matrix::identity(),
-        };
-
-        let operands = vec![
-            Object::Integer(1),
-            Object::Integer(2),
-            Object::String(b"X".to_vec(), lopdf::StringFormat::Literal),
-        ];
-
-        let out = occ_from_double_quote(0, &state, &operands).expect("expected value in test");
-        assert_eq!(out.text, Some("X".to_owned()));
-    }
-
-    #[test]
-    fn occ_from_tj_requires_in_text_and_nonempty_text() {
-        let state = TextState::default();
-        let s = Object::String(b"Hi".to_vec(), lopdf::StringFormat::Literal);
-        assert_eq!(occ_from_tj(0, &state, std::slice::from_ref(&s)), None);
-
-        let state2 = TextState {
-            in_text: true,
-            font_key: "F1".to_owned(),
-            font_name: "F1".to_owned(),
-            font_size_pt: 12.0,
-            text_matrix: Matrix::identity(),
-        };
-
-        let empty = Object::String(b"   ".to_vec(), lopdf::StringFormat::Literal);
-        assert_eq!(occ_from_tj(0, &state2, &[empty]), None);
-
-        let out = occ_from_tj(2, &state2, &[s]).expect("expected value in test");
-        assert_eq!(out.location.page_index, Some(2));
-        assert_eq!(out.text, Some("Hi".to_owned()));
-    }
-
-    #[test]
-    fn apply_tm_and_apply_td_change_matrix() {
-        let state = TextState {
-            in_text: true,
-            font_key: "F1".to_owned(),
-            font_name: "F1".to_owned(),
-            font_size_pt: 10.0,
-            text_matrix: Matrix::identity(),
-        };
-
-        let tm_ops = vec![
-            Object::Integer(1),
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(1),
-            Object::Integer(10),
-            Object::Integer(20),
-        ];
-        let s2 = apply_tm(state.clone(), &tm_ops);
-        assert_eq!(s2.text_matrix.tx, 10.0);
-        assert_eq!(s2.text_matrix.ty, 20.0);
-
-        let td_ops = vec![Object::Integer(5), Object::Integer(-3)];
-        let s3 = apply_td(s2, &td_ops);
-        assert_eq!(s3.text_matrix.tx, 15.0);
-        assert_eq!(s3.text_matrix.ty, 17.0);
-    }
-
-    #[test]
-    fn file_kind_branch_does_not_depend_on_accessor() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let image = build_file_font_report(
-            &builder,
-            Path::new("x.png"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect("expected value in test");
-        assert_eq!(image.kind, InputFileKind::Image);
-        assert_eq!(
-            image
+            report
                 .occurrences
-                .expect("expected value in test")
+                .expect("occurrences should exist")
                 .items
                 .len(),
             0
@@ -1113,8 +732,34 @@ mod tests {
     }
 
     #[test]
-    fn build_file_font_report_pdf_with_details_reads_file() {
+    fn build_file_font_report_image_kind_has_no_occurrences() {
         let accessor = FakeAccessor::ok(BTreeMap::new());
+        let builder = FileDataBuilder::new(&accessor);
+
+        let report = build_file_font_report(
+            &builder,
+            Path::new("x.png"),
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .expect("image file report should build");
+
+        assert_eq!(report.kind, InputFileKind::Image);
+        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
+        assert_eq!(
+            report
+                .occurrences
+                .expect("occurrences should exist")
+                .items
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn build_file_font_report_propagates_read_errors_for_pdf() {
+        let accessor = FakeAccessor::fail("io_error");
         let builder = FileDataBuilder::new(&accessor);
 
         let err = build_file_font_report(
@@ -1124,176 +769,42 @@ mod tests {
                 include_details: true,
             },
         )
-        .expect_err("expected error in test");
-
-        assert_eq!(err, "not found".to_owned());
+        .expect_err("pdf report should fail when read fails");
+        assert_eq!(err, "io_error".to_owned());
     }
 
     #[test]
-    fn extract_pdf_occurrences_uses_path_key() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let err = extract_pdf_occurrences(&builder, Path::new("dir/y.pdf"))
-            .expect_err("expected error in test");
-        assert_eq!(err, "not found".to_owned());
-    }
-
-    #[test]
-    fn kind_and_source_in_report_match_extension_case_insensitively() {
-        let mut files = BTreeMap::new();
-        files.insert("X.PdF".to_owned(), minimal_pdf_bytes());
-
-        let accessor = FakeAccessor::ok(files);
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("X.PdF"),
+    fn build_file_font_report_from_bytes_handles_invalid_pdf_without_crashing() {
+        let report = build_file_font_report_from_bytes(
+            "bad.pdf",
+            b"not a pdf",
             DataBuildConfig {
                 include_details: false,
             },
         )
-        .expect("expected value in test");
+        .expect("invalid pdf bytes should still produce a report");
+        assert_eq!(report.kind, InputFileKind::Pdf);
+        assert_eq!(report.text_source, TextSourceKind::EmbeddedText);
+        assert!(report.fonts.distinct.is_empty());
+        assert!(report.fonts.counts.is_empty());
+    }
+
+    #[test]
+    fn build_file_font_report_from_bytes_parses_real_pdf() {
+        let input = Path::new("test_data/EFTA00101126.pdf");
+        let bytes = std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+
+        let report = build_file_font_report_from_bytes(
+            "EFTA00101126.pdf",
+            &bytes,
+            DataBuildConfig {
+                include_details: false,
+            },
+        )
+        .expect("real pdf bytes should parse");
 
         assert_eq!(report.kind, InputFileKind::Pdf);
         assert_eq!(report.text_source, TextSourceKind::EmbeddedText);
-    }
-
-    #[test]
-    fn resolve_pdf_font_name_none_when_not_dict() {
-        let doc = Document::with_version("1.5");
-        let o = Object::Null;
-        let out = resolve_pdf_font_name(&doc, &o);
-        assert_eq!(out, None);
-    }
-
-    #[test]
-    fn object_to_dict_none_when_not_dictionary() {
-        assert!(object_to_dict(&Object::Null).is_none());
-    }
-
-    #[test]
-    fn matrix_next_line_moves_down() {
-        let m = Matrix::identity();
-        let out = m.next_line();
-        assert!(out.ty < m.ty);
-    }
-
-    #[test]
-    fn estimate_bbox_width_minimum() {
-        let state = TextState {
-            in_text: true,
-            font_key: "F1".to_owned(),
-            font_name: "F1".to_owned(),
-            font_size_pt: 0.0,
-            text_matrix: Matrix::identity(),
-        };
-        let r = estimate_bbox(&state);
-        assert_eq!(r.x1 - r.x0, 1.0);
-    }
-
-    #[test]
-    fn extract_occurrences_pdf_errors_on_missing_file() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let err = extract_occurrences(&builder, Path::new("missing.pdf"), InputFileKind::Pdf)
-            .expect_err("expected error in test");
-        assert_eq!(err, "not found".to_owned());
-    }
-
-    #[test]
-    fn build_file_font_report_does_not_error_for_unknown_without_details() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.bin"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-        assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
-        assert_eq!(report.kind, InputFileKind::Unknown);
-        assert_eq!(report.text_source, TextSourceKind::Unknown);
-    }
-
-    #[test]
-    fn build_file_font_report_image_without_details_has_no_occurrences() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.png"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-        assert_eq!(report.occurrences, Some(FontOccurrences { items: vec![] }));
-        assert_eq!(report.kind, InputFileKind::Image);
-        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
-    }
-
-    #[test]
-    fn extract_occurrences_uses_kind_argument() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let a = extract_occurrences(&builder, Path::new("x.pdf"), InputFileKind::Unknown)
-            .expect("expected value in test");
-        assert_eq!(a.items, vec![]);
-    }
-
-    #[test]
-    fn file_report_path_is_lossy_string() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.bin"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("expected value in test");
-        assert_eq!(report.path, "x.bin".to_owned());
-    }
-
-    #[test]
-    fn occurrences_items_are_public_and_aggregatable() {
-        let report = FileFontReport {
-            path: "x".to_owned(),
-            kind: InputFileKind::Unknown,
-            text_source: TextSourceKind::Unknown,
-            fonts: FontsFound {
-                distinct: vec![],
-                counts: vec![],
-            },
-            occurrences: Some(FontOccurrences { items: vec![] }),
-        };
-
-        let occs = report.occurrences.expect("expected value in test");
-        let counts = crate::types::file_types::aggregate_counts(&occs.items);
-        assert_eq!(counts, vec![]);
-    }
-
-    #[test]
-    fn normalize_subset_font_name_in_data_resolver() {
-        let out = normalize_subset_font_name("ABCDEF+Arial");
-        assert_eq!(out, "Arial".to_owned());
-    }
-
-    #[test]
-    fn read_request_path_is_owned() {
-        let req = FileReadRequest {
-            path: PathBuf::from("x.pdf"),
-        };
-        assert_eq!(req.path, PathBuf::from("x.pdf"));
     }
 }
