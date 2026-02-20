@@ -1731,6 +1731,7 @@ dependencies = [
  "clap",
  "hayro",
  "image",
+ "js-sys",
  "lopdf",
  "pretty_assertions",
  "rustybuzz",

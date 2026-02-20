@@ -1,7 +1,6 @@
-use std::time::Instant;
-
 use crate::data::fonts_data::FontsData;
 use crate::data::redactions_data::RedactionsData;
+use crate::logic::time::Instant;
 use crate::logic::types::{BytesPipelineOutputs, BytesPipelineRequest, VisualizationPayload};
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
 
@@ -96,10 +95,10 @@ pub fn run_redaction_guessing_component(
 mod guess_impl {
     use lopdf::{Dictionary, Document, Object};
     use std::sync::OnceLock;
-    use std::time::Instant;
 
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
     use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
+    use crate::logic::time::Instant;
     use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
     use crate::types::guess_types::{
         GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
@@ -3359,9 +3358,9 @@ mod guess_impl {
 
 mod redaction_impl {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::time::Instant;
 
     use crate::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
+    use crate::logic::time::Instant;
     use crate::types::redaction_types::{
         PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionMode,
         RedactionOccurrence, RedactionReport, UnderlyingTextHit,
@@ -4126,13 +4125,13 @@ pub use redaction_impl::{
 
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::time::Instant;
 
     use lopdf::{Document, Object, ObjectId};
 
     use crate::data::visualization_data::{VisualizationData, VisualizationInputs};
     use crate::dependency::hayro_renderer::HayroRenderer;
     use crate::dependency::pdf_annotator::PdfAnnotator;
+    use crate::logic::time::Instant;
     use crate::types::file_types::FontRunReport;
     use crate::types::guess_types::{GuessReport, RedactionGuess};
     use crate::types::redaction_types::{PdfRenderer as _, Rect, RedactionReport, RenderedPage};

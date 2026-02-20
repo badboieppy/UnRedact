@@ -81,6 +81,60 @@ Show all `unredact` options:
 cargo run --bin unredact -- --help
 ```
 
+## Browser Version (WASM + Static Site)
+You can run UnRedact directly in a browser from a static site.
+
+### What It Does
+- Upload a PDF in the browser
+- Optionally upload a dictionary text file
+- Run `web_entry` (bytes in, bytes out) inside WebAssembly
+- Download `redactions.json`, `fonts.json`, `guesses.json`, and optional `visualized.pdf`
+
+### Build the Web App Locally
+1. Install `wasm-pack`
+2. Install Binaryen (`wasm-opt`) `version_126` or newer
+3. Build the wasm package:
+
+```bash
+wasm-pack build --target web --out-dir web/pkg --release --no-default-features --features "shared-bytes-workflow,web-entry"
+```
+
+4. Serve the static files in `web/`:
+
+```bash
+python -m http.server 8080 --directory web
+```
+
+5. Open `http://localhost:8080`.
+
+### Local WASM Benchmark
+You can benchmark the real `run_unredact_web` wasm path locally with Node.js.
+
+1. Build wasm first (same command as above).
+2. Run:
+
+```bash
+node scripts/wasm_local_benchmark.mjs --pdf test_data/EFTA00101126.pdf --repeats 5 --out benchmark/wasm_local_benchmark.json
+```
+
+The report includes:
+- wall clock latency stats (`min/mean/p50/p90/max`),
+- internal stage timings parsed from diagnostics (`timing_ms stage=*`),
+- output size stats,
+- repeat consistency via top-guess signature stability.
+
+### Publish to GitHub Pages
+A workflow is included at:
+
+- `.github/workflows/deploy_wasm_site.yml`
+
+On push to `main` (or manual dispatch), it:
+1. Builds the wasm package
+2. Stages `web/` as the site artifact
+3. Deploys to GitHub Pages
+
+If Pages is not already enabled, enable it in repository settings and select GitHub Actions as the source.
+
 ## Accuracy Benchmark
 Use this benchmark to track quality and consistency over time:
 

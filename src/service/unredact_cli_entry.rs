@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::logic::time::Instant;
 use crate::logic::{
     build_output_file_paths, discover_pdf_inputs, ensure_batch_output_dir_for_input,
     read_dictionary_input, read_input_pdf_bytes, run_dictionary_list_convertion_component,

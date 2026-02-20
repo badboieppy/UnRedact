@@ -7,6 +7,7 @@ pub mod local_file_workflow_component;
 pub mod redaction_guessing_component;
 #[cfg(feature = "local-file-workflow")]
 pub mod redaction_guessing_component_local;
+pub mod time;
 pub mod types;
 pub mod visualization_render_component;
 pub use dictionary_list_convertion_component::{

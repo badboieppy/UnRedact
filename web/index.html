@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UnRedact Web</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <h1>UnRedact Web</h1>
+    <p class="subtitle">Upload a PDF, run redaction analysis in your browser, and download results.</p>
+
+    <section class="card">
+      <label class="field">
+        <span>PDF file</span>
+        <input id="pdfFile" type="file" accept=".pdf,application/pdf" />
+      </label>
+
+      <label class="field">
+        <span>Dictionary file (optional, one entry per line)</span>
+        <input id="dictionaryFile" type="file" accept=".txt,text/plain" />
+      </label>
+
+      <div class="row">
+        <label><input id="enableImageAnalysis" type="checkbox" checked /> Use image analysis</label>
+        <label><input id="shouldVisuallyScore" type="checkbox" checked /> Use visual scoring</label>
+        <label><input id="visualizeOutput" type="checkbox" /> Generate visualized PDF</label>
+      </div>
+
+      <div class="actions">
+        <button id="runButton" disabled>Run Analysis</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Status</h2>
+      <pre id="status">Loading WebAssembly module...</pre>
+    </section>
+
+    <section class="card">
+      <h2>Summary</h2>
+      <pre id="summary">No run yet.</pre>
+    </section>
+
+    <section class="card">
+      <h2>Downloads</h2>
+      <div id="downloads" class="downloads">No outputs yet.</div>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

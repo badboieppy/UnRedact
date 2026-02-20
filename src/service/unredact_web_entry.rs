@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
+use crate::logic::time::Instant;
 use crate::logic::{
     encode_outputs, run_dictionary_list_convertion_component, run_redaction_guessing_component,
     run_visualization_render_component, BytesPipelineRequest, DictionaryListInput,
