@@ -31,6 +31,8 @@ Run UnRedact on one file:
 cargo run --bin unredact -- path/to/file.pdf --output-dir path/to/output
 ```
 
+`--output-dir` is optional. If you omit it, output is written to your OS temp directory under `unredact` (for example: `%TEMP%/unredact`).
+
 This creates:
 - `file.redactions.json` (detected redaction regions)
 - `file.fonts.json` (detected text/font runs)
@@ -70,10 +72,13 @@ cargo run --bin unredact -- path/to/file.pdf --dictionary path/to/dictionary.txt
 
 If you do not provide one, UnRedact uses the built-in names list.
 
-## Most Useful Runtime Controls
-- `--no-image-analysis`: disable raster/image-based redaction detection and run text/shape analysis only
-- `--should-visually-score true|false`: enable/disable visual scoring
-- `--visualize`: write a visualized PDF with overlay guides
+## Current `unredact` Parameters
+- `<input>`: required file or folder path
+- `--output-dir <path>`: optional output folder (default: OS temp directory + `unredact`)
+- `--dictionary <path>`: optional dictionary text file (one entry per line)
+- `--no-image-analysis`: optional flag to disable image/raster redaction detection
+- `--should-visually-score true|false`: optional toggle (default: `true`)
+- `--visualize`: optional flag to write `file.visualized.pdf`
 
 Show all `unredact` options:
 
@@ -117,6 +122,19 @@ You can benchmark the real `run_unredact_web` wasm path locally with Node.js.
 node scripts/wasm_local_benchmark.mjs --pdf test_data/EFTA00101126.pdf --repeats 5 --out benchmark/wasm_local_benchmark.json
 ```
 
+Current script parameters:
+- `--pdf <path>`: benchmark one PDF (repeatable)
+- `--pdf-dir <path>`: benchmark all PDFs recursively in a folder
+- `--dictionary <path>`: optional dictionary file
+- `--repeats <n>`: measured runs per PDF (default: `3`)
+- `--warmup <n>`: warmup runs per PDF (default: `1`)
+- `--should-visually-score true|false` (default: `true`)
+- `--enable-image-analysis true|false` (default: `true`)
+- `--visualize true|false` (default: `false`)
+- `--raster-dpi <float>` (default: `200`)
+- `--visual-score-dpi <float>` (default: `200`)
+- `--out <path>`: output report path
+
 The report includes:
 - wall clock latency stats (`min/mean/p50/p90/max`),
 - internal stage timings parsed from diagnostics (`timing_ms stage=*`),
@@ -142,6 +160,14 @@ Use this benchmark to track quality and consistency over time:
 cargo run --bin guess_accuracy_benchmark -- --out benchmark/guess_accuracy.json --repeats 2 --consistency-out benchmark/guess_consistency.json
 ```
 
+Current benchmark parameters:
+- `--out <path>`: output JSON path (default: `benchmark/guess_accuracy.json`)
+- `--repeats <n>`: number of repeated runs (default: `2`)
+- `--single-run`: shorthand for `--repeats 1`
+- `--determinism`: shorthand for `--repeats 3`
+- `--require-deterministic`: exits with error if repeated runs differ
+- `--consistency-out <path>`: optional consistency report path
+
 This reports:
 - recall and ranking metrics,
 - visual error metrics,
@@ -162,6 +188,14 @@ Use this to convert PDF pages into PNG images (useful for documentation and visu
 ```bash
 cargo run --bin pdf_to_png -- path/to/file.pdf --page 2 --dpi 200
 ```
+
+Current `pdf_to_png` parameters:
+- `<input>`: required PDF path
+- `--page <n>`: 1-based page number for single page mode (default: `1`)
+- `--all-pages`: render every page
+- `--output <path>`: output file path (single page mode)
+- `--output-dir <path>`: output directory (default: input file directory)
+- `--dpi <float>` (default: `200`)
 
 Show options:
 
