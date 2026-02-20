@@ -1,42 +1,22 @@
-use std::path::Path;
-
-use crate::dependency::file_store::FileStore;
 use crate::dependency::hayro_renderer::HayroRenderer;
 use crate::dependency::pdf_redaction_accessor::PdfFileRetriever as DependencyPdfFileRetriever;
 use crate::dependency::pdf_redaction_accessor::RedactionDataRetriever as DependencyRedactionDataRetriever;
-use crate::types::redaction_types::RedactionReport;
 use crate::types::redaction_types::{
     PdfRenderer, RedactionFinderConfig, RedactionOccurrence, UnderlyingTextHit,
 };
 
 #[derive(Debug, Clone, Copy)]
-pub struct RedactionsData {
-    file_store: FileStore,
-}
+pub struct RedactionsData;
 
 impl RedactionsData {
     #[inline]
     pub fn new() -> Self {
-        Self {
-            file_store: FileStore,
-        }
-    }
-
-    #[inline]
-    pub fn read_input_bytes(&self, input: &Path) -> Result<Vec<u8>, String> {
-        self.file_store.read(input)
+        Self
     }
 
     #[inline]
     pub fn build_renderer(&self, bytes: &[u8]) -> Result<HayroRenderer, String> {
         HayroRenderer::new_from_bytes(bytes)
-    }
-
-    #[inline]
-    pub fn write_redactions(&self, path: &Path, report: &RedactionReport) -> Result<(), String> {
-        let json = serde_json::to_vec_pretty(report)
-            .map_err(|e| format!("failed to encode redactions json: {e}"))?;
-        self.file_store.write(path, &json)
     }
 }
 

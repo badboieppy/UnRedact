@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
@@ -27,14 +25,6 @@ impl Default for PipelineConfig {
             visualizer: VisualizerConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutputFilePaths {
-    pub redactions_path: PathBuf,
-    pub fonts_path: PathBuf,
-    pub guesses_path: PathBuf,
-    pub visualized_pdf_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

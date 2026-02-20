@@ -4,10 +4,12 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::logic::{
-    build_output_file_paths, read_input_pdf_bytes, run_dictionary_list_convertion_component,
-    run_redaction_guessing_component, run_visualization_render_component, write_encoded_outputs,
-    BytesPipelineRequest, DictionaryListInput, DictionaryListRequest, OutputFilePaths,
-    PipelineConfig, VisualizationRenderRequest,
+    build_output_file_paths, discover_pdf_inputs, ensure_batch_output_dir_for_input,
+    read_dictionary_input, read_input_pdf_bytes, run_dictionary_list_convertion_component,
+    run_redaction_guessing_component, run_visualization_render_component,
+    validate_batch_input_directory, write_batch_manifest, write_encoded_outputs,
+    BytesPipelineRequest, DictionaryListRequest, OutputFilePaths, PipelineConfig,
+    VisualizationRenderRequest,
 };
 use crate::types::guess_types::GuessConfig;
 use crate::types::visualizer_config::VisualizerConfig;
@@ -128,11 +130,7 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         visualizer: req.cfg.visualizer,
     };
     let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
-    let dictionary_input = req
-        .dictionary_path
-        .clone()
-        .map(DictionaryListInput::FilePath)
-        .unwrap_or(DictionaryListInput::Missing);
+    let dictionary_input = read_dictionary_input(req.dictionary_path.as_deref())?;
     let dictionary_outputs =
         run_dictionary_list_convertion_component(DictionaryListRequest { dictionary_input })?;
     let bytes_req = BytesPipelineRequest {
@@ -173,19 +171,8 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
 
 #[inline]
 pub fn run_batch(req: UnredactBatchRequest) -> Result<UnredactBatchOutputs, String> {
-    if !req.input_dir.exists() {
-        return Err(format!(
-            "batch input directory does not exist: {}",
-            req.input_dir.display()
-        ));
-    }
-    if !req.input_dir.is_dir() {
-        return Err(format!(
-            "batch input path is not a directory: {}",
-            req.input_dir.display()
-        ));
-    }
-    let inputs = discover_inputs(&req.input_dir)?;
+    validate_batch_input_directory(&req.input_dir)?;
+    let inputs = discover_pdf_inputs(&req.input_dir)?;
     if inputs.is_empty() {
         return Err(format!(
             "no supported input files found in {}",
@@ -210,27 +197,15 @@ pub fn run_batch(req: UnredactBatchRequest) -> Result<UnredactBatchOutputs, Stri
     let failure_count = results.len().saturating_sub(success_count);
     let elapsed_ms = start.elapsed().as_millis();
 
-    let manifest_path = req.output_dir.join("batch_manifest.json");
-    if let Some(parent) = manifest_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-        }
-    }
     let payload = serde_json::to_vec_pretty(&UnredactBatchOutputs {
         results: results.clone(),
         success_count,
         failure_count,
         elapsed_ms,
-        manifest_path: manifest_path.clone(),
+        manifest_path: req.output_dir.join("batch_manifest.json"),
     })
     .map_err(|error| format!("failed to encode batch manifest: {error}"))?;
-    std::fs::write(&manifest_path, payload).map_err(|error| {
-        format!(
-            "failed to write manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
+    let manifest_path = write_batch_manifest(&req.output_dir, &payload)?;
 
     Ok(UnredactBatchOutputs {
         results,
@@ -264,7 +239,7 @@ fn run_batch_item(
     cfg: &UnredactServiceConfig,
 ) -> UnredactBatchFileResult {
     let started = Instant::now();
-    let item_output_dir = match batch_output_dir_for_input(output_dir, input_dir, input) {
+    let item_output_dir = match ensure_batch_output_dir_for_input(output_dir, input_dir, input) {
         Ok(path) => path,
         Err(error) => {
             return UnredactBatchFileResult {
@@ -303,76 +278,6 @@ fn run_batch_item(
             elapsed_ms: started.elapsed().as_millis(),
         },
     }
-}
-
-fn batch_output_dir_for_input(
-    output_root: &Path,
-    input_root: &Path,
-    input: &Path,
-) -> Result<PathBuf, String> {
-    let relative = input.strip_prefix(input_root).map_err(|error| {
-        format!(
-            "failed to map {} relative to {}: {error}",
-            input.display(),
-            input_root.display()
-        )
-    })?;
-    let stem = relative
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("failed to get file stem for {}", input.display()))?;
-
-    let mut out = output_root.to_path_buf();
-    if let Some(parent) = relative.parent() {
-        if !parent.as_os_str().is_empty() {
-            out.push(parent);
-        }
-    }
-    out.push(stem);
-    std::fs::create_dir_all(&out).map_err(|error| {
-        format!(
-            "failed to create output directory {}: {error}",
-            out.display()
-        )
-    })?;
-    Ok(out)
-}
-
-fn discover_inputs(input_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut inputs = Vec::<PathBuf>::new();
-    let mut dirs = vec![input_dir.to_path_buf()];
-
-    while let Some(dir) = dirs.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?;
-        let mut sorted = entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
-        sorted.sort_by(|left, right| {
-            left.file_name()
-                .to_string_lossy()
-                .cmp(&right.file_name().to_string_lossy())
-        });
-
-        for entry in sorted {
-            let path = entry.path();
-            if path.is_dir() {
-                dirs.push(path);
-                continue;
-            }
-            if is_supported_batch_input(path.as_path()) {
-                inputs.push(path);
-            }
-        }
-    }
-
-    inputs.sort();
-    Ok(inputs)
-}
-
-fn is_supported_batch_input(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("pdf"))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

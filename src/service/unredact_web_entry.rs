@@ -9,7 +9,7 @@ use crate::logic::{
 use crate::types::guess_types::GuessConfig;
 use crate::types::visualizer_config::VisualizerConfig;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnredactWebConfig {
     pub include_details: bool,
     pub enable_image_analysis: bool,
@@ -33,7 +33,7 @@ impl Default for UnredactWebConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnredactWebRequest {
     pub input_name: String,
     pub pdf_bytes: Vec<u8>,

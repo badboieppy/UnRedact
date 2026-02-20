@@ -95,13 +95,11 @@ pub fn run_redaction_guessing_component(
 
 mod guess_impl {
     use lopdf::{Dictionary, Document, Object};
-    use std::path::Path;
     use std::sync::OnceLock;
     use std::time::Instant;
 
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
-    use crate::data::{DictionaryDataSource, FontRunDataSource, ReportDataSource};
-    use crate::dependency::pdf_font_run_accessor::build_font_run_report;
+    use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
     use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
     use crate::types::guess_types::{
         GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
@@ -109,17 +107,6 @@ mod guess_impl {
     use crate::types::redaction_types::{
         Rect, RedactionKind, RedactionOccurrence, RedactionReport,
     };
-
-    pub struct RunGuessRequest<'a> {
-        pub report_data: &'a dyn ReportDataSource,
-        pub dictionary_data: &'a dyn DictionaryDataSource,
-        pub font_run_data: &'a dyn FontRunDataSource,
-        pub redactions_path: &'a Path,
-        pub fonts_path: &'a Path,
-        pub pdf_path: &'a Path,
-        pub dictionary_path: Option<&'a Path>,
-        pub cfg: &'a GuessConfig,
-    }
 
     pub struct RunGuessFromBytesRequest<'a> {
         pub pdf_name: &'a str,
@@ -131,34 +118,10 @@ mod guess_impl {
     }
 
     #[inline]
-    pub fn run_from_paths(req: RunGuessRequest<'_>) -> Result<GuessReport, String> {
-        let reports = req
-            .report_data
-            .load_reports(req.redactions_path, req.fonts_path)?;
-        let dictionary = req.dictionary_data.load_dictionary(req.dictionary_path)?;
-        let font_runs = req.font_run_data.load_font_runs(req.pdf_path)?;
-        let width_tables = build_pdf_width_table_map(req.pdf_path).unwrap_or_default();
-        let pdf_bytes = std::fs::read(req.pdf_path).ok();
-        let mut diagnostics = reports.diagnostics;
-        diagnostics.extend(dictionary.diagnostics);
-        let inputs = BuildReportWithFontsInputs {
-            input_redactions_label: req.redactions_path.to_string_lossy().to_string(),
-            input_fonts_label: req.fonts_path.to_string_lossy().to_string(),
-            redactions: reports.redactions,
-            dictionary: dictionary.dictionary,
-            diagnostics,
-            font_runs: font_runs.report,
-            width_tables,
-            pdf_bytes: pdf_bytes.as_deref(),
-        };
-        Ok(build_report_from_parts_with_fonts_inputs(inputs, req.cfg))
-    }
-
-    #[inline]
     pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<GuessReport, String> {
         let started = Instant::now();
         let font_runs_started = Instant::now();
-        let font_runs = build_font_run_report(Path::new(req.pdf_name), req.pdf_bytes)?;
+        let font_runs = build_font_run_report_from_input_name(req.pdf_name, req.pdf_bytes)?;
         let font_runs_ms = font_runs_started.elapsed().as_millis();
         let width_tables_started = Instant::now();
         let width_tables = build_pdf_width_table_map_from_bytes(req.pdf_bytes).unwrap_or_default();
@@ -2499,18 +2462,6 @@ mod guess_impl {
         })
     }
 
-    fn build_pdf_width_table_map(
-        pdf_path: &Path,
-    ) -> Result<std::collections::BTreeMap<WidthTableKey, WidthTable>, String> {
-        let bytes = std::fs::read(pdf_path).map_err(|error| {
-            format!(
-                "failed to read pdf bytes from {}: {error}",
-                pdf_path.display()
-            )
-        })?;
-        build_pdf_width_table_map_from_bytes(&bytes)
-    }
-
     fn build_pdf_width_table_map_from_bytes(
         pdf_bytes: &[u8],
     ) -> Result<std::collections::BTreeMap<WidthTableKey, WidthTable>, String> {
@@ -3408,7 +3359,6 @@ mod guess_impl {
 
 mod redaction_impl {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::Path;
     use std::time::Instant;
 
     use crate::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
@@ -3490,11 +3440,6 @@ mod redaction_impl {
             redactions: dedup_occurrences(all),
             diagnostics,
         }
-    }
-
-    #[inline]
-    pub fn build_report(input: &Path, output: RedactionFinderOutput) -> RedactionReport {
-        build_report_from_input_name(&input.to_string_lossy(), output)
     }
 
     #[inline]
@@ -4173,25 +4118,19 @@ mod redaction_impl {
     }
 }
 
-pub use guess_impl::{
-    run_from_bytes as run_guess_from_bytes, run_from_paths as run_guess_from_paths,
-    RunGuessFromBytesRequest, RunGuessRequest,
-};
+pub use guess_impl::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
 
 pub use redaction_impl::{
-    build_report, build_report_from_input_name, run_redaction_scan, run_redaction_scan_from_bytes,
+    build_report_from_input_name, run_redaction_scan, run_redaction_scan_from_bytes,
 };
 
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::Path;
     use std::time::Instant;
 
     use lopdf::{Document, Object, ObjectId};
 
-    use crate::data::visualization_data::{
-        VisualizationData, VisualizationDataSource as _, VisualizationInputs,
-    };
+    use crate::data::visualization_data::{VisualizationData, VisualizationInputs};
     use crate::dependency::hayro_renderer::HayroRenderer;
     use crate::dependency::pdf_annotator::PdfAnnotator;
     use crate::types::file_types::FontRunReport;
@@ -4261,51 +4200,6 @@ mod visual_guess_score_impl {
         score: RowPixelScore,
         blended_score: f32,
         combined_gain: f32,
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn apply_visual_scores(
-        pdf_path: &Path,
-        redactions: &RedactionReport,
-        font_runs: &FontRunReport,
-        guesses: &mut [RedactionGuess],
-        cfg: VisualGuessScoreConfig,
-    ) -> Result<Vec<String>, String> {
-        if !cfg.enabled {
-            return Ok(vec!["visual_score=disabled".to_owned()]);
-        }
-        if !cfg.dpi.is_finite() || cfg.dpi <= 0.0_f32 {
-            return Err(format!("visual_score_invalid_dpi:{}", cfg.dpi));
-        }
-        if cfg.min_ink_pixels == 0 {
-            return Err("visual_score_min_ink_pixels_must_be_positive".to_owned());
-        }
-        if let Some(threshold) = cfg.drop_threshold {
-            if !threshold.is_finite() || threshold < 0.0_f32 {
-                return Err(format!("visual_score_invalid_drop_threshold:{threshold}"));
-            }
-        }
-
-        let max_items = redactions.redactions.len().min(guesses.len());
-        if max_items == 0 {
-            return Ok(vec!["visual_score=skipped_empty_input".to_owned()]);
-        }
-
-        let visualization = VisualizationData::new();
-        let guess_report = GuessReport {
-            input_redactions: String::new(),
-            input_fonts: String::new(),
-            guesses: guesses.to_vec(),
-            diagnostics: Vec::new(),
-        };
-        let inputs = visualization.load_inputs(
-            pdf_path,
-            redactions,
-            Some(&guess_report),
-            Some(font_runs),
-        )?;
-        apply_visual_scores_with_inputs(inputs, redactions, font_runs, guesses, cfg, max_items)
     }
 
     #[inline]

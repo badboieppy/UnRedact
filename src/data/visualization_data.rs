@@ -1,9 +1,7 @@
-use std::path::Path;
 use std::sync::OnceLock;
 
 use lopdf::{Dictionary, Document, Object};
 
-use crate::dependency::file_store::FileStore;
 use crate::dependency::pdf_annotator::PdfAnnotator;
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::{GuessReport, RedactionGuess};
@@ -23,21 +21,8 @@ pub struct VisualizationInputs {
     pub overlays: Vec<TextOverlay>,
 }
 
-pub trait VisualizationDataSource {
-    fn load_inputs(
-        &self,
-        pdf_path: &Path,
-        report: &RedactionReport,
-        guesses: Option<&GuessReport>,
-        font_runs: Option<&FontRunReport>,
-    ) -> Result<VisualizationInputs, String>;
-    fn write_output(&self, output_path: &Path, bytes: &[u8]) -> Result<(), String>;
-}
-
 #[derive(Debug, Clone, Copy)]
-pub struct VisualizationData {
-    file_store: FileStore,
-}
+pub struct VisualizationData;
 
 #[derive(Debug, Clone, Copy)]
 struct RasterOverlayLayout {
@@ -49,30 +34,7 @@ struct RasterOverlayLayout {
 impl VisualizationData {
     #[inline]
     pub fn new() -> Self {
-        Self {
-            file_store: FileStore,
-        }
-    }
-
-    #[inline]
-    pub fn render_visualized_pdf(
-        &self,
-        pdf_path: &Path,
-        report: &RedactionReport,
-        guesses: Option<&GuessReport>,
-        font_runs: Option<&FontRunReport>,
-        cfg: VisualizerConfig,
-    ) -> Result<Vec<u8>, String> {
-        let inputs = self.load_inputs(pdf_path, report, guesses, font_runs)?;
-        let annotator = PdfAnnotator;
-        annotator.annotate(
-            &inputs.pdf_bytes,
-            &inputs.rects,
-            &inputs.overlays,
-            cfg.color,
-            cfg.text_color,
-            cfg.border_width,
-        )
+        Self
     }
 
     #[inline]
@@ -116,50 +78,12 @@ impl VisualizationData {
             cfg.border_width,
         )
     }
-
-    #[inline]
-    pub fn write_visualized_pdf(&self, output_path: &Path, bytes: &[u8]) -> Result<(), String> {
-        self.file_store.write(output_path, bytes)
-    }
-
-    #[inline]
-    pub fn render_and_write(
-        &self,
-        pdf_path: &Path,
-        report: &RedactionReport,
-        guesses: Option<&GuessReport>,
-        font_runs: Option<&FontRunReport>,
-        output_path: &Path,
-        cfg: VisualizerConfig,
-    ) -> Result<(), String> {
-        let bytes = self.render_visualized_pdf(pdf_path, report, guesses, font_runs, cfg)?;
-        self.write_output(output_path, &bytes)
-    }
 }
 
 impl Default for VisualizationData {
     #[inline]
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl VisualizationDataSource for VisualizationData {
-    #[inline]
-    fn load_inputs(
-        &self,
-        pdf_path: &Path,
-        report: &RedactionReport,
-        guesses: Option<&GuessReport>,
-        font_runs: Option<&FontRunReport>,
-    ) -> Result<VisualizationInputs, String> {
-        let pdf_bytes = self.file_store.read(pdf_path)?;
-        self.load_inputs_from_bytes(&pdf_bytes, report, guesses, font_runs)
-    }
-
-    #[inline]
-    fn write_output(&self, output_path: &Path, bytes: &[u8]) -> Result<(), String> {
-        self.write_visualized_pdf(output_path, bytes)
     }
 }
 

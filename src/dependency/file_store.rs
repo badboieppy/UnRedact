@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,44 @@ impl FileStore {
         file.write_all(bytes)
             .and_then(|_| file.write_all(b"\n"))
             .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    }
+
+    #[inline]
+    pub fn create_dir_all(&self, path: &Path) -> Result<(), String> {
+        fs::create_dir_all(path)
+            .map_err(|error| format!("failed to create directory {}: {error}", path.display()))
+    }
+
+    #[inline]
+    pub fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, String> {
+        let entries = fs::read_dir(path)
+            .map_err(|error| format!("failed to read directory {}: {error}", path.display()))?;
+        let mut out = Vec::<PathBuf>::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read directory entry in {}: {error}",
+                    path.display()
+                )
+            })?;
+            out.push(entry.path());
+        }
+        Ok(out)
+    }
+
+    #[inline]
+    pub fn exists(&self, path: &Path) -> Result<bool, String> {
+        path.try_exists()
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))
+    }
+
+    #[inline]
+    pub fn is_dir(&self, path: &Path) -> Result<bool, String> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!("failed to inspect {}: {error}", path.display())),
+        }
     }
 }
 

@@ -53,6 +53,11 @@ impl ResultDataPublisher {
         }
         Ok(())
     }
+
+    #[inline]
+    pub fn publish_bytes(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.file_store.write_exact(path, bytes)
+    }
 }
 
 impl Default for ResultDataPublisher {

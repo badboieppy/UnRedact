@@ -72,6 +72,14 @@ struct ShowTextOp {
 
 #[inline]
 pub fn build_font_run_report(path: &Path, bytes: &[u8]) -> Result<FontRunReport, String> {
+    build_font_run_report_from_input_name(&path.to_string_lossy(), bytes)
+}
+
+#[inline]
+pub fn build_font_run_report_from_input_name(
+    input_name: &str,
+    bytes: &[u8],
+) -> Result<FontRunReport, String> {
     let doc = Document::load_mem(bytes).map_err(|e| e.to_string())?;
     let pages = doc.get_pages();
 
@@ -107,7 +115,7 @@ pub fn build_font_run_report(path: &Path, bytes: &[u8]) -> Result<FontRunReport,
     }
 
     Ok(FontRunReport {
-        input: path.to_string_lossy().to_string(),
+        input: input_name.to_owned(),
         runs,
         assets: assets_map.into_values().collect(),
     })
