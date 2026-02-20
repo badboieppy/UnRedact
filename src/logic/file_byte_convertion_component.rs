@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use crate::data::redactions_data::RedactionsData;
-use crate::data::visualization_data::VisualizationData;
+use crate::data::{
+    ResultDataPublisher, ResultPublishPaths, ResultPublishPayload, ResultPublishRequest,
+};
 use crate::logic::types::{BytesPipelineOutputs, OutputFilePaths};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,12 +22,6 @@ pub fn read_input_pdf_bytes(input: &Path) -> Result<Vec<u8>, String> {
 
 #[inline]
 pub fn build_output_file_paths(input: &Path, output_dir: &Path) -> Result<OutputFilePaths, String> {
-    std::fs::create_dir_all(output_dir).map_err(|error| {
-        format!(
-            "failed to create output dir {}: {error}",
-            output_dir.display()
-        )
-    })?;
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
@@ -59,31 +55,21 @@ pub fn write_encoded_outputs(
     output_paths: &OutputFilePaths,
     encoded: &EncodedPipelineOutputs,
 ) -> Result<(), String> {
-    write_bytes(&output_paths.redactions_path, &encoded.redactions_json)?;
-    write_bytes(&output_paths.fonts_path, &encoded.fonts_json)?;
-    write_bytes(&output_paths.guesses_path, &encoded.guesses_json)?;
-
-    if let (Some(path), Some(bytes)) = (
-        output_paths.visualized_pdf_path.as_deref(),
-        encoded.visualized_pdf_bytes.as_deref(),
-    ) {
-        let visualization_data = VisualizationData::new();
-        visualization_data.write_visualized_pdf(path, bytes)?;
-    }
-
-    Ok(())
-}
-
-fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!("failed to create parent {}: {error}", parent.display())
-            })?;
-        }
-    }
-    std::fs::write(path, bytes)
-        .map_err(|error| format!("failed to write output {}: {error}", path.display()))
+    let publisher = ResultDataPublisher::new();
+    publisher.publish(ResultPublishRequest {
+        paths: ResultPublishPaths {
+            redactions_path: output_paths.redactions_path.as_path(),
+            fonts_path: output_paths.fonts_path.as_path(),
+            guesses_path: output_paths.guesses_path.as_path(),
+            visualized_pdf_path: output_paths.visualized_pdf_path.as_deref(),
+        },
+        payload: ResultPublishPayload {
+            redactions_json: encoded.redactions_json.as_slice(),
+            fonts_json: encoded.fonts_json.as_slice(),
+            guesses_json: encoded.guesses_json.as_slice(),
+            visualized_pdf_bytes: encoded.visualized_pdf_bytes.as_deref(),
+        },
+    })
 }
 
 #[cfg(test)]
