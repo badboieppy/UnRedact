@@ -141,6 +141,39 @@ The report includes:
 - output size stats,
 - repeat consistency via top-guess signature stability.
 
+### Automated Browser UI Benchmark + Memory Test
+You can run an automated browser test that drives the real web UI batch flow, then validates benchmark/memory output from the page.
+
+1. Build wasm first:
+
+```bash
+wasm-pack build --target web --out-dir web/pkg --release --no-default-features --features "shared-bytes-workflow,web-entry"
+```
+
+2. Install Playwright test tooling and Chromium once:
+
+```bash
+npm install
+npm run playwright:install
+```
+
+3. Run the browser benchmark test directly:
+
+```bash
+npm run test:web-ui-benchmark
+```
+
+It writes an artifact to:
+- `benchmark/web_ui_batch_benchmark.latest.json`
+
+4. Or run it via Cargo test flow (opt-in):
+
+```bash
+UNREDACT_RUN_WEB_UI_BENCHMARK=1 cargo test --test web_ui_batch_benchmark -- --nocapture
+```
+
+Without `UNREDACT_RUN_WEB_UI_BENCHMARK=1`, that cargo test auto-skips.
+
 ### Publish to GitHub Pages
 A workflow is included at:
 
