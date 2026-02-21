@@ -28,7 +28,7 @@ cargo build --release
 Run UnRedact on one file:
 
 ```bash
-cargo run --bin unredact -- path/to/file.pdf --output-dir path/to/output
+cargo run --bin unredact-cli -- path/to/file.pdf --output-dir path/to/output
 ```
 
 `--output-dir` is optional. If you omit it, output is written to your OS temp directory under `unredact` (for example: `%TEMP%/unredact`).
@@ -42,7 +42,7 @@ This creates:
 If you want an output PDF with overlays:
 
 ```bash
-cargo run --bin unredact -- path/to/file.pdf --output-dir path/to/output --visualize
+cargo run --bin unredact-cli -- path/to/file.pdf --output-dir path/to/output --visualize
 ```
 
 This also creates:
@@ -52,7 +52,7 @@ This also creates:
 You can pass a folder instead of a single file:
 
 ```bash
-cargo run --bin unredact -- path/to/folder --output-dir path/to/output
+cargo run --bin unredact-cli -- path/to/folder --output-dir path/to/output
 ```
 
 Batch mode now:
@@ -67,12 +67,12 @@ The batch manifest includes per-file success/failure and runtime.
 You can provide a custom dictionary file (one entry per line):
 
 ```bash
-cargo run --bin unredact -- path/to/file.pdf --dictionary path/to/dictionary.txt
+cargo run --bin unredact-cli -- path/to/file.pdf --dictionary path/to/dictionary.txt
 ```
 
 If you do not provide one, UnRedact uses the built-in names list.
 
-## Current `unredact` Parameters
+## Current `unredact-cli` Parameters
 - `<input>`: required file or folder path
 - `--output-dir <path>`: optional output folder (default: OS temp directory + `unredact`)
 - `--dictionary <path>`: optional dictionary text file (one entry per line)
@@ -80,10 +80,10 @@ If you do not provide one, UnRedact uses the built-in names list.
 - `--should-visually-score true|false`: optional toggle (default: `true`)
 - `--visualize`: optional flag to write `file.visualized.pdf`
 
-Show all `unredact` options:
+Show all `unredact-cli` options:
 
 ```bash
-cargo run --bin unredact -- --help
+cargo run --bin unredact-cli -- --help
 ```
 
 ## Browser Version (WASM + Static Site)

@@ -62,7 +62,7 @@ inherits = "release"
 wasm-opt = ["-O", "--all-features"]
 
 [[bin]]
-name = "unredact"
+name = "unredact-cli"
 path = "src/main.rs"
 required-features = ["cli-entry"]
 
