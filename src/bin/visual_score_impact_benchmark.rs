@@ -556,7 +556,7 @@ fn run_guess_report(
 ) -> Result<unredact::types::guess_types::GuessReport, String> {
     let cfg = GuessConfig {
         visual_score,
-        visual_score_dpi: 200.0_f32,
+        visual_score_dpi: 96.0_f32,
     };
     run_guess_from_bytes(RunGuessFromBytesRequest {
         pdf_name: &input_path.to_string_lossy(),

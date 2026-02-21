@@ -98,7 +98,7 @@ impl Default for RedactionFinderConfig {
             mode: RedactionMode::All,
             include_full_page_rects: false,
             enable_image_analysis: true,
-            raster_dpi: 200.0,
+            raster_dpi: 96.0,
         }
     }
 }

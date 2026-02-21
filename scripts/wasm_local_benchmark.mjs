@@ -12,8 +12,8 @@ import init, { run_unredact_web } from "../web/pkg/unredact.js";
 const DEFAULT_OUTPUT = "benchmark/wasm_local_benchmark.json";
 const DEFAULT_REPEATS = 3;
 const DEFAULT_WARMUP = 1;
-const DEFAULT_RASTER_DPI = 200.0;
-const DEFAULT_VISUAL_SCORE_DPI = 200.0;
+const DEFAULT_RASTER_DPI = 96.0;
+const DEFAULT_VISUAL_SCORE_DPI = 96.0;
 
 function printUsage() {
   const lines = [

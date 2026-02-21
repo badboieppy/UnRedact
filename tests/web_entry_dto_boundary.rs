@@ -16,7 +16,7 @@ fn web_request_dto_roundtrips_via_json() {
             raster_dpi: 96.0_f32,
             guess: GuessConfig {
                 visual_score: true,
-                visual_score_dpi: 200.0_f32,
+                visual_score_dpi: 96.0_f32,
             },
             visualize: true,
             visualizer: VisualizerConfig::default(),

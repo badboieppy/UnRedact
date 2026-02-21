@@ -42,8 +42,8 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    const DEFAULT_RASTER_DPI: f32 = 200.0_f32;
-    const DEFAULT_VISUAL_SCORE_DPI: f32 = 200.0_f32;
+    const DEFAULT_RASTER_DPI: f32 = 96.0_f32;
+    const DEFAULT_VISUAL_SCORE_DPI: f32 = 96.0_f32;
 
     let args = Args::parse();
 

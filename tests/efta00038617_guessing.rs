@@ -166,10 +166,10 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        raster_dpi: 200.0_f32,
+        raster_dpi: 96.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            visual_score_dpi: 96.0_f32,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),

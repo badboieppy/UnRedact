@@ -25,7 +25,7 @@ impl Default for UnredactWebConfig {
         Self {
             include_details: false,
             enable_image_analysis: true,
-            raster_dpi: 200.0_f32,
+            raster_dpi: 96.0_f32,
             guess: GuessConfig::default(),
             visualize: false,
             visualizer: VisualizerConfig::default(),

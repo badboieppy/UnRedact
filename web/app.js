@@ -282,10 +282,10 @@ async function runAnalysis() {
       cfg: {
         include_details: false,
         enable_image_analysis: Boolean(enableImageAnalysisInput.checked),
-        raster_dpi: 200.0,
+        raster_dpi: 96.0,
         guess: {
           visual_score: Boolean(shouldVisuallyScoreInput.checked),
-          visual_score_dpi: 200.0,
+          visual_score_dpi: 96.0,
         },
         visualize: Boolean(visualizeOutputInput.checked),
         visualizer: {

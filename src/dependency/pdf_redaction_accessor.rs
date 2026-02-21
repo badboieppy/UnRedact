@@ -1992,7 +1992,7 @@ mod tests {
         RenderedPage {
             width_px,
             height_px,
-            dpi: 200.0,
+            dpi: 96.0,
             pixels,
         }
     }

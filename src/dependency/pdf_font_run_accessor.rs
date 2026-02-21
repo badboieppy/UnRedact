@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
-const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
+const DEFAULT_METRICS_DPI: f32 = 96.0_f32;
 const GLYPH_UNITS_SCALE: f32 = 64.0_f32;
 
 #[derive(Debug, Clone)]

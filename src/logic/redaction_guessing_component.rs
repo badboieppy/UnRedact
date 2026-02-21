@@ -369,7 +369,7 @@ mod guess_impl {
         widths: Vec<f64>,
     }
 
-    const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
+    const DEFAULT_METRICS_DPI: f32 = 96.0_f32;
     const FIXED_MAX_CANDIDATES: usize = 50;
     const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
     const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
@@ -3736,7 +3736,7 @@ mod guess_impl {
             ];
             let cfg = GuessConfig {
                 visual_score: false,
-                visual_score_dpi: 200.0_f32,
+                visual_score_dpi: 96.0_f32,
             };
 
             let report_a = run_from_bytes(RunGuessFromBytesRequest {
@@ -3778,7 +3778,7 @@ mod guess_impl {
             ];
             let cfg = GuessConfig {
                 visual_score: false,
-                visual_score_dpi: 200.0_f32,
+                visual_score_dpi: 96.0_f32,
             };
 
             let report = run_from_bytes(RunGuessFromBytesRequest {
@@ -3803,7 +3803,7 @@ mod guess_impl {
             let dictionary = vec!["SARAH KELLEN".to_owned()];
             let cfg = GuessConfig {
                 visual_score: false,
-                visual_score_dpi: 200.0_f32,
+                visual_score_dpi: 96.0_f32,
             };
 
             let report = run_from_bytes(RunGuessFromBytesRequest {
@@ -4471,7 +4471,7 @@ mod redaction_impl {
                 mode: RedactionMode::All,
                 include_full_page_rects: false,
                 enable_image_analysis: true,
-                raster_dpi: 200.0_f32,
+                raster_dpi: 96.0_f32,
             };
 
             let out = run_redaction_scan(&retriever, cfg);
@@ -4645,7 +4645,7 @@ mod visual_guess_score_impl {
         fn default() -> Self {
             Self {
                 enabled: true,
-                dpi: 200.0_f32,
+                dpi: 96.0_f32,
                 min_ink_pixels: 64_u32,
                 drop_threshold: None,
             }
@@ -5900,7 +5900,7 @@ mod visual_guess_score_impl {
             ];
             let cfg = GuessConfig {
                 visual_score: true,
-                visual_score_dpi: 200.0_f32,
+                visual_score_dpi: 96.0_f32,
             };
             let report = run_guess_from_bytes(RunGuessFromBytesRequest {
                 pdf_name: "EFTA00101126.pdf",

@@ -27,10 +27,10 @@ fn efta00101126_last_two_redactions_include_sarah_kellen_uppercase() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        raster_dpi: 200.0_f32,
+        raster_dpi: 96.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            visual_score_dpi: 96.0_f32,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),

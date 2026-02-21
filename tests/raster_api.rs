@@ -47,7 +47,7 @@ fn service_image_analysis_toggle_controls_raster_detection() {
         raster_dpi: 96.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            visual_score_dpi: 96.0_f32,
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),
