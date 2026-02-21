@@ -42,11 +42,9 @@ pub fn load_dictionary_from_bytes(
         let text = String::from_utf8_lossy(bytes);
         let mut entries = Vec::<String>::new();
         for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+            if let Some(parsed) = parse_dictionary_line(line) {
+                entries.push(parsed);
             }
-            entries.extend(case_variants(trimmed));
         }
         diagnostics.push("dictionary_source=file".to_owned());
         normalize_dictionary(entries)
@@ -65,59 +63,68 @@ pub fn load_dictionary_from_bytes(
 fn normalize_dictionary(words: Vec<String>) -> Vec<String> {
     let mut set = BTreeSet::<String>::new();
     for word in words {
-        let trimmed = word.trim();
-        if trimmed.is_empty() {
+        let normalized = normalize_whitespace(&word);
+        if normalized.is_empty() {
             continue;
         }
-        set.insert(trimmed.to_owned());
+        set.insert(normalized);
     }
     set.into_iter().collect::<Vec<_>>()
 }
 
 #[inline]
-fn case_variants(value: &str) -> Vec<String> {
+fn parse_dictionary_line(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Vec::new();
+        return None;
     }
-    vec![
-        trimmed.to_owned(),
-        trimmed.to_lowercase(),
-        trimmed.to_uppercase(),
-        title_case(trimmed),
-    ]
+    let parsed = if trimmed.contains('|') {
+        let tokens = trimmed
+            .split('|')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            return None;
+        }
+        tokens.join(" ")
+    } else {
+        trimmed.to_owned()
+    };
+    let normalized = normalize_whitespace(&parsed);
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 #[inline]
 fn build_default_name_dictionary() -> Vec<String> {
     let mut entries = Vec::<String>::new();
     for value in DEFAULT_NAME_DICTIONARY {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
+        if let Some(parsed) = parse_dictionary_line(value) {
+            entries.push(parsed);
         }
-        entries.extend(case_variants(trimmed));
     }
     normalize_dictionary(entries)
 }
 
-fn title_case(value: &str) -> String {
+fn normalize_whitespace(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    let mut new_word = true;
+    let mut in_space = false;
     for ch in value.chars() {
-        if ch.is_alphabetic() {
-            if new_word {
-                out.extend(ch.to_uppercase());
-                new_word = false;
-            } else {
-                out.extend(ch.to_lowercase());
+        if ch.is_whitespace() {
+            if !in_space && !out.is_empty() {
+                out.push(' ');
             }
+            in_space = true;
         } else {
-            new_word = ch == ' ' || ch == '-' || ch == '\'';
             out.push(ch);
+            in_space = false;
         }
     }
-    out
+    out.trim().to_owned()
 }
 
 #[cfg(test)]
@@ -125,12 +132,12 @@ mod tests {
     use super::DictionaryData;
 
     #[test]
-    fn load_dictionary_from_bytes_dedupes_and_adds_case_variants() {
+    fn load_dictionary_from_bytes_dedupes_and_parses_pipe_format() {
         let data = DictionaryData::new();
         let loaded = data
-            .load_dictionary_from_bytes(Some(b"b\na\nb\n"))
+            .load_dictionary_from_bytes(Some(b"Sarah|Kellen\nSarah Kellen\nMUCINSKA, ADRIANA\n"))
             .expect("expected dictionary bytes to parse");
-        assert_eq!(loaded.dictionary, vec!["A", "B", "a", "b"]);
+        assert_eq!(loaded.dictionary, vec!["MUCINSKA, ADRIANA", "Sarah Kellen"]);
         assert!(loaded
             .diagnostics
             .iter()

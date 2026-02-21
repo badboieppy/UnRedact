@@ -396,6 +396,42 @@ mod guess_impl {
     const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 140.0_f64;
     const JOINT_ASSIGNMENT_NULL_DELTA: f64 = 0.75_f64;
     const JOINT_ASSIGNMENT_NULL_MIN_BEST_COST: f64 = 1.4_f64;
+    const MAX_NAME_VARIANTS_PER_ENTRY: usize = 24;
+    const NAME_PREFIX_TOKENS: [&str; 24] = [
+        "mr",
+        "mrs",
+        "ms",
+        "miss",
+        "mx",
+        "dr",
+        "prof",
+        "sir",
+        "madam",
+        "lady",
+        "lord",
+        "rev",
+        "fr",
+        "hon",
+        "judge",
+        "capt",
+        "captain",
+        "lt",
+        "col",
+        "gen",
+        "adm",
+        "pres",
+        "president",
+        "governor",
+    ];
+    const NAME_SUFFIX_TOKENS: [&str; 24] = [
+        "jr", "sr", "ii", "iii", "iv", "v", "vi", "phd", "md", "esq", "esquire", "jd", "dds",
+        "dmd", "do", "rn", "cpa", "mba", "qc", "kc", "ret", "retired", "junior", "senior",
+    ];
+    const NAME_SURNAME_PARTICLE_TOKENS: [&str; 28] = [
+        "al", "ap", "ben", "bin", "da", "dal", "de", "del", "dela", "della", "der", "di", "dos",
+        "du", "el", "ibn", "la", "le", "st", "st.", "ter", "van", "vanden", "vander", "von", "zu",
+        "zum", "zur",
+    ];
 
     #[derive(Debug, Clone, Copy)]
     struct MeasuredWidth {
@@ -1422,41 +1458,6 @@ mod guess_impl {
             font_key: anchor.font_key.clone(),
         });
         let left_anchor_text = anchor.left_anchor_text.trim();
-        if !cache.candidates.contains_key(&key) {
-            let mut widths = std::collections::BTreeMap::new();
-            for word in dictionary {
-                let trimmed = word.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let width = measure_width(trimmed).unwrap_or_else(|| {
-                    fallback_measured_width(
-                        trimmed,
-                        fallback_char_width,
-                        fallback_space_width,
-                        DEFAULT_METRICS_DPI,
-                    )
-                });
-                widths.insert(trimmed.to_owned(), width);
-            }
-            let mut sorted = widths
-                .iter()
-                .map(|(text, measured)| CandidateWidthEntry {
-                    text: text.clone(),
-                    width_pt: measured.pt,
-                    source: measured.source,
-                })
-                .collect::<Vec<_>>();
-            sorted.sort_by(|left, right| {
-                left.width_pt
-                    .partial_cmp(&right.width_pt)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| left.text.cmp(&right.text))
-            });
-            cache.candidates.insert(key.clone(), widths);
-            cache.sorted_by_width.insert(key.clone(), sorted);
-        }
-
         let left_width = measure_width(left_anchor_text).unwrap_or_else(|| {
             fallback_measured_width(
                 left_anchor_text,
@@ -1473,8 +1474,25 @@ mod guess_impl {
                 DEFAULT_METRICS_DPI,
             )
         });
-        let candidate_width_index = cache.sorted_by_width.get(&key);
-        let Some(candidate_width_index) = candidate_width_index else {
+        let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
+        let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
+        let gap_ratio = anchor_gap_pt / redaction_width_pt;
+        let multi_span_mode = matches!(anchor.mode, AnchorMode::TwoSided)
+            && gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
+        let (min_char_units, max_char_units) = char_unit_band(
+            redaction_width_pt,
+            fallback_char_width.max(0.1_f64),
+            anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
+        );
+        let candidate_width_index = build_row_candidate_width_index(
+            dictionary,
+            &key,
+            cache,
+            min_char_units,
+            max_char_units,
+            &measure_width,
+        );
+        if candidate_width_index.is_empty() {
             return (
                 RedactionGuess {
                     page_index: redaction.page_index,
@@ -1510,19 +1528,8 @@ mod guess_impl {
                 },
                 funnel,
             );
-        };
-
+        }
         let mut scored = Vec::new();
-        let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
-        let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
-        let gap_ratio = anchor_gap_pt / redaction_width_pt;
-        let multi_span_mode = matches!(anchor.mode, AnchorMode::TwoSided)
-            && gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
-        let (min_char_units, max_char_units) = char_unit_band(
-            redaction_width_pt,
-            fallback_char_width.max(0.1_f64),
-            anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
-        );
         let anchor_filter_limit_pt =
             (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(FIXED_TOLERANCE_PT.max(4.0_f64));
         let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
@@ -1534,7 +1541,7 @@ mod guess_impl {
             let lower_width = (redaction_width_pt - box_filter_limit_pt).max(0.0_f64);
             let upper_width = redaction_width_pt + box_filter_limit_pt;
             let ranged =
-                candidate_width_entries_in_range(candidate_width_index, lower_width, upper_width);
+                candidate_width_entries_in_range(&candidate_width_index, lower_width, upper_width);
             let mut band = if ranged.is_empty() {
                 candidate_width_index.as_slice()
             } else {
@@ -1606,7 +1613,7 @@ mod guess_impl {
             let lower_width = (redaction_width_pt - single_span_width_slack_pt).max(0.0_f64);
             let upper_width = redaction_width_pt + single_span_width_slack_pt;
             let ranged =
-                candidate_width_entries_in_range(candidate_width_index, lower_width, upper_width);
+                candidate_width_entries_in_range(&candidate_width_index, lower_width, upper_width);
             let mut band = if ranged.is_empty() {
                 candidate_width_index.as_slice()
             } else {
@@ -3005,18 +3012,479 @@ mod guess_impl {
     }
 
     struct WidthCache {
-        candidates:
+        measured:
             std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
-        sorted_by_width: std::collections::BTreeMap<WidthKey, Vec<CandidateWidthEntry>>,
+        variants: std::collections::BTreeMap<String, Vec<String>>,
     }
 
     impl WidthCache {
         fn new() -> Self {
             Self {
-                candidates: std::collections::BTreeMap::new(),
-                sorted_by_width: std::collections::BTreeMap::new(),
+                measured: std::collections::BTreeMap::new(),
+                variants: std::collections::BTreeMap::new(),
             }
         }
+    }
+
+    fn build_row_candidate_width_index(
+        dictionary: &[String],
+        key: &WidthKey,
+        cache: &mut WidthCache,
+        min_char_units: f64,
+        max_char_units: f64,
+        measure_width: &dyn Fn(&str) -> Option<MeasuredWidth>,
+    ) -> Vec<CandidateWidthEntry> {
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        let mut out = Vec::<CandidateWidthEntry>::new();
+        for entry in dictionary {
+            for variant in entry_variants(entry, cache) {
+                let trimmed = variant.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let char_units = candidate_char_units(trimmed);
+                if char_units < min_char_units || char_units > max_char_units {
+                    continue;
+                }
+                if !seen.insert(trimmed.to_owned()) {
+                    continue;
+                }
+                let measured = measured_candidate_width(key, trimmed, cache, measure_width);
+                out.push(CandidateWidthEntry {
+                    text: trimmed.to_owned(),
+                    width_pt: measured.pt,
+                    source: measured.source,
+                });
+            }
+        }
+        out.sort_by(|left, right| {
+            left.width_pt
+                .partial_cmp(&right.width_pt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.text.cmp(&right.text))
+        });
+        out
+    }
+
+    fn measured_candidate_width(
+        key: &WidthKey,
+        text: &str,
+        cache: &mut WidthCache,
+        measure_width: &dyn Fn(&str) -> Option<MeasuredWidth>,
+    ) -> MeasuredWidth {
+        if let Some(existing) = cache
+            .measured
+            .get(key)
+            .and_then(|rows| rows.get(text))
+            .copied()
+        {
+            return existing;
+        }
+        let measured = measure_width(text).unwrap_or_else(|| {
+            measured_width_from_points(0.0_f64, DEFAULT_METRICS_DPI, WidthSource::Fallback)
+        });
+        cache
+            .measured
+            .entry(key.clone())
+            .or_default()
+            .insert(text.to_owned(), measured);
+        measured
+    }
+
+    fn entry_variants(entry: &str, cache: &mut WidthCache) -> Vec<String> {
+        let canonical = normalize_dictionary_entry(entry);
+        if canonical.is_empty() {
+            return Vec::new();
+        }
+        if let Some(variants) = cache.variants.get(&canonical) {
+            return variants.clone();
+        }
+        let variants = build_name_variants(&canonical);
+        cache.variants.insert(canonical, variants.clone());
+        variants
+    }
+
+    fn normalize_dictionary_entry(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut in_space = false;
+        for ch in value.chars() {
+            if ch.is_whitespace() {
+                if !in_space && !out.is_empty() {
+                    out.push(' ');
+                }
+                in_space = true;
+            } else {
+                out.push(ch);
+                in_space = false;
+            }
+        }
+        out.trim().to_owned()
+    }
+
+    fn build_name_variants(canonical: &str) -> Vec<String> {
+        let mut template_seen = std::collections::BTreeSet::<String>::new();
+        let mut templates = Vec::<String>::new();
+        push_unique_variant(&mut template_seen, &mut templates, canonical.to_owned());
+
+        let tokens = canonical
+            .split_whitespace()
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        if !tokens.is_empty() && has_special_name_structure(canonical, &tokens) {
+            let parts = parse_name_parts(canonical, &tokens);
+            let core = join_name_tokens(&parts.core_tokens);
+            let given = join_name_tokens(&parts.given_tokens);
+            let surname = join_name_tokens(&parts.surname_tokens);
+            let given_first = parts.given_tokens.first().cloned().unwrap_or_default();
+            let surname_last = parts.surname_tokens.last().cloned().unwrap_or_default();
+            let prefix = join_name_tokens(&parts.prefix_tokens);
+            let suffix = join_name_tokens(&parts.suffix_tokens);
+
+            if !core.is_empty() {
+                push_unique_variant(&mut template_seen, &mut templates, core.clone());
+            }
+            if !given_first.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{given_first} {surname}"),
+                );
+            }
+            if !surname.is_empty() && !given_first.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{surname}, {given_first}"),
+                );
+            }
+            if !prefix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{prefix} {given_first} {surname}"),
+                );
+            }
+            if !suffix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{given_first} {surname} {suffix}"),
+                );
+            }
+            if !prefix.is_empty()
+                && !suffix.is_empty()
+                && !given_first.is_empty()
+                && !surname.is_empty()
+            {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{prefix} {given_first} {surname} {suffix}"),
+                );
+            }
+            if !given.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{given} {surname}"),
+                );
+            }
+            if !given.is_empty() && !surname.is_empty() && !suffix.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{given} {surname} {suffix}"),
+                );
+            }
+            if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{prefix} {given} {surname}"),
+                );
+            }
+            if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() && !suffix.is_empty()
+            {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{prefix} {given} {surname} {suffix}"),
+                );
+            }
+            if !given_first.is_empty() {
+                push_unique_variant(&mut template_seen, &mut templates, given_first.clone());
+            }
+            if !surname.is_empty() {
+                push_unique_variant(&mut template_seen, &mut templates, surname.clone());
+            }
+            if !surname_last.is_empty() {
+                push_unique_variant(&mut template_seen, &mut templates, surname_last);
+            }
+            if !prefix.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{prefix} {surname}"),
+                );
+            }
+            if !suffix.is_empty() && !surname.is_empty() {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{surname} {suffix}"),
+                );
+            }
+            if !core.is_empty() && !canonical.contains(',') {
+                let mut split = core.split_whitespace();
+                if let (Some(first), Some(last)) = (split.next(), core.split_whitespace().last()) {
+                    if first != last {
+                        push_unique_variant(
+                            &mut template_seen,
+                            &mut templates,
+                            format!("{last}, {first}"),
+                        );
+                    }
+                }
+            }
+            if parts.given_tokens.len() >= 2 && !surname.is_empty() {
+                let middle_initials = parts.given_tokens[1..]
+                    .iter()
+                    .filter_map(|value| value.chars().next())
+                    .map(|ch| format!("{ch}."))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !middle_initials.is_empty() && !given_first.is_empty() {
+                    push_unique_variant(
+                        &mut template_seen,
+                        &mut templates,
+                        format!("{given_first} {middle_initials} {surname}"),
+                    );
+                }
+            }
+        } else if tokens.len() >= 2 {
+            let first = tokens[0];
+            let last = tokens[tokens.len() - 1];
+            push_unique_variant(
+                &mut template_seen,
+                &mut templates,
+                format!("{first} {last}"),
+            );
+            if !canonical.contains(',') {
+                push_unique_variant(
+                    &mut template_seen,
+                    &mut templates,
+                    format!("{last}, {first}"),
+                );
+            }
+            push_unique_variant(&mut template_seen, &mut templates, first.to_owned());
+            push_unique_variant(&mut template_seen, &mut templates, last.to_owned());
+        }
+
+        finalize_name_variants(&templates)
+    }
+
+    fn has_special_name_structure(canonical: &str, tokens: &[&str]) -> bool {
+        canonical.contains(',')
+            || tokens
+                .iter()
+                .any(|token| is_name_prefix_token(token) || is_name_suffix_token(token))
+            || tokens
+                .iter()
+                .take(tokens.len().saturating_sub(1))
+                .any(|token| is_surname_particle_token(token))
+    }
+
+    fn finalize_name_variants(templates: &[String]) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        let mut out = Vec::<String>::new();
+        for template in templates {
+            push_unique_variant(&mut seen, &mut out, template.clone());
+            push_unique_variant(&mut seen, &mut out, template.to_uppercase());
+            push_unique_variant(&mut seen, &mut out, template.to_lowercase());
+            push_unique_variant(&mut seen, &mut out, title_case_text(template));
+            if out.len() >= MAX_NAME_VARIANTS_PER_ENTRY {
+                break;
+            }
+        }
+        if out.len() > MAX_NAME_VARIANTS_PER_ENTRY {
+            out.truncate(MAX_NAME_VARIANTS_PER_ENTRY);
+        }
+        out
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct NameParts {
+        prefix_tokens: Vec<String>,
+        given_tokens: Vec<String>,
+        surname_tokens: Vec<String>,
+        suffix_tokens: Vec<String>,
+        core_tokens: Vec<String>,
+    }
+
+    fn parse_name_parts(canonical: &str, tokens: &[&str]) -> NameParts {
+        parse_comma_name_parts(canonical).unwrap_or_else(|| parse_space_name_parts(tokens))
+    }
+
+    fn parse_comma_name_parts(canonical: &str) -> Option<NameParts> {
+        let (left, right) = canonical.split_once(',')?;
+        let left_tokens = split_name_tokens(left);
+        let right_tokens = split_name_tokens(right);
+        if left_tokens.is_empty() || right_tokens.is_empty() {
+            return None;
+        }
+        let (prefix_tokens, mut right_core_tokens, suffix_tokens) =
+            split_prefix_suffix(&right_tokens);
+        if right_core_tokens.is_empty() {
+            right_core_tokens = right_tokens;
+        }
+        let given_tokens = right_core_tokens;
+        let surname_tokens = left_tokens;
+        let mut core_tokens = Vec::<String>::new();
+        core_tokens.extend(given_tokens.iter().cloned());
+        core_tokens.extend(surname_tokens.iter().cloned());
+        if core_tokens.is_empty() {
+            core_tokens.extend(surname_tokens.iter().cloned());
+        }
+        Some(NameParts {
+            prefix_tokens,
+            given_tokens,
+            surname_tokens,
+            suffix_tokens,
+            core_tokens,
+        })
+    }
+
+    fn parse_space_name_parts(tokens: &[&str]) -> NameParts {
+        let all_tokens = tokens
+            .iter()
+            .map(|token| normalize_dictionary_entry(token))
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        let (prefix_tokens, mut core_tokens, suffix_tokens) = split_prefix_suffix(&all_tokens);
+        if core_tokens.is_empty() {
+            core_tokens = all_tokens;
+        }
+        let (mut given_tokens, mut surname_tokens) = split_given_surname(&core_tokens);
+        if given_tokens.is_empty() && !core_tokens.is_empty() {
+            given_tokens.push(core_tokens[0].clone());
+        }
+        if surname_tokens.is_empty() && !core_tokens.is_empty() {
+            surname_tokens.push(core_tokens[core_tokens.len() - 1].clone());
+        }
+        NameParts {
+            prefix_tokens,
+            given_tokens,
+            surname_tokens,
+            suffix_tokens,
+            core_tokens,
+        }
+    }
+
+    fn split_name_tokens(value: &str) -> Vec<String> {
+        value
+            .split_whitespace()
+            .map(normalize_dictionary_entry)
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+    }
+
+    fn split_prefix_suffix(tokens: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut prefix_end = 0_usize;
+        while prefix_end < tokens.len() && is_name_prefix_token(&tokens[prefix_end]) {
+            prefix_end += 1;
+        }
+        let mut suffix_start = tokens.len();
+        while suffix_start > prefix_end && is_name_suffix_token(&tokens[suffix_start - 1]) {
+            suffix_start -= 1;
+        }
+        (
+            tokens[..prefix_end].to_vec(),
+            tokens[prefix_end..suffix_start].to_vec(),
+            tokens[suffix_start..].to_vec(),
+        )
+    }
+
+    fn split_given_surname(tokens: &[String]) -> (Vec<String>, Vec<String>) {
+        if tokens.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        if tokens.len() == 1 {
+            return (vec![tokens[0].clone()], Vec::new());
+        }
+        let mut surname_start = tokens.len() - 1;
+        while surname_start > 0 && is_surname_particle_token(&tokens[surname_start - 1]) {
+            surname_start -= 1;
+        }
+        if surname_start == 0 {
+            return (Vec::new(), tokens.to_vec());
+        }
+        (
+            tokens[..surname_start].to_vec(),
+            tokens[surname_start..].to_vec(),
+        )
+    }
+
+    fn join_name_tokens(tokens: &[String]) -> String {
+        tokens.join(" ")
+    }
+
+    fn name_token_lookup_key(value: &str) -> String {
+        value
+            .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\'' && ch != '-')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    }
+
+    fn is_name_prefix_token(value: &str) -> bool {
+        let key = name_token_lookup_key(value);
+        !key.is_empty() && NAME_PREFIX_TOKENS.contains(&key.as_str())
+    }
+
+    fn is_name_suffix_token(value: &str) -> bool {
+        let key = name_token_lookup_key(value);
+        !key.is_empty() && NAME_SUFFIX_TOKENS.contains(&key.as_str())
+    }
+
+    fn is_surname_particle_token(value: &str) -> bool {
+        let key = name_token_lookup_key(value);
+        !key.is_empty() && NAME_SURNAME_PARTICLE_TOKENS.contains(&key.as_str())
+    }
+
+    fn push_unique_variant(
+        seen: &mut std::collections::BTreeSet<String>,
+        out: &mut Vec<String>,
+        value: String,
+    ) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = normalize_dictionary_entry(trimmed);
+        if normalized.is_empty() {
+            return;
+        }
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+
+    fn title_case_text(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut new_word = true;
+        for ch in value.chars() {
+            if ch.is_alphabetic() {
+                if new_word {
+                    out.extend(ch.to_uppercase());
+                    new_word = false;
+                } else {
+                    out.extend(ch.to_lowercase());
+                }
+            } else {
+                new_word = ch == ' ' || ch == '-' || ch == '\'';
+                out.push(ch);
+            }
+        }
+        out
     }
 
     fn vertical_overlap_run(a: &FontRect, b: &Rect) -> f32 {
