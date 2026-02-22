@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::data::{
-    LocalFileWorkflowData, ResultDataPublisher, ResultPublishPaths, ResultPublishPayload,
-    ResultPublishRequest,
+use crate::data::local_file_workflow_data::LocalFileWorkflowData;
+use crate::data::result_data_publisher::{
+    ResultDataPublisher, ResultPublishPaths, ResultPublishPayload, ResultPublishRequest,
 };
 
 use super::{

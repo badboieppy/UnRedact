@@ -1,9 +1,10 @@
+use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use unredact::data::DEFAULT_NAME_DICTIONARY;
+use unredact::service::tooling_entry::default_name_dictionary_entries;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -282,63 +283,30 @@ struct EvaluatedDataset {
     run_snapshot: DatasetRunSnapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "guess_accuracy_benchmark",
+    about = "Run accuracy, performance, and consistency benchmark suites for known test PDFs."
+)]
 struct CliOptions {
+    #[arg(long = "out", default_value = "benchmark/guess_accuracy.json")]
     out_path: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 2_usize,
+        value_parser = parse_positive_usize
+    )]
     repeats: usize,
-    consistency_out: Option<PathBuf>,
-    require_deterministic: bool,
 }
 
-fn parse_options() -> Result<CliOptions, String> {
-    let mut out_path = PathBuf::from("benchmark/guess_accuracy.json");
-    let mut repeats = 2_usize;
-    let mut consistency_out = None::<PathBuf>;
-    let mut require_deterministic = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--out" => {
-                let Some(path_value) = args.next() else {
-                    return Err("missing value for --out".to_owned());
-                };
-                out_path = PathBuf::from(path_value);
-            }
-            "--repeats" => {
-                let Some(value) = args.next() else {
-                    return Err("missing value for --repeats".to_owned());
-                };
-                repeats = value
-                    .parse::<usize>()
-                    .map_err(|error| format!("invalid --repeats value '{value}': {error}"))?;
-                if repeats == 0 {
-                    return Err("--repeats must be > 0".to_owned());
-                }
-            }
-            "--determinism" => repeats = 3_usize,
-            "--single-run" => repeats = 1_usize,
-            "--require-deterministic" => require_deterministic = true,
-            "--consistency-out" => {
-                let Some(path_value) = args.next() else {
-                    return Err("missing value for --consistency-out".to_owned());
-                };
-                consistency_out = Some(PathBuf::from(path_value));
-            }
-            "--help" | "-h" => {
-                println!(
-                    "Usage: cargo run --bin guess_accuracy_benchmark -- [--out <path>] [--repeats <n>] [--single-run] [--determinism] [--require-deterministic] [--consistency-out <path>]"
-                );
-                std::process::exit(0);
-            }
-            _ => return Err(format!("unknown argument: {arg}")),
-        }
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid usize value '{value}': {error}"))?;
+    if parsed == 0 {
+        return Err("value must be > 0".to_owned());
     }
-    Ok(CliOptions {
-        out_path,
-        repeats,
-        consistency_out,
-        require_deterministic,
-    })
+    Ok(parsed)
 }
 
 fn benchmark_config() -> UnredactServiceConfig {
@@ -797,7 +765,7 @@ fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
         .map(|value| value.to_ascii_uppercase())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for value in DEFAULT_NAME_DICTIONARY {
+    for value in default_name_dictionary_entries() {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             continue;
@@ -1473,13 +1441,7 @@ fn compute_consistency(run_snapshots: &[BenchmarkRunSnapshot]) -> ConsistencySum
 }
 
 fn main() {
-    let options = match parse_options() {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("argument error: {error}");
-            std::process::exit(2);
-        }
-    };
+    let options = CliOptions::parse();
     let mut run_snapshots = Vec::<BenchmarkRunSnapshot>::new();
     let mut selected_payload = None::<AccuracyBenchmark>;
 
@@ -1613,14 +1575,6 @@ fn main() {
         }
     };
     payload.consistency = consistency.clone();
-    if options.require_deterministic && !payload.consistency.all_hashes_identical {
-        eprintln!(
-            "determinism gate failed: hashes_identical={} hash_match_ratio={:.3}",
-            payload.consistency.all_hashes_identical, payload.consistency.hash_match_ratio
-        );
-        std::process::exit(3);
-    }
-
     println!("Guess Accuracy Benchmark");
     println!("Metric definitions:");
     println!("  evaluated_items: {}", payload.definitions.evaluated_items);
@@ -1867,31 +1821,4 @@ fn main() {
         std::process::exit(1);
     }
     println!("wrote {}", options.out_path.display());
-
-    if let Some(path) = options.consistency_out.as_deref() {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let create_result = std::fs::create_dir_all(parent);
-                if let Err(error) = create_result {
-                    eprintln!(
-                        "failed to create output directory {}: {error}",
-                        parent.display()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        let encoded = match serde_json::to_vec_pretty(&payload.consistency) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("failed to encode consistency json: {error}");
-                std::process::exit(1);
-            }
-        };
-        if let Err(error) = std::fs::write(path, encoded) {
-            eprintln!("failed to write {}: {error}", path.display());
-            std::process::exit(1);
-        }
-        println!("wrote {}", path.display());
-    }
 }

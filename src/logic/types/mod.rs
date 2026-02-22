@@ -1,9 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
 use crate::types::visualizer_config::VisualizerConfig;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub include_details: bool,
     pub enable_image_analysis: bool,

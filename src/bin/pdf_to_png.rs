@@ -1,8 +1,7 @@
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
-use unredact::dependency::hayro_renderer::HayroRenderer;
-use unredact::types::redaction_types::PdfRenderer;
+use unredact::service::tooling_entry::ToolingPdfRenderer;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,7 +54,9 @@ fn run() -> Result<(), String> {
         return Err("--output cannot be used with --all-pages".to_owned());
     }
 
-    let renderer = HayroRenderer::new(&args.input)?;
+    let pdf_bytes = std::fs::read(&args.input)
+        .map_err(|e| format!("failed to read input pdf {}: {e}", args.input.display()))?;
+    let renderer = ToolingPdfRenderer::new_from_bytes(&pdf_bytes)?;
     let page_count = renderer.page_count();
     if page_count == 0 {
         return Err("input PDF has zero pages".to_owned());

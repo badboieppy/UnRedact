@@ -11,32 +11,8 @@ use crate::logic::{
     BytesPipelineRequest, DictionaryListRequest, OutputFilePaths, PipelineConfig,
     VisualizationRenderRequest,
 };
-use crate::types::guess_types::GuessConfig;
-use crate::types::visualizer_config::VisualizerConfig;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnredactServiceConfig {
-    pub include_details: bool,
-    pub enable_image_analysis: bool,
-    pub raster_dpi: f32,
-    pub guess: GuessConfig,
-    pub visualize: bool,
-    pub visualizer: VisualizerConfig,
-}
-
-impl Default for UnredactServiceConfig {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            include_details: false,
-            enable_image_analysis: true,
-            raster_dpi: 200.0_f32,
-            guess: GuessConfig::default(),
-            visualize: false,
-            visualizer: VisualizerConfig::default(),
-        }
-    }
-}
+pub type UnredactServiceConfig = PipelineConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnredactServiceRequest {
@@ -121,33 +97,27 @@ pub fn run_batch_from_paths(
 
 #[inline]
 pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String> {
-    let pipeline_cfg = PipelineConfig {
-        include_details: req.cfg.include_details,
-        enable_image_analysis: req.cfg.enable_image_analysis,
-        raster_dpi: req.cfg.raster_dpi,
-        guess: req.cfg.guess,
-        visualize: req.cfg.visualize,
-        visualizer: req.cfg.visualizer,
-    };
     let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
     let dictionary_input = read_dictionary_input(req.dictionary_path.as_deref())?;
     let dictionary_outputs =
         run_dictionary_list_convertion_component(DictionaryListRequest { dictionary_input })?;
+    let should_visualize = req.cfg.visualize;
+    let visualizer = req.cfg.visualizer;
     let bytes_req = BytesPipelineRequest {
         input_name: req.input.to_string_lossy().to_string(),
         pdf_bytes: read_input_pdf_bytes(&req.input)?,
         dictionary_entries: dictionary_outputs.dictionary_entries,
         dictionary_diagnostics: dictionary_outputs.dictionary_diagnostics,
-        cfg: pipeline_cfg,
+        cfg: req.cfg,
     };
     let mut bytes_outputs = run_redaction_guessing_component(bytes_req)?;
-    let visualize_ms = if req.cfg.visualize {
+    let visualize_ms = if should_visualize {
         let visualize_started = Instant::now();
         let rendered = run_visualization_render_component(VisualizationRenderRequest {
             redactions: &bytes_outputs.redactions,
             guesses: &bytes_outputs.guesses,
             payload: bytes_outputs.visualization_payload.as_ref(),
-            visualizer: req.cfg.visualizer,
+            visualizer,
         })?;
         bytes_outputs.visualized_pdf_bytes = rendered;
         visualize_started.elapsed().as_millis()

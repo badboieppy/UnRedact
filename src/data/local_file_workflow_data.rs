@@ -21,11 +21,6 @@ impl LocalFileWorkflowData {
     }
 
     #[inline]
-    pub fn write_bytes_exact(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
-        self.file_store.write_exact(path, bytes)
-    }
-
-    #[inline]
     pub fn create_dir_all(&self, path: &Path) -> Result<(), String> {
         self.file_store.create_dir_all(path)
     }

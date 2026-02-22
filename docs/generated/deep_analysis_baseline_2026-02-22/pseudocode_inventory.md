@@ -7,7 +7,7 @@ Purpose: Implement file-local workflow and helper logic.
 Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
-3. Call parse_positive_usize(...) in this file flow.
+3. Call parse_options(...) in this file flow.
 4. Call benchmark_config(...) in this file flow.
 5. Call load_report(...) in this file flow.
 6. Call run_report(...) in this file flow.
@@ -102,17 +102,19 @@ Pseudo:
 2. Execute entry points and helper flow.
 3. Call new(...) in this file flow.
 4. Call read_bytes(...) in this file flow.
-5. Call create_dir_all(...) in this file flow.
-6. Call read_dir_paths(...) in this file flow.
-7. Call exists(...) in this file flow.
-8. Call is_dir(...) in this file flow.
-9. Call default(...) in this file flow.
+5. Call write_bytes_exact(...) in this file flow.
+6. Call create_dir_all(...) in this file flow.
+7. Call read_dir_paths(...) in this file flow.
+8. Call exists(...) in this file flow.
+9. Call is_dir(...) in this file flow.
+10. Call default(...) in this file flow.
 
 ### src/data/mod.rs
 Purpose: Declare module boundaries and re-exports.
 Pseudo:
 1. Declare submodules.
 2. Re-export selected symbols for parent layer consumption.
+3. Submodules: default_name_dictionary, dictionary_data, fonts_data, guess_validation_data, local_file_workflow_data, redactions_data, result_data_publisher, visualization_data.
 
 ### src/data/redactions_data.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -163,11 +165,13 @@ Pseudo:
 2. Execute entry points and helper flow.
 3. Call read(...) in this file flow.
 4. Call write_exact(...) in this file flow.
-5. Call create_dir_all(...) in this file flow.
-6. Call read_dir(...) in this file flow.
-7. Call exists(...) in this file flow.
-8. Call is_dir(...) in this file flow.
-9. Call ensure_parent_dir(...) in this file flow.
+5. Call write(...) in this file flow.
+6. Call create_dir_all(...) in this file flow.
+7. Call read_dir(...) in this file flow.
+8. Call exists(...) in this file flow.
+9. Call is_dir(...) in this file flow.
+10. Call validate_read_request(...) in this file flow.
+11. Call ensure_parent_dir(...) in this file flow.
 
 ### src/dependency/hayro_renderer.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -175,14 +179,16 @@ Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
 3. Call new_from_bytes(...) in this file flow.
-4. Call page_count(...) in this file flow.
-5. Call render_page_to_rgba(...) in this file flow.
+4. Call is_available(...) in this file flow.
+5. Call page_count(...) in this file flow.
+6. Call render_page_to_rgba(...) in this file flow.
 
 ### src/dependency/mod.rs
 Purpose: Declare module boundaries and re-exports.
 Pseudo:
 1. Declare submodules.
 2. Re-export selected symbols for parent layer consumption.
+3. Submodules: file_store, hayro_renderer, pdf_annotator, pdf_font_occurrence_accessor, pdf_font_run_accessor, pdf_redaction_accessor.
 
 ### src/dependency/pdf_annotator.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -200,17 +206,17 @@ Purpose: Implement file-local workflow and helper logic.
 Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
-3. Call build_file_font_report_from_bytes(...) in this file flow.
-4. Call extract_pdf_occurrences_from_bytes(...) in this file flow.
-5. Call extract_pdf_page_occurrences(...) in this file flow.
-6. Call extract_pdf_page_fonts(...) in this file flow.
-7. Call resolve_pdf_font_name(...) in this file flow.
-8. Call occurrences_from_ops(...) in this file flow.
-9. Call reduce_op(...) in this file flow.
-10. Call apply_tf(...) in this file flow.
-11. Call apply_tm(...) in this file flow.
-12. Call apply_td(...) in this file flow.
-13. Additional helper functions omitted (33 total).
+3. Call new(...) in this file flow.
+4. Call build_file_font_report(...) in this file flow.
+5. Call build_file_font_report_from_bytes(...) in this file flow.
+6. Call extract_occurrences(...) in this file flow.
+7. Call extract_pdf_occurrences(...) in this file flow.
+8. Call extract_pdf_occurrences_from_bytes(...) in this file flow.
+9. Call extract_pdf_page_occurrences(...) in this file flow.
+10. Call extract_pdf_page_fonts(...) in this file flow.
+11. Call resolve_pdf_font_name(...) in this file flow.
+12. Call occurrences_from_ops(...) in this file flow.
+13. Additional helper functions omitted (43 total).
 
 ### src/dependency/pdf_font_run_accessor.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -218,16 +224,16 @@ Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
 3. Call default(...) in this file flow.
-4. Call build_font_run_report_from_input_name(...) in this file flow.
-5. Call extract_text_runs(...) in this file flow.
-6. Call extract_page_font_info(...) in this file flow.
-7. Call resolve_pdf_font_name(...) in this file flow.
-8. Call extract_font_bytes(...) in this file flow.
-9. Call parse_show_text_op(...) in this file flow.
-10. Call next_line_delta_y(...) in this file flow.
-11. Call pdf_spacing_pt(...) in this file flow.
-12. Call tj_adjustment_pt(...) in this file flow.
-13. Additional helper functions omitted (34 total).
+4. Call build_font_run_report(...) in this file flow.
+5. Call build_font_run_report_from_input_name(...) in this file flow.
+6. Call extract_text_runs(...) in this file flow.
+7. Call extract_page_font_info(...) in this file flow.
+8. Call resolve_pdf_font_name(...) in this file flow.
+9. Call extract_font_bytes(...) in this file flow.
+10. Call parse_show_text_op(...) in this file flow.
+11. Call next_line_delta_y(...) in this file flow.
+12. Call pdf_spacing_pt(...) in this file flow.
+13. Additional helper functions omitted (35 total).
 
 ### src/dependency/pdf_redaction_accessor.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -244,7 +250,7 @@ Pseudo:
 10. Call page_id(...) in this file flow.
 11. Call extract_annotation_redactions(...) in this file flow.
 12. Call extract_page_drawn_redactions(...) in this file flow.
-13. Additional helper functions omitted (63 total).
+13. Additional helper functions omitted (62 total).
 
 ### src/lib.rs
 Purpose: Define constants/types/contracts used by other files.
@@ -289,6 +295,7 @@ Purpose: Declare module boundaries and re-exports.
 Pseudo:
 1. Declare submodules.
 2. Re-export selected symbols for parent layer consumption.
+3. Submodules: dictionary_list_convertion_component, file_byte_convertion_component, local_file_workflow_component, redaction_guessing_component, time, types, visualization_render_component.
 
 ### src/logic/redaction_guessing_component.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -305,7 +312,7 @@ Pseudo:
 10. Call is_multi_span_row_guess(...) in this file flow.
 11. Call is_two_sided_anchor_context(...) in this file flow.
 12. Call apply_row_joint_assignment(...) in this file flow.
-13. Additional helper functions omitted (154 total).
+13. Additional helper functions omitted (150 total).
 
 ### src/logic/time.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -342,35 +349,23 @@ Purpose: Declare module boundaries and re-exports.
 Pseudo:
 1. Declare submodules.
 2. Re-export selected symbols for parent layer consumption.
-3. Submodules: tooling_entry, unredact_cli_entry, unredact_web_bindings, unredact_web_entry.
-
-### src/service/tooling_entry.rs
-Purpose: Implement file-local workflow and helper logic.
-Pseudo:
-1. Initialize constants/types.
-2. Execute entry points and helper flow.
-3. Call new_from_bytes(...) in this file flow.
-4. Call page_count(...) in this file flow.
-5. Call render_page_to_rgba(...) in this file flow.
-6. Call default_name_dictionary_entries(...) in this file flow.
-7. Call load_dictionary_from_bytes(...) in this file flow.
-8. Call collect_underlying_text_hits_by_page(...) in this file flow.
-9. Call run_guess_from_redactions(...) in this file flow.
+3. Submodules: unredact_cli_entry, unredact_web_bindings, unredact_web_entry.
 
 ### src/service/unredact_cli_entry.rs
 Purpose: Implement file-local workflow and helper logic.
 Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
-3. Call run_from_paths(...) in this file flow.
-4. Call run_batch_from_paths(...) in this file flow.
-5. Call run(...) in this file flow.
-6. Call run_batch(...) in this file flow.
-7. Call run_batch_serial(...) in this file flow.
-8. Call run_batch_item(...) in this file flow.
-9. Call test_dir(...) in this file flow.
-10. Call run_batch_errors_when_directory_has_no_supported_files(...) in this file flow.
-11. Call run_batch_recurses_pdf_inputs_and_preserves_relative_output_paths(...) in this file flow.
+3. Call default(...) in this file flow.
+4. Call run_from_paths(...) in this file flow.
+5. Call run_batch_from_paths(...) in this file flow.
+6. Call run(...) in this file flow.
+7. Call run_batch(...) in this file flow.
+8. Call run_batch_serial(...) in this file flow.
+9. Call run_batch_item(...) in this file flow.
+10. Call test_dir(...) in this file flow.
+11. Call run_batch_errors_when_directory_has_no_supported_files(...) in this file flow.
+12. Call run_batch_recurses_pdf_inputs_and_preserves_relative_output_paths(...) in this file flow.
 
 ### src/service/unredact_web_bindings.rs
 Purpose: Implement file-local workflow and helper logic.
@@ -384,7 +379,8 @@ Purpose: Implement file-local workflow and helper logic.
 Pseudo:
 1. Initialize constants/types.
 2. Execute entry points and helper flow.
-3. Call r(...) in this file flow.
+3. Call default(...) in this file flow.
+4. Call run(...) in this file flow.
 
 ### src/types/file_types.rs
 Purpose: Implement file-local workflow and helper logic.

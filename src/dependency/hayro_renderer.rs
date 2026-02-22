@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use hayro::hayro_interpret::InterpreterSettings;
@@ -15,15 +14,6 @@ pub struct HayroRenderer {
 
 impl HayroRenderer {
     #[inline]
-    pub fn new<PathLike>(path: PathLike) -> Result<Self, String>
-    where
-        PathLike: AsRef<Path>,
-    {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        Self::new_from_bytes(&bytes)
-    }
-
-    #[inline]
     pub fn new_from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(bytes.to_vec());
         let pdf = Pdf::new(data).map_err(|e| format!("hayro_pdf_load_failed:{e:?}"))?;
@@ -32,11 +22,6 @@ impl HayroRenderer {
             return Err("pdf contains zero pages".to_owned());
         }
         Ok(Self { pdf, page_count })
-    }
-
-    #[inline]
-    pub fn is_available() -> bool {
-        true
     }
 }
 

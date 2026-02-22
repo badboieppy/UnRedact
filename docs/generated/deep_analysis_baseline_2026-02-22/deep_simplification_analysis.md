@@ -11,28 +11,28 @@ Detailed inventories:
 
 ## 1) All Flags Used Across the Package (Compile + Runtime)
 - Compile features found: 5
-- cfg mentions found: 29
-- Clap-defined flags found: 19
-- Runtime --flag mentions found: 5
+- cfg mentions found: 31
+- Clap-defined flags found: 17
+- Runtime --flag mentions found: 24
 - Environment variable mentions found: 4
 
 ## 2) All Conditions Across the Package
-- Total captured conditional lines: 902
-- Rust condition lines: 771
+- Total captured conditional lines: 913
+- Rust condition lines: 782
 - JS condition lines: 131
 
 ## 3) Interfaces Between Files
-- Rust public export lines captured: 199
-- Rust cross-file import lines captured: 96
+- Rust public export lines captured: 214
+- Rust cross-file import lines captured: 101
 - JS function interface lines captured: 79
 - HTML UI IDs captured: 19
 
 ## 4) Pseudocode of Each File
-- Files covered: 63
+- Files covered: 62
 
 ## 5) Call Patterns Between Files
-- Rust import-derived call edges captured: 120
-- Layer-to-layer edge pairs captured: 20
+- Rust import-derived call edges captured: 123
+- Layer-to-layer edge pairs captured: 23
 
 ## Method Notes
 - Conditions are captured via lexical scan (if/else if/match/while/switch/ternary/inline if/match guards).

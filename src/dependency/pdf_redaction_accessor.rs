@@ -1114,24 +1114,17 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
             }
 
             let avg_lum = (sum_lum / pixel_area as f32).clamp(0.0, 255.0);
-
             let normalized = normalized_rect_from_pixels(x0, y0, x1, y1, width, height);
-
             let short_edge = ((x1 - x0) as f32).min((y1 - y0) as f32);
-
             if short_edge < 4.0 {
                 continue;
             }
 
             let darkness = (1.0 - avg_lum / 255.0).clamp(0.0, 1.0);
-
             let coverage = (area_fraction / 0.12).min(1.0);
-
             let aspect = {
                 let w = (x1 - x0) as f32;
-
                 let h = (y1 - y0) as f32;
-
                 if h > 0.0 && w > 0.0 {
                     (w.max(h) / w.min(h)).min(12.0)
                 } else {
@@ -1143,11 +1136,8 @@ fn detect_dark_regions_in_image(gray: &[u8], width: usize, height: usize) -> Ima
 
             detections.push(ImageRegionDetection {
                 normalized_rect: normalized,
-
                 avg_luminance: avg_lum,
-
                 area_fraction,
-
                 score,
             });
         }
@@ -1210,31 +1200,21 @@ fn build_bins(size: usize, target: usize) -> Vec<(usize, usize)> {
     }
 
     let bins = target.max(1).min(size);
-
     let mut result = Vec::with_capacity(bins);
-
     let mut start = 0_usize;
-
     let mut remaining_bins = bins;
-
     let mut remaining = size;
 
     while remaining_bins > 0 {
         let chunk = remaining.div_ceil(remaining_bins);
-
         let end = (start + chunk).min(size);
-
         result.push((start, end));
-
         start = end;
-
         remaining = size - start;
-
         remaining_bins -= 1;
     }
 
     result.retain(|(s, e)| e > s);
-
     if result.is_empty() {
         result.push((0, size));
     }
@@ -1461,6 +1441,34 @@ fn object_to_rect_resolved(doc: &Document, obj: &Object) -> Option<Rect> {
     }
 }
 
+struct RasterRenderCapture {
+    effective_dpi: f32,
+    width_px: u32,
+    height_px: u32,
+    gray: Vec<u8>,
+}
+
+fn capture_raster_render(
+    renderer: &dyn PdfRenderer,
+    page_index: u32,
+    cfg: &RedactionFinderConfig,
+) -> Result<Option<RasterRenderCapture>, String> {
+    let effective_dpi = cfg.raster_dpi.min(MAX_RASTER_ANALYSIS_DPI);
+    let rendered = renderer
+        .render_page_to_rgba(page_index as usize, effective_dpi)
+        .map_err(|e| format!("render_failed:{e}"))?;
+    if rendered.width_px == 0 || rendered.height_px == 0 {
+        return Ok(None);
+    }
+    let gray = rgba_to_grayscale(&rendered.pixels, rendered.width_px, rendered.height_px);
+    Ok(Some(RasterRenderCapture {
+        effective_dpi,
+        width_px: rendered.width_px,
+        height_px: rendered.height_px,
+        gray,
+    }))
+}
+
 /// Perform raster-based dark region detection on a fully rendered page bitmap
 /// using the same detector as image XObjects, then map the result back into
 /// PDF coordinates and produce `RedactionOccurrence`s.
@@ -1470,36 +1478,27 @@ fn extract_raster_page_redactions(
     page_box: Rect,
     cfg: &RedactionFinderConfig,
 ) -> Result<Vec<RedactionOccurrence>, String> {
-    let effective_dpi = cfg.raster_dpi.min(MAX_RASTER_ANALYSIS_DPI);
-    let rendered = renderer
-        .render_page_to_rgba(page_index as usize, effective_dpi)
-        .map_err(|e| format!("render_failed:{e}"))?;
-
-    if rendered.width_px == 0 || rendered.height_px == 0 {
+    let Some(capture) = capture_raster_render(renderer, page_index, cfg)? else {
         return Ok(Vec::new());
-    }
-
-    // Convert to grayscale using standard luma; ignore alpha.
-    let gray = rgba_to_grayscale(&rendered.pixels, rendered.width_px, rendered.height_px);
+    };
 
     let detection = detect_dark_regions_in_image(
-        &gray,
-        rendered.width_px as usize,
-        rendered.height_px as usize,
+        &capture.gray,
+        capture.width_px as usize,
+        capture.height_px as usize,
     );
     if detection.detections.is_empty() {
         return Ok(Vec::new());
     }
 
-    let regions =
-        image_detections_to_dark_regions(&detection, rendered.width_px, rendered.height_px);
+    let regions = image_detections_to_dark_regions(&detection, capture.width_px, capture.height_px);
 
     let mut out = Vec::new();
     for det in regions.regions {
         let profile = dark_run_profile_for_region(
-            &gray,
-            rendered.width_px as usize,
-            rendered.height_px as usize,
+            &capture.gray,
+            capture.width_px as usize,
+            capture.height_px as usize,
             &det,
         );
         let split_regions = split_dark_region_by_profile(&det, &profile);
@@ -1513,7 +1512,7 @@ fn extract_raster_page_redactions(
                 split_region.x1_px,
                 split_region.y1_px,
                 page_box,
-                rendered.dpi,
+                capture.effective_dpi,
             );
 
             if rect_is_near_full_page_with_size(
@@ -1533,26 +1532,29 @@ fn extract_raster_page_redactions(
             score = score.min(1.0);
 
             let split_profile = dark_run_profile_for_region(
-                &gray,
-                rendered.width_px as usize,
-                rendered.height_px as usize,
+                &capture.gray,
+                capture.width_px as usize,
+                capture.height_px as usize,
                 &split_region,
             );
 
             let mut meta: BTreeMap<String, String> = BTreeMap::new();
             if cfg.include_details {
-                meta.insert("raster_dpi".to_owned(), format!("{:.1}", rendered.dpi));
+                meta.insert(
+                    "raster_dpi".to_owned(),
+                    format!("{:.1}", capture.effective_dpi),
+                );
                 meta.insert(
                     "raster_dpi_requested".to_owned(),
                     format!("{:.1}", cfg.raster_dpi),
                 );
                 meta.insert(
                     "raster_dpi_effective".to_owned(),
-                    format!("{:.1}", effective_dpi),
+                    format!("{:.1}", capture.effective_dpi),
                 );
                 meta.insert(
                     "image_dims_px".to_owned(),
-                    format!("{}x{}", rendered.width_px, rendered.height_px),
+                    format!("{}x{}", capture.width_px, capture.height_px),
                 );
                 meta.insert(
                     "region_area_fraction".to_owned(),
@@ -1926,11 +1928,8 @@ fn object_to_rect(o: &Object) -> Option<Rect> {
     }
 
     let x0 = a.first().and_then(object_to_f32)?;
-
     let y0 = a.get(1).and_then(object_to_f32)?;
-
     let x1 = a.get(2).and_then(object_to_f32)?;
-
     let y1 = a.get(3).and_then(object_to_f32)?;
 
     Some(Rect::new(x0, y0, x1, y1))

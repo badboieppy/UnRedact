@@ -1,7 +1,6 @@
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::OnceLock;
 
 const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
@@ -68,11 +67,6 @@ struct TextMetrics {
 struct ShowTextOp {
     text: String,
     per_char_adjustments_pt: Vec<(usize, f32)>,
-}
-
-#[inline]
-pub fn build_font_run_report(path: &Path, bytes: &[u8]) -> Result<FontRunReport, String> {
-    build_font_run_report_from_input_name(&path.to_string_lossy(), bytes)
 }
 
 #[inline]
@@ -1104,7 +1098,7 @@ fn is_subset_prefix(parts: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::build_font_run_report;
+    use super::build_font_run_report_from_input_name;
     use std::path::Path;
 
     #[test]
@@ -1113,10 +1107,11 @@ mod tests {
         let bytes = std::fs::read(input)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
 
-        let report_a =
-            build_font_run_report(input, &bytes).expect("font run report should parse input");
-        let report_b =
-            build_font_run_report(input, &bytes).expect("font run report should parse input");
+        let input_name = input.to_string_lossy().to_string();
+        let report_a = build_font_run_report_from_input_name(&input_name, &bytes)
+            .expect("font run report should parse input");
+        let report_b = build_font_run_report_from_input_name(&input_name, &bytes)
+            .expect("font run report should parse input");
 
         assert_eq!(report_a, report_b);
     }
@@ -1127,8 +1122,9 @@ mod tests {
         let bytes = std::fs::read(input)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
 
-        let report =
-            build_font_run_report(input, &bytes).expect("font run report should parse input");
+        let input_name = input.to_string_lossy().to_string();
+        let report = build_font_run_report_from_input_name(&input_name, &bytes)
+            .expect("font run report should parse input");
         assert!(!report.runs.is_empty(), "expected non-empty text runs");
 
         let measured = report
@@ -1141,7 +1137,7 @@ mod tests {
 
     #[test]
     fn build_font_run_report_fails_on_invalid_pdf_bytes() {
-        let err = build_font_run_report(Path::new("invalid.pdf"), b"not a pdf")
+        let err = build_font_run_report_from_input_name("invalid.pdf", b"not a pdf")
             .expect_err("invalid bytes should fail");
         assert!(!err.is_empty());
     }

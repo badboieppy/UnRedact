@@ -1,4 +1,4 @@
-use crate::data::DictionaryData;
+use crate::data::dictionary_data::DictionaryData;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DictionaryListInput {

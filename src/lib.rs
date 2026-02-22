@@ -19,8 +19,8 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::unused_trait_names)]
 
-pub mod data;
-pub mod dependency;
-pub mod logic;
+mod data;
+mod dependency;
+mod logic;
 pub mod service;
 pub mod types;

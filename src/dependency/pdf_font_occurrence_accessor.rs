@@ -1,4 +1,3 @@
-use crate::dependency::file_store::{FileAccessor, FileReadRequest};
 use crate::types::file_types::{
     DocumentLocation, FileFontReport, FontId, FontOccurrence, FontOccurrences, FontsFound,
     InputFileKind, Rect, Region, TextSourceKind,
@@ -10,39 +9,6 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataBuildConfig {
     pub include_details: bool,
-}
-
-pub struct FileDataBuilder<'accessor> {
-    accessor: &'accessor dyn FileAccessor,
-}
-
-impl<'accessor> FileDataBuilder<'accessor> {
-    #[inline]
-    pub fn new(accessor: &'accessor dyn FileAccessor) -> Self {
-        Self { accessor }
-    }
-}
-
-#[inline]
-pub fn build_file_font_report(
-    builder: &FileDataBuilder<'_>,
-    path: &Path,
-    _config: DataBuildConfig,
-) -> Result<FileFontReport, String> {
-    let kind = classify_kind_from_path(path);
-    let text_source = default_text_source_for_kind(kind);
-    let occurrences = Some(extract_occurrences(builder, path, kind)?);
-
-    Ok(FileFontReport {
-        path: path.to_string_lossy().to_string(),
-        kind,
-        text_source,
-        fonts: FontsFound {
-            distinct: vec![],
-            counts: vec![],
-        },
-        occurrences,
-    })
 }
 
 #[inline]
@@ -78,43 +44,6 @@ pub fn build_file_font_report_from_bytes(
         },
         occurrences,
     })
-}
-
-fn extract_occurrences(
-    builder: &FileDataBuilder<'_>,
-    path: &Path,
-    kind: InputFileKind,
-) -> Result<FontOccurrences, String> {
-    match kind {
-        InputFileKind::Pdf => extract_pdf_occurrences(builder, path),
-        InputFileKind::Image => Ok(FontOccurrences { items: vec![] }),
-        InputFileKind::Unknown => Ok(FontOccurrences { items: vec![] }),
-    }
-}
-
-fn extract_pdf_occurrences(
-    builder: &FileDataBuilder<'_>,
-    path: &Path,
-) -> Result<FontOccurrences, String> {
-    let bytes = builder
-        .accessor
-        .read(FileReadRequest {
-            path: path.to_path_buf(),
-        })?
-        .bytes;
-
-    let doc = Document::load_mem(&bytes).map_err(|error| error.to_string())?;
-    let pages = doc.get_pages();
-
-    let items = pages
-        .into_iter()
-        .map(|(page_no, page_id)| extract_pdf_page_occurrences(&doc, page_no, page_id))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-
-    Ok(FontOccurrences { items })
 }
 
 fn extract_pdf_occurrences_from_bytes(bytes: &[u8]) -> Result<FontOccurrences, String> {
@@ -664,114 +593,9 @@ fn build_occurrence(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_file_font_report, build_file_font_report_from_bytes, DataBuildConfig, FileDataBuilder,
-    };
-    use crate::dependency::file_store::{FileAccessor, FileReadRequest, FileReadResponse};
+    use super::{build_file_font_report_from_bytes, DataBuildConfig};
     use crate::types::file_types::{InputFileKind, TextSourceKind};
-    use std::collections::BTreeMap;
     use std::path::Path;
-
-    struct FakeAccessor {
-        files: BTreeMap<String, Vec<u8>>,
-        err: Option<String>,
-    }
-
-    impl FakeAccessor {
-        fn ok(files: BTreeMap<String, Vec<u8>>) -> Self {
-            Self { files, err: None }
-        }
-
-        fn fail(message: &str) -> Self {
-            Self {
-                files: BTreeMap::new(),
-                err: Some(message.to_owned()),
-            }
-        }
-    }
-
-    impl FileAccessor for FakeAccessor {
-        fn read(&self, req: FileReadRequest) -> Result<FileReadResponse, String> {
-            if let Some(message) = &self.err {
-                return Err(message.clone());
-            }
-            let key = req.path.to_string_lossy().to_string();
-            self.files
-                .get(&key)
-                .cloned()
-                .map(|bytes| FileReadResponse { bytes })
-                .ok_or_else(|| "not found".to_owned())
-        }
-    }
-
-    #[test]
-    fn build_file_font_report_unknown_with_details_returns_empty_occurrences() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.bin"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect("unknown file report should build");
-
-        assert_eq!(report.kind, InputFileKind::Unknown);
-        assert_eq!(report.text_source, TextSourceKind::Unknown);
-        assert_eq!(report.path, "x.bin".to_owned());
-        assert_eq!(
-            report
-                .occurrences
-                .expect("occurrences should exist")
-                .items
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn build_file_font_report_image_kind_has_no_occurrences() {
-        let accessor = FakeAccessor::ok(BTreeMap::new());
-        let builder = FileDataBuilder::new(&accessor);
-
-        let report = build_file_font_report(
-            &builder,
-            Path::new("x.png"),
-            DataBuildConfig {
-                include_details: false,
-            },
-        )
-        .expect("image file report should build");
-
-        assert_eq!(report.kind, InputFileKind::Image);
-        assert_eq!(report.text_source, TextSourceKind::ImageRaster);
-        assert_eq!(
-            report
-                .occurrences
-                .expect("occurrences should exist")
-                .items
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn build_file_font_report_propagates_read_errors_for_pdf() {
-        let accessor = FakeAccessor::fail("io_error");
-        let builder = FileDataBuilder::new(&accessor);
-
-        let err = build_file_font_report(
-            &builder,
-            Path::new("x.pdf"),
-            DataBuildConfig {
-                include_details: true,
-            },
-        )
-        .expect_err("pdf report should fail when read fails");
-        assert_eq!(err, "io_error".to_owned());
-    }
 
     #[test]
     fn build_file_font_report_from_bytes_handles_invalid_pdf_without_crashing() {

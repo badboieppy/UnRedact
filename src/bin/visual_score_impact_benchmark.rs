@@ -4,10 +4,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use unredact::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
-use unredact::data::DictionaryData;
-use unredact::logic::{run_guess_from_bytes, RunGuessFromBytesRequest};
-use unredact::types::guess_types::{GuessConfig, RedactionGuess};
+use unredact::service::tooling_entry::{
+    collect_underlying_text_hits_by_page, load_dictionary_from_bytes, run_guess_from_redactions,
+    ToolingGuessRequest,
+};
+use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::redaction_types::{
     Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,
 };
@@ -176,8 +177,7 @@ fn run(options: CliOptions) -> Result<(), String> {
 
     let pdf_bytes = std::fs::read(&options.input)
         .map_err(|error| format!("failed to read {}: {error}", options.input.display()))?;
-    let retriever = PdfFileRetriever::new_from_bytes(&pdf_bytes, None)?;
-    let hits_by_page = collect_hits_by_page(&retriever)?;
+    let hits_by_page = collect_hits_by_page(&pdf_bytes)?;
     let page_hits = hits_by_page
         .get(&page_index)
         .ok_or_else(|| format!("page {} has no text hits", options.page))?;
@@ -192,7 +192,6 @@ fn run(options: CliOptions) -> Result<(), String> {
         ));
     }
 
-    let dictionary_data = DictionaryData::new();
     let dictionary_words = build_large_dictionary(
         &candidate_pool,
         &hits_by_page,
@@ -200,8 +199,7 @@ fn run(options: CliOptions) -> Result<(), String> {
         options.seed,
     );
     let dictionary_raw = dictionary_words.join("\n");
-    let dictionary_inputs =
-        dictionary_data.load_dictionary_from_bytes(Some(dictionary_raw.as_bytes()))?;
+    let dictionary_inputs = load_dictionary_from_bytes(Some(dictionary_raw.as_bytes()))?;
     let dictionary = dictionary_inputs.dictionary;
     let dictionary_diagnostics = dictionary_inputs.diagnostics;
 
@@ -294,17 +292,8 @@ fn run(options: CliOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_hits_by_page(
-    retriever: &PdfFileRetriever<'_>,
-) -> Result<BTreeMap<u32, Vec<UnderlyingTextHit>>, String> {
-    let mut by_page = BTreeMap::<u32, Vec<UnderlyingTextHit>>::new();
-    for page_index in retriever.page_indices() {
-        let hits = retriever.underlying_text_hits(page_index)?;
-        if !hits.is_empty() {
-            by_page.insert(page_index, hits);
-        }
-    }
-    Ok(by_page)
+fn collect_hits_by_page(pdf_bytes: &[u8]) -> Result<BTreeMap<u32, Vec<UnderlyingTextHit>>, String> {
+    collect_underlying_text_hits_by_page(pdf_bytes)
 }
 
 fn canonical_word(value: &str) -> Option<String> {
@@ -553,18 +542,18 @@ fn run_guess_report(
     dictionary: &[String],
     dictionary_diagnostics: &[String],
     visual_score: bool,
-) -> Result<unredact::types::guess_types::GuessReport, String> {
+) -> Result<GuessReport, String> {
     let cfg = GuessConfig {
         visual_score,
         visual_score_dpi: 200.0_f32,
     };
-    run_guess_from_bytes(RunGuessFromBytesRequest {
-        pdf_name: &input_path.to_string_lossy(),
+    run_guess_from_redactions(ToolingGuessRequest {
+        input_name: &input_path.to_string_lossy(),
         pdf_bytes,
         redactions,
         dictionary,
-        diagnostics: dictionary_diagnostics,
-        cfg: &cfg,
+        dictionary_diagnostics,
+        guess: &cfg,
     })
 }
 

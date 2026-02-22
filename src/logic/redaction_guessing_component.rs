@@ -3849,6 +3849,33 @@ mod redaction_impl {
     type LineMatchScore = (i32, i32, i32, i32);
     type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
 
+    #[derive(Debug, Clone, Copy)]
+    struct ScanPlan {
+        include_annotations: bool,
+        include_drawn: bool,
+        include_raster: bool,
+    }
+
+    impl ScanPlan {
+        #[inline]
+        fn from_cfg(cfg: &RedactionFinderConfig) -> Self {
+            let include_annotations =
+                matches!(cfg.mode, RedactionMode::Annotations | RedactionMode::All);
+            let include_drawn = matches!(cfg.mode, RedactionMode::Drawn | RedactionMode::All);
+            Self {
+                include_annotations,
+                include_drawn,
+                include_raster: cfg.enable_image_analysis,
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ScanAccumulator {
+        occurrences: Vec<RedactionOccurrence>,
+        diagnostics: Vec<String>,
+    }
+
     #[inline]
     pub fn run_redaction_scan_from_bytes(
         bytes: &[u8],
@@ -3864,51 +3891,78 @@ mod redaction_impl {
         retriever: &dyn RedactionDataRetriever,
         cfg: RedactionFinderConfig,
     ) -> RedactionFinderOutput {
-        let mut all: Vec<RedactionOccurrence> = Vec::new();
-        let mut diagnostics: Vec<String> = Vec::new();
         let page_indices = retriever.page_indices();
+        let plan = ScanPlan::from_cfg(&cfg);
+        let mut acc = ScanAccumulator::default();
 
-        for page_index in &page_indices {
-            match cfg.mode {
-                RedactionMode::Annotations | RedactionMode::All => {
-                    match retriever.annotation_redactions(*page_index, cfg.include_details) {
-                        Ok(v) => all.extend(v),
-                        Err(m) => diagnostics
-                            .push(format!("page_index={page_index} annotation_error={m}")),
-                    }
-                }
-                RedactionMode::Drawn => {}
-            }
+        collect_vector_redactions(retriever, &page_indices, &cfg, plan, &mut acc);
 
-            match cfg.mode {
-                RedactionMode::Drawn | RedactionMode::All => {
-                    match retriever.drawn_redactions(*page_index, cfg.include_details, false) {
-                        Ok(v) => all.extend(v),
-                        Err(m) => {
-                            diagnostics.push(format!("page_index={page_index} drawn_error={m}"))
-                        }
-                    }
-                }
-                RedactionMode::Annotations => {}
-            }
-        }
-
-        if cfg.enable_image_analysis {
-            all.extend(collect_raster_redactions_two_pass(
+        if plan.include_raster {
+            acc.occurrences.extend(collect_raster_redactions_two_pass(
                 retriever,
                 &page_indices,
                 &cfg,
-                &mut diagnostics,
+                &mut acc.diagnostics,
             ));
         }
 
         for page_index in page_indices {
-            attach_underlying_text(retriever, page_index, &mut all, &mut diagnostics);
+            attach_underlying_text(
+                retriever,
+                page_index,
+                &mut acc.occurrences,
+                &mut acc.diagnostics,
+            );
         }
 
         RedactionFinderOutput {
-            redactions: dedup_occurrences(all),
-            diagnostics,
+            redactions: dedup_occurrences(acc.occurrences),
+            diagnostics: acc.diagnostics,
+        }
+    }
+
+    fn collect_vector_redactions(
+        retriever: &dyn RedactionDataRetriever,
+        page_indices: &[u32],
+        cfg: &RedactionFinderConfig,
+        plan: ScanPlan,
+        acc: &mut ScanAccumulator,
+    ) {
+        for page_index in page_indices {
+            if plan.include_annotations {
+                collect_page_annotations(retriever, *page_index, cfg.include_details, acc);
+            }
+            if plan.include_drawn {
+                collect_page_drawn(retriever, *page_index, cfg.include_details, acc);
+            }
+        }
+    }
+
+    fn collect_page_annotations(
+        retriever: &dyn RedactionDataRetriever,
+        page_index: u32,
+        include_details: bool,
+        acc: &mut ScanAccumulator,
+    ) {
+        match retriever.annotation_redactions(page_index, include_details) {
+            Ok(v) => acc.occurrences.extend(v),
+            Err(m) => acc
+                .diagnostics
+                .push(format!("page_index={page_index} annotation_error={m}")),
+        }
+    }
+
+    fn collect_page_drawn(
+        retriever: &dyn RedactionDataRetriever,
+        page_index: u32,
+        include_details: bool,
+        acc: &mut ScanAccumulator,
+    ) {
+        match retriever.drawn_redactions(page_index, include_details, false) {
+            Ok(v) => acc.occurrences.extend(v),
+            Err(m) => acc
+                .diagnostics
+                .push(format!("page_index={page_index} drawn_error={m}")),
         }
     }
 
@@ -4590,9 +4644,7 @@ mod redaction_impl {
 
 pub use guess_impl::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
 
-pub use redaction_impl::{
-    build_report_from_input_name, run_redaction_scan, run_redaction_scan_from_bytes,
-};
+pub use redaction_impl::{build_report_from_input_name, run_redaction_scan_from_bytes};
 
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
