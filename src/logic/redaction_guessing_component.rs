@@ -184,7 +184,6 @@ fn build_visualization_payload_stage(
 
 mod guess_impl {
     use lopdf::{Dictionary, Document, Object};
-    use std::sync::OnceLock;
 
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
     use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
@@ -196,7 +195,10 @@ mod guess_impl {
     use crate::types::redaction_types::{
         Rect, RedactionKind, RedactionOccurrence, RedactionReport,
     };
-    use crate::types::runtime_defaults::DEFAULT_FONT_METRICS_DPI;
+    use crate::types::runtime_defaults::{
+        DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE, MULTI_SPAN_GAP_RATIO_THRESHOLD,
+    };
+    use crate::types::text_shaping::shaping_features;
 
     pub struct RunGuessFromBytesRequest<'a> {
         pub pdf_name: &'a str,
@@ -464,8 +466,6 @@ mod guess_impl {
     const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
     const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
     const FIXED_VISUAL_DROP_THRESHOLD: Option<f32> = None;
-    const GLYPH_UNITS_SCALE: f64 = 64.0_f64;
-    const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
     const MULTI_SPAN_ANCHOR_PRIOR_WEIGHT: f64 = 0.15_f64;
     const MULTI_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.70_f64;
     const SINGLE_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.12_f64;
@@ -2778,19 +2778,6 @@ mod guess_impl {
             .sum::<f32>()
             / GLYPH_UNITS_SCALE as f32;
         units * (font_size / units_per_em.max(1.0_f32))
-    }
-
-    fn shaping_features() -> &'static [rustybuzz::Feature] {
-        static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
-        FEATURES
-            .get_or_init(|| {
-                vec![
-                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
-                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
-                    rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
-                ]
-            })
-            .as_slice()
     }
 
     fn measured_width_from_points(width_pt: f64, _dpi: f32, source: WidthSource) -> MeasuredWidth {

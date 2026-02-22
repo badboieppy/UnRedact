@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use unredact::service::tooling_entry::default_name_dictionary_entries;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
+use unredact::types::runtime_defaults::MULTI_SPAN_GAP_RATIO_THRESHOLD;
 use unredact::types::visualizer_config::VisualizerConfig;
 
 const EFTA00038617_TARGETS: [&str; 10] = [
@@ -27,8 +28,6 @@ const NOISE_WORDS: [&str; 24] = [
     "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
     "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
 ];
-
-const MULTI_SPAN_GAP_RATIO_THRESHOLD: f64 = 2.0_f64;
 
 #[derive(Debug, Clone, Serialize)]
 struct RankedTarget {

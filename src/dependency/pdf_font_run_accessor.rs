@@ -1,10 +1,8 @@
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
-use crate::types::runtime_defaults::DEFAULT_FONT_METRICS_DPI;
+use crate::types::runtime_defaults::{DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE};
+use crate::types::text_shaping::shaping_features;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
-
-const GLYPH_UNITS_SCALE: f32 = 64.0_f32;
 
 #[derive(Debug, Clone)]
 struct FontInfo {
@@ -616,7 +614,7 @@ fn shape_text_metrics(
         .iter()
         .map(|position| position.x_advance as f32)
         .sum::<f32>()
-        / GLYPH_UNITS_SCALE;
+        / GLYPH_UNITS_SCALE as f32;
     let width_pt = units * (font_size_pt / units_per_em.max(1.0_f32)) * scale;
     if !width_pt.is_finite() || width_pt <= 0.0_f32 {
         return None;
@@ -644,19 +642,6 @@ fn shape_text(face: &rustybuzz::Face<'_>, text: &str) -> rustybuzz::GlyphBuffer 
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(text);
     rustybuzz::shape(face, shaping_features(), buffer)
-}
-
-fn shaping_features() -> &'static [rustybuzz::Feature] {
-    static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
-    FEATURES
-        .get_or_init(|| {
-            vec![
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
-            ]
-        })
-        .as_slice()
 }
 
 fn core_font_metrics(
@@ -709,7 +694,7 @@ fn contextual_char_advances_units(text: &str, shaped: &rustybuzz::GlyphBuffer) -
     {
         let cluster = (info.cluster as usize).min(text.len());
         let entry = cluster_advances.entry(cluster).or_insert(0.0_f32);
-        *entry += (position.x_advance as f32) / GLYPH_UNITS_SCALE;
+        *entry += (position.x_advance as f32) / GLYPH_UNITS_SCALE as f32;
     }
     if cluster_advances.is_empty() {
         return vec![0.0_f32; char_starts.len()];

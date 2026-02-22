@@ -1,12 +1,12 @@
-use std::sync::OnceLock;
-
 use lopdf::{Dictionary, Document, Object};
 
 use crate::dependency::pdf_annotator::PdfAnnotator;
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::{GuessReport, RedactionGuess};
 use crate::types::redaction_types::{Rect, RedactionKind, RedactionReport};
+use crate::types::runtime_defaults::GLYPH_UNITS_SCALE;
 use crate::types::text_overlay::TextOverlay;
+use crate::types::text_shaping::shaping_features;
 use crate::types::visualizer_config::VisualizerConfig;
 
 const RASTER_TEXT_PADDING_PT: f32 = 1.0_f32;
@@ -598,21 +598,8 @@ fn advance_pt(
         .iter()
         .map(|p| p.x_advance as f32)
         .sum::<f32>()
-        / 64.0;
+        / GLYPH_UNITS_SCALE as f32;
     Some(units * (font_size_pt / units_per_em))
-}
-
-fn shaping_features() -> &'static [rustybuzz::Feature] {
-    static FEATURES: OnceLock<Vec<rustybuzz::Feature>> = OnceLock::new();
-    FEATURES
-        .get_or_init(|| {
-            vec![
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"kern"), 1, ..),
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"liga"), 1, ..),
-                rustybuzz::Feature::new(rustybuzz::Tag::from_bytes(b"clig"), 1, ..),
-            ]
-        })
-        .as_slice()
 }
 
 fn width_from_table(table: &FontWidthTable, text: &str, font_size_pt: f32) -> Option<f32> {
