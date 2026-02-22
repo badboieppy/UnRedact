@@ -134,7 +134,8 @@ test.describe("web ui batch benchmark", () => {
       timeout: 4 * 60 * 1000,
     });
 
-    const benchmarkText = await page.locator("#benchmarkSummary").innerText();
+    const benchmarkText =
+      (await page.locator("#benchmarkSummary").textContent()) ?? "";
     expect(benchmarkText).toContain("avg file time:");
     expect(benchmarkText).toContain("output bytes stored:");
     expect(benchmarkText).toContain("input bytes read:");

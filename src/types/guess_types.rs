@@ -73,6 +73,8 @@ pub struct GuessContext {
     #[serde(default)]
     pub anchor_font_key: Option<String>,
     #[serde(default)]
+    pub anchor_font_name: Option<String>,
+    #[serde(default)]
     pub anchor_font_size_pt: Option<f32>,
     #[serde(default)]
     pub anchor_h_scale_pct: Option<f32>,

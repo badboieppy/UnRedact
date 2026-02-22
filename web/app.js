@@ -367,13 +367,16 @@ function topGuessText(row) {
 
 function summarizeGuessReport(report) {
   const guesses = Array.isArray(report?.guesses) ? report.guesses : [];
-  const top = guesses
-    .slice(0, 3)
-    .map((entry, index) => `${index + 1}. ${topGuessText(entry)}`);
+  const rowsWithExact = guesses.filter(
+    (row) => Array.isArray(row?.exact_matches) && row.exact_matches.length > 0,
+  ).length;
+  const rowsWithCandidates = guesses.filter(
+    (row) => Array.isArray(row?.candidates) && row.candidates.length > 0,
+  ).length;
   return [
     `redactions guessed: ${guesses.length}`,
-    top.length > 0 ? "top rows:" : "top rows: none",
-    ...top,
+    `rows with exact matches: ${rowsWithExact}`,
+    `rows with candidate lists: ${rowsWithCandidates}`,
   ].join("\n");
 }
 
@@ -391,113 +394,178 @@ function clearGuessVisualization(message) {
   guessVisualizationElement.textContent = message;
 }
 
-function buildGuessViewRows(report) {
+function formatMaybeNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "—";
+}
+
+function valueOrDash(value) {
+  if (value == null) {
+    return "—";
+  }
+  const text = String(value).trim();
+  return text === "" ? "—" : text;
+}
+
+function exactMatchesText(row) {
+  if (!Array.isArray(row?.exact_matches) || row.exact_matches.length === 0) {
+    return "—";
+  }
+  return row.exact_matches.join("; ");
+}
+
+function topCandidate(row) {
+  if (!Array.isArray(row?.candidates) || row.candidates.length === 0) {
+    return null;
+  }
+  return row.candidates[0];
+}
+
+function anchorFontDisplay(context) {
+  const key = valueOrDash(context?.anchor_font_key);
+  const name = valueOrDash(context?.anchor_font_name);
+  if (key === "—" && name === "—") {
+    return "—";
+  }
+  if (key === "—") {
+    return name;
+  }
+  if (name === "—") {
+    return key;
+  }
+  return `${key} (${name})`;
+}
+
+function guessBboxLabel(bbox) {
+  const x0 = normalizeNumber(bbox?.x0, 0);
+  const y0 = normalizeNumber(bbox?.y0, 0);
+  const x1 = normalizeNumber(bbox?.x1, 0);
+  const y1 = normalizeNumber(bbox?.y1, 0);
+  const width = Math.max(0, x1 - x0);
+  const height = Math.max(0, y1 - y0);
+  return `x=${x0.toFixed(1)}..${x1.toFixed(1)}, y=${y0.toFixed(1)}..${y1.toFixed(1)}, w=${width.toFixed(1)}, h=${height.toFixed(1)}`;
+}
+
+function buildFoundRedactionRows(report) {
   const guesses = Array.isArray(report?.guesses) ? report.guesses : [];
-  const rows = guesses.map((row, index) => {
-    const bbox = row?.bbox ?? {};
-    const x0 = normalizeNumber(bbox.x0, 0);
-    const x1 = normalizeNumber(bbox.x1, 0);
-    const widthPt = Math.max(0, x1 - x0);
+  return guesses.map((row, index) => {
+    const bestCandidate = topCandidate(row);
     const context = row?.context ?? {};
     return {
-      key: `${normalizeNumber(row?.page_index, 0)}-${index}`,
-      pageIndex: normalizeNumber(row?.page_index, 0),
-      rowIndex: index,
-      widthPt,
+      rowNumber: index + 1,
+      pageNumber: normalizeNumber(row?.page_index, 0) + 1,
       guessText: topGuessText(row),
-      leftContext: String(context.left_anchor_text ?? "").trim(),
-      rightContext: String(context.right_anchor_text ?? "").trim(),
+      exactMatches: exactMatchesText(row),
       candidateCount: Array.isArray(row?.candidates)
         ? row.candidates.length
         : 0,
-      anchorMode: String(context.anchor_mode ?? "unknown"),
-      bboxLabel: `x=${x0.toFixed(1)}..${x1.toFixed(1)}`,
+      topScore: formatMaybeNumber(bestCandidate?.score, 4),
+      topErrorPt: formatMaybeNumber(bestCandidate?.error_pt, 3),
+      topWidthPt: formatMaybeNumber(bestCandidate?.width_pt, 3),
+      bboxLabel: guessBboxLabel(row?.bbox),
+      gapPt: formatMaybeNumber(context.gap_pt, 2),
+      anchorMode: valueOrDash(context.anchor_mode),
+      anchorFont: anchorFontDisplay(context),
+      confidence: formatMaybeNumber(context.confidence_score, 3),
+      visualMeanAbsDiff: formatMaybeNumber(row?.visual_mean_abs_diff, 3),
+      visualChangedRatio: formatMaybeNumber(row?.visual_changed_pixel_ratio, 4),
+      visualDropped: row?.visual_dropped ? "yes" : "no",
+      leftContext: valueOrDash(context.left_anchor_text),
+      rightContext: valueOrDash(context.right_anchor_text),
     };
   });
-  const maxWidthPt = rows.reduce((max, row) => Math.max(max, row.widthPt), 0);
-  return { rows, maxWidthPt };
 }
 
-function stripWidthPercent(widthPt, maxWidthPt) {
-  if (maxWidthPt <= 0) {
-    return 38;
+function appendTextCell(row, text, className = "") {
+  const cell = document.createElement("td");
+  if (className) {
+    cell.className = className;
   }
-  const ratio = Math.min(1, Math.max(0, widthPt / maxWidthPt));
-  return Math.round(24 + ratio * 76);
+  cell.textContent = text;
+  row.appendChild(cell);
 }
 
-function groupRowsByPage(rows) {
-  const grouped = new Map();
-  for (const row of rows) {
-    const key = row.pageIndex;
-    if (!grouped.has(key)) {
-      grouped.set(key, []);
-    }
-    grouped.get(key).push(row);
+function appendGuessCell(row, guessText) {
+  appendTextCell(row, guessText, "cell-top-guess");
+}
+
+function buildFoundRedactionsTable(rows) {
+  const columns = [
+    "Row",
+    "Page",
+    "Top Guess",
+    "Exact Matches",
+    "Candidate Count",
+    "Top Score",
+    "Top Error (pt)",
+    "Top Width (pt)",
+    "BBox (pt)",
+    "Gap (pt)",
+    "Anchor Mode",
+    "Anchor Font",
+    "Confidence",
+    "Visual MAD",
+    "Visual Changed",
+    "Visual Dropped",
+    "Left Context",
+    "Right Context",
+  ];
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "redaction-table-wrap";
+
+  const table = document.createElement("table");
+  table.className = "redaction-table";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const column of columns) {
+    const th = document.createElement("th");
+    th.textContent = column;
+    headRow.appendChild(th);
   }
-  return [...grouped.entries()].sort((left, right) => left[0] - right[0]);
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const body = document.createElement("tbody");
+  for (const rowData of rows) {
+    const row = document.createElement("tr");
+    appendTextCell(row, String(rowData.rowNumber));
+    appendTextCell(row, String(rowData.pageNumber));
+    appendGuessCell(row, rowData.guessText);
+    appendTextCell(row, rowData.exactMatches, "cell-exact-matches");
+    appendTextCell(row, String(rowData.candidateCount));
+    appendTextCell(row, rowData.topScore);
+    appendTextCell(row, rowData.topErrorPt);
+    appendTextCell(row, rowData.topWidthPt);
+    appendTextCell(row, rowData.bboxLabel);
+    appendTextCell(row, rowData.gapPt);
+    appendTextCell(row, rowData.anchorMode);
+    appendTextCell(row, rowData.anchorFont);
+    appendTextCell(row, rowData.confidence);
+    appendTextCell(row, rowData.visualMeanAbsDiff);
+    appendTextCell(row, rowData.visualChangedRatio);
+    appendTextCell(row, rowData.visualDropped);
+    appendTextCell(row, rowData.leftContext, "cell-context");
+    appendTextCell(row, rowData.rightContext, "cell-context");
+    body.appendChild(row);
+  }
+  table.appendChild(body);
+
+  wrapper.appendChild(table);
+  return wrapper;
 }
 
 function renderGuessVisualization(report) {
-  const { rows, maxWidthPt } = buildGuessViewRows(report);
+  const rows = buildFoundRedactionRows(report);
   if (rows.length === 0) {
-    clearGuessVisualization("No guess rows were returned.");
+    clearGuessVisualization("No redactions were found.");
     return;
   }
 
   guessVisualizationElement.innerHTML = "";
   guessVisualizationElement.classList.remove("empty-state");
-
-  const pageGroups = groupRowsByPage(rows);
-  for (const [pageIndex, pageRows] of pageGroups) {
-    const pageBlock = document.createElement("section");
-    pageBlock.className = "guess-page-group";
-
-    const pageTitle = document.createElement("h3");
-    pageTitle.className = "guess-page-title";
-    pageTitle.textContent = `Page ${pageIndex + 1} (${pageRows.length} rows)`;
-    pageBlock.appendChild(pageTitle);
-
-    const rowList = document.createElement("div");
-    rowList.className = "guess-row-list";
-
-    for (const row of pageRows) {
-      const card = document.createElement("article");
-      card.className = "guess-row-card";
-      card.dataset.key = row.key;
-
-      const meta = document.createElement("p");
-      meta.className = "guess-row-meta";
-      meta.textContent = `row #${row.rowIndex + 1} | ${row.bboxLabel} | candidates=${row.candidateCount} | anchor=${row.anchorMode}`;
-      card.appendChild(meta);
-
-      const context = document.createElement("p");
-      context.className = "guess-row-context";
-      const left = row.leftContext || "…";
-      const right = row.rightContext || "…";
-      context.append(left, " ");
-      const guessChip = document.createElement("span");
-      guessChip.className = "guess-chip";
-      guessChip.textContent = row.guessText;
-      context.appendChild(guessChip);
-      context.append(" ", right);
-      card.appendChild(context);
-
-      const stripTrack = document.createElement("div");
-      stripTrack.className = "guess-strip-track";
-      const strip = document.createElement("div");
-      strip.className = "guess-strip";
-      strip.style.width = `${stripWidthPercent(row.widthPt, maxWidthPt)}%`;
-      strip.textContent = row.guessText;
-      stripTrack.appendChild(strip);
-      card.appendChild(stripTrack);
-
-      rowList.appendChild(card);
-    }
-
-    pageBlock.appendChild(rowList);
-    guessVisualizationElement.appendChild(pageBlock);
-  }
+  guessVisualizationElement.appendChild(buildFoundRedactionsTable(rows));
 }
 
 function downloadAnchorFromUrl(fileName, url) {
@@ -871,7 +939,7 @@ function renderBatchResults() {
       const inspectButton = document.createElement("button");
       inspectButton.type = "button";
       inspectButton.className = "batch-view-button";
-      inspectButton.textContent = "Inspect";
+      inspectButton.textContent = "Show Visualized";
       inspectButton.addEventListener("click", () => {
         void selectResult(result.id);
       });

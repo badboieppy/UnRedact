@@ -83,20 +83,28 @@
             </section>
 
             <section class="card">
-                <h2>Benchmark &amp; Memory</h2>
-                <pre id="benchmarkSummary">No run yet.</pre>
+                <details id="performancePanel">
+                    <summary>Performance</summary>
+                    <pre id="benchmarkSummary">No run yet.</pre>
+                </details>
             </section>
 
             <section class="card">
-                <h2>Batch Results</h2>
-                <div class="actions batch-actions">
-                    <button id="downloadBatchZipButton" type="button" disabled>
-                        Download Batch ZIP
-                    </button>
-                </div>
-                <div id="batchResults" class="batch-results empty-state">
-                    No run yet.
-                </div>
+                <details id="batchResultsPanel" open>
+                    <summary>Batch Results</summary>
+                    <div class="actions batch-actions">
+                        <button
+                            id="downloadBatchZipButton"
+                            type="button"
+                            disabled
+                        >
+                            Download Batch ZIP
+                        </button>
+                    </div>
+                    <div id="batchResults" class="batch-results empty-state">
+                        No run yet.
+                    </div>
+                </details>
             </section>
 
             <section class="card">
@@ -105,7 +113,7 @@
             </section>
 
             <section class="card">
-                <h2>Guess Visualization</h2>
+                <h2>Found Redactions</h2>
                 <div
                     id="guessVisualization"
                     class="guess-visualization empty-state"
