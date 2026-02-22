@@ -183,9 +183,11 @@ fn build_visualization_payload_stage(
 }
 
 mod guess_impl {
-    use lopdf::{Dictionary, Document, Object};
-
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
+    use crate::data::typography_width_data::{
+        build_typography_profile_from_pdf_bytes, fallback_typography_width,
+        measure_text_width_from_profile,
+    };
     use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
     use crate::logic::time::Instant;
     use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
@@ -196,9 +198,11 @@ mod guess_impl {
         Rect, RedactionKind, RedactionOccurrence, RedactionReport,
     };
     use crate::types::runtime_defaults::{
-        DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE, MULTI_SPAN_GAP_RATIO_THRESHOLD,
+        DEFAULT_FONT_METRICS_DPI, MULTI_SPAN_GAP_RATIO_THRESHOLD,
     };
-    use crate::types::text_shaping::shaping_features;
+    use crate::types::typography_types::{
+        TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
+    };
 
     pub struct RunGuessFromBytesRequest<'a> {
         pub pdf_name: &'a str,
@@ -216,7 +220,8 @@ mod guess_impl {
         let font_runs = build_font_run_report_from_input_name(req.pdf_name, req.pdf_bytes)?;
         let font_runs_ms = font_runs_started.elapsed().as_millis();
         let width_tables_started = Instant::now();
-        let width_tables = build_pdf_width_table_map_from_bytes(req.pdf_bytes).unwrap_or_default();
+        let typography_profile =
+            build_typography_profile_from_pdf_bytes(req.pdf_bytes).unwrap_or_default();
         let width_tables_ms = width_tables_started.elapsed().as_millis();
         let mut diagnostics = req.diagnostics.to_vec();
         diagnostics.push(format!(
@@ -232,7 +237,7 @@ mod guess_impl {
             dictionary: req.dictionary.to_vec(),
             diagnostics,
             font_runs,
-            width_tables,
+            typography_profile,
             pdf_bytes: Some(req.pdf_bytes),
         };
         let mut report = build_report_from_parts_with_fonts_inputs(inputs, req.cfg);
@@ -250,7 +255,7 @@ mod guess_impl {
         dictionary: Vec<String>,
         diagnostics: Vec<String>,
         font_runs: FontRunReport,
-        width_tables: std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: TypographyProfile,
         pdf_bytes: Option<&'a [u8]>,
     }
 
@@ -263,7 +268,7 @@ mod guess_impl {
             &inputs.redactions.redactions,
             &inputs.dictionary,
             &inputs.font_runs,
-            &inputs.width_tables,
+            &inputs.typography_profile,
             cfg,
         );
         let guess_anchor_ms = guess_anchor_started.elapsed().as_millis();
@@ -450,18 +455,6 @@ mod guess_impl {
         gap_width: f64,
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    struct WidthTableKey {
-        page_index: u32,
-        font_key: String,
-    }
-
-    #[derive(Debug, Clone)]
-    struct WidthTable {
-        first_char: u16,
-        widths: Vec<f64>,
-    }
-
     const FIXED_MAX_CANDIDATES: usize = 50;
     const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
     const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
@@ -523,46 +516,14 @@ mod guess_impl {
         "zum", "zur",
     ];
 
-    #[derive(Debug, Clone, Copy)]
-    struct MeasuredWidth {
-        pt: f64,
-        source: WidthSource,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum WidthSource {
-        Asset,
-        PdfWidthTable,
-        CoreFont,
-        Fallback,
-    }
-
-    impl WidthSource {
-        fn as_str(self) -> &'static str {
-            match self {
-                WidthSource::Asset => "asset",
-                WidthSource::PdfWidthTable => "pdf_width_table",
-                WidthSource::CoreFont => "core_font",
-                WidthSource::Fallback => "fallback",
-            }
-        }
-    }
+    type MeasuredWidth = TypographyMeasuredWidth;
+    type WidthSource = TypographyWidthSource;
 
     struct WidthMeasureContext<'a> {
         page_index: u32,
         asset: Option<&'a FontAsset>,
-        width_tables: &'a std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &'a TypographyProfile,
         h_scale_pct: f32,
-    }
-
-    struct TextMeasureInput<'a> {
-        page_index: u32,
-        font_key: &'a str,
-        font_name: &'a str,
-        font_size_pt: f32,
-        h_scale_pct: f32,
-        text: &'a str,
-        metrics_dpi: f32,
     }
 
     struct RowCalibration {
@@ -591,9 +552,10 @@ mod guess_impl {
         redactions: &[RedactionOccurrence],
         dictionary: &[String],
         font_runs: &FontRunReport,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &TypographyProfile,
         cfg: &GuessConfig,
     ) -> (Vec<RedactionGuess>, Vec<String>) {
+        let dictionary_variants = build_dictionary_variants(dictionary);
         let assets = font_runs
             .assets
             .iter()
@@ -621,12 +583,11 @@ mod guess_impl {
             });
         }
 
-        let mut cache = WidthCache::new();
         let mut diagnostics = vec![format!(
             "font_run_count={} font_asset_count={} width_table_count={}",
             font_runs.runs.len(),
             font_runs.assets.len(),
-            width_tables.len()
+            typography_profile.width_table_count()
         )];
         let mut guesses = Vec::with_capacity(redactions.len());
 
@@ -636,7 +597,7 @@ mod guess_impl {
                 .get(&redaction.page_index)
                 .cloned()
                 .unwrap_or_default();
-            let anchor = select_anchor_pair(redaction, &page_runs, &assets, width_tables);
+            let anchor = select_anchor_pair(redaction, &page_runs, &assets, typography_profile);
             let Some(anchor) = anchor else {
                 diagnostics.push(format!(
                     "redaction_index={index} page_index={} anchored_row=false reason=missing_anchor",
@@ -708,12 +669,11 @@ mod guess_impl {
 
             let (guess, funnel) = build_guess_for_anchor(
                 redaction,
-                dictionary,
+                &dictionary_variants,
                 cfg,
                 &anchor,
                 &assets,
-                width_tables,
-                &mut cache,
+                typography_profile,
             );
             diagnostics.push(format!(
                 "redaction_index={index} page_index={} anchor_mode={} funnel_scanned={} funnel_after_char_units={} funnel_after_context={} funnel_after_shape={} funnel_after_anchor={} funnel_after_box={} funnel_scored={}",
@@ -1485,12 +1445,11 @@ mod guess_impl {
 
     fn build_guess_for_anchor(
         redaction: &RedactionOccurrence,
-        dictionary: &[String],
+        dictionary_variants: &[String],
         _cfg: &GuessConfig,
         anchor: &AnchorPairData,
         assets: &std::collections::BTreeMap<String, FontAsset>,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
-        cache: &mut WidthCache,
+        typography_profile: &TypographyProfile,
     ) -> (RedactionGuess, CandidateFunnelMetrics) {
         let mut funnel = CandidateFunnelMetrics::default();
         let asset = assets.get(&anchor.font_key);
@@ -1515,7 +1474,7 @@ mod guess_impl {
 
         let measure_width = |text: &str| {
             let measured = measure_text_width_from_sources(
-                &TextMeasureInput {
+                &TypographyMeasureInput {
                     page_index: redaction.page_index,
                     font_key: &anchor.font_key,
                     font_name: &anchor.font_name,
@@ -1525,10 +1484,10 @@ mod guess_impl {
                     metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 asset,
-                width_tables,
+                typography_profile,
             );
             measured.or_else(|| {
-                Some(fallback_measured_width(
+                Some(fallback_typography_width(
                     text,
                     fallback_char_width,
                     fallback_space_width,
@@ -1537,20 +1496,11 @@ mod guess_impl {
             })
         };
 
-        let key = WidthKey {
-            page_index: redaction.page_index,
-            font_key: anchor.font_key.clone(),
-            font_size_bits: anchor.font_size_pt.to_bits(),
-            h_scale_bits: anchor.h_scale_pct.to_bits(),
-            metrics_dpi_bits: DEFAULT_FONT_METRICS_DPI.to_bits(),
-        };
-        let has_width_table_for_anchor = width_tables.contains_key(&WidthTableKey {
-            page_index: redaction.page_index,
-            font_key: anchor.font_key.clone(),
-        });
+        let has_width_table_for_anchor =
+            typography_profile.has_width_table_for_font(redaction.page_index, &anchor.font_key);
         let left_anchor_text = anchor.left_anchor_text.trim();
         let left_width = measure_width(left_anchor_text).unwrap_or_else(|| {
-            fallback_measured_width(
+            fallback_typography_width(
                 left_anchor_text,
                 fallback_char_width,
                 fallback_space_width,
@@ -1558,7 +1508,7 @@ mod guess_impl {
             )
         });
         let space_width = measure_width(" ").unwrap_or_else(|| {
-            fallback_measured_width(
+            fallback_typography_width(
                 " ",
                 fallback_char_width,
                 fallback_space_width,
@@ -1576,9 +1526,7 @@ mod guess_impl {
             anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
         );
         let candidate_width_index = build_row_candidate_width_index(
-            dictionary,
-            &key,
-            cache,
+            dictionary_variants,
             min_char_units,
             max_char_units,
             &measure_width,
@@ -1908,7 +1856,7 @@ mod guess_impl {
         redaction: &RedactionOccurrence,
         runs: &[&FontTextRun],
         assets: &std::collections::BTreeMap<String, FontAsset>,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &TypographyProfile,
     ) -> Option<AnchorPairData> {
         let red_center_y = rect_center_y(&redaction.bbox);
         let red_center_x = ((redaction.bbox.x0 + redaction.bbox.x1) * 0.5) as f64;
@@ -1965,7 +1913,7 @@ mod guess_impl {
                     Some(left_hint_text),
                     left_hint_hit.map(|hit| hit.bbox.x0 as f64),
                     asset,
-                    width_tables,
+                    typography_profile,
                 );
                 let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
                     redaction.page_index,
@@ -1973,13 +1921,13 @@ mod guess_impl {
                     Some(right_hint_text),
                     right_hint_hit.map(|hit| hit.bbox.x0 as f64),
                     asset,
-                    width_tables,
+                    typography_profile,
                 );
                 if right_x > left_x {
                     let measure_ctx = WidthMeasureContext {
                         page_index: redaction.page_index,
                         asset,
-                        width_tables,
+                        typography_profile,
                         h_scale_pct: run.h_scale_pct,
                     };
                     let calibration = estimate_row_epsilon(&row_runs, run, redaction, &measure_ctx);
@@ -2051,7 +1999,13 @@ mod guess_impl {
             }
         }
         if pairs.is_empty() {
-            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
+            return recover_one_sided_anchor(
+                redaction,
+                &row_runs,
+                &hints,
+                assets,
+                typography_profile,
+            );
         }
 
         pairs.sort_by(|left_pair, right_pair| {
@@ -2106,7 +2060,7 @@ mod guess_impl {
             left_hint,
             left_hint_hit.map(|hit| hit.bbox.x0 as f64),
             asset,
-            width_tables,
+            typography_profile,
         );
         let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
             redaction.page_index,
@@ -2114,19 +2068,31 @@ mod guess_impl {
             right_hint,
             right_hint_hit.map(|hit| hit.bbox.x0 as f64),
             asset,
-            width_tables,
+            typography_profile,
         );
         if left_anchor_text.trim().is_empty() || right_anchor_text.trim().is_empty() {
-            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
+            return recover_one_sided_anchor(
+                redaction,
+                &row_runs,
+                &hints,
+                assets,
+                typography_profile,
+            );
         }
         if right_x <= left_x {
-            return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, width_tables);
+            return recover_one_sided_anchor(
+                redaction,
+                &row_runs,
+                &hints,
+                assets,
+                typography_profile,
+            );
         }
 
         let measure_ctx = WidthMeasureContext {
             page_index: redaction.page_index,
             asset,
-            width_tables,
+            typography_profile,
             h_scale_pct: left_run.h_scale_pct,
         };
         let calibration = estimate_row_epsilon(&row_runs, left_run, redaction, &measure_ctx);
@@ -2152,7 +2118,7 @@ mod guess_impl {
         row_runs: &[&FontTextRun],
         hints: &AnchorHints<'_>,
         assets: &std::collections::BTreeMap<String, FontAsset>,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &TypographyProfile,
     ) -> Option<AnchorPairData> {
         let left_only = row_runs
             .iter()
@@ -2201,7 +2167,7 @@ mod guess_impl {
                 hints.left_text,
                 hints.left_x,
                 asset,
-                width_tables,
+                typography_profile,
             );
             let right_anchor_text = hints.right_text.unwrap_or_default().to_owned();
             let right_x = (redaction.bbox.x1 as f64 + 0.5_f64).max(left_x + 1.0_f64);
@@ -2209,7 +2175,7 @@ mod guess_impl {
                 let measure_ctx = WidthMeasureContext {
                     page_index: redaction.page_index,
                     asset,
-                    width_tables,
+                    typography_profile,
                     h_scale_pct: left_run.h_scale_pct,
                 };
                 let mut calibration =
@@ -2241,7 +2207,7 @@ mod guess_impl {
                 hints.right_text,
                 hints.right_x,
                 asset,
-                width_tables,
+                typography_profile,
             );
             let left_anchor_text = hints.left_text.unwrap_or_default().to_owned();
             let left_x = (redaction.bbox.x0 as f64 - 0.5_f64).min(right_x - 1.0_f64);
@@ -2249,7 +2215,7 @@ mod guess_impl {
                 let measure_ctx = WidthMeasureContext {
                     page_index: redaction.page_index,
                     asset,
-                    width_tables,
+                    typography_profile,
                     h_scale_pct: right_run.h_scale_pct,
                 };
                 let mut calibration =
@@ -2282,7 +2248,7 @@ mod guess_impl {
         hint: Option<&str>,
         hint_x: Option<f64>,
         asset: Option<&FontAsset>,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &TypographyProfile,
     ) -> (String, f64) {
         let run_text = run.text.trim();
         if run_text.is_empty() {
@@ -2302,7 +2268,7 @@ mod guess_impl {
             let offset = prefix_width_from_run(run, prefix_bytes)
                 .or_else(|| {
                     measure_text_width_from_sources(
-                        &TextMeasureInput {
+                        &TypographyMeasureInput {
                             page_index,
                             font_key: &run.font_key,
                             font_name: &run.font_name,
@@ -2312,7 +2278,7 @@ mod guess_impl {
                             metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                         },
                         asset,
-                        width_tables,
+                        typography_profile,
                     )
                     .map(|value| value.pt)
                 })
@@ -2372,7 +2338,7 @@ mod guess_impl {
         )
         .max(0.1_f64);
         let space_width = measure_text_width_from_sources(
-            &TextMeasureInput {
+            &TypographyMeasureInput {
                 page_index: measure_ctx.page_index,
                 font_key: &left_run.font_key,
                 font_name: &left_run.font_name,
@@ -2382,7 +2348,7 @@ mod guess_impl {
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
             measure_ctx.asset,
-            measure_ctx.width_tables,
+            measure_ctx.typography_profile,
         )
         .map(|value| value.pt)
         .unwrap_or(0.5_f64 * fallback_char_width);
@@ -2413,7 +2379,7 @@ mod guess_impl {
                 continue;
             }
             let current_width = measure_text_width_from_sources(
-                &TextMeasureInput {
+                &TypographyMeasureInput {
                     page_index: measure_ctx.page_index,
                     font_key: &current.font_key,
                     font_name: &current.font_name,
@@ -2423,7 +2389,7 @@ mod guess_impl {
                     metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 measure_ctx.asset,
-                measure_ctx.width_tables,
+                measure_ctx.typography_profile,
             )
             .map(|value| value.pt)
             .unwrap_or_else(|| {
@@ -2431,7 +2397,7 @@ mod guess_impl {
                 chars * fallback_char_width
             });
             let current_space_width = measure_text_width_from_sources(
-                &TextMeasureInput {
+                &TypographyMeasureInput {
                     page_index: measure_ctx.page_index,
                     font_key: &current.font_key,
                     font_name: &current.font_name,
@@ -2441,7 +2407,7 @@ mod guess_impl {
                     metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 measure_ctx.asset,
-                measure_ctx.width_tables,
+                measure_ctx.typography_profile,
             )
             .map(|value| value.pt)
             .unwrap_or(space_width);
@@ -2487,271 +2453,12 @@ mod guess_impl {
         }
     }
 
-    fn measure_text_width_pt(
-        asset: &FontAsset,
-        text: &str,
-        font_size_pt: f32,
-        h_scale_pct: f32,
-        metrics_dpi: f32,
-    ) -> Option<MeasuredWidth> {
-        let face = rustybuzz::Face::from_slice(&asset.bytes, 0)?;
-        let units_per_em = asset.units_per_em.max(1) as f32;
-        let scale = (h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-        let font_size = font_size_pt.abs().max(1.0_f32);
-        let width_pt = (advance_pt(&face, text, font_size, units_per_em) as f64) * scale;
-        if !width_pt.is_finite() || width_pt <= 0.0_f64 {
-            return None;
-        }
-        Some(measured_width_from_points(
-            width_pt,
-            metrics_dpi,
-            WidthSource::Asset,
-        ))
-    }
-
     fn measure_text_width_from_sources(
-        input: &TextMeasureInput<'_>,
+        input: &TypographyMeasureInput<'_>,
         asset: Option<&FontAsset>,
-        width_tables: &std::collections::BTreeMap<WidthTableKey, WidthTable>,
+        typography_profile: &TypographyProfile,
     ) -> Option<MeasuredWidth> {
-        if input.text.is_empty() {
-            return Some(measured_width_from_points(
-                0.0_f64,
-                input.metrics_dpi,
-                WidthSource::Fallback,
-            ));
-        }
-        if let Some(asset_value) = asset {
-            if let Some(width) = measure_text_width_pt(
-                asset_value,
-                input.text,
-                input.font_size_pt,
-                input.h_scale_pct,
-                input.metrics_dpi,
-            ) {
-                if width.pt.is_finite() && width.pt > 0.0_f64 {
-                    return Some(width);
-                }
-            }
-        }
-        let key = WidthTableKey {
-            page_index: input.page_index,
-            font_key: input.font_key.to_owned(),
-        };
-        if let Some(table) = width_tables.get(&key) {
-            if let Some(width) = width_from_table(table, input.text, input.font_size_pt) {
-                if width.is_finite() && width > 0.0_f64 {
-                    let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-                    return Some(measured_width_from_points(
-                        width * scale,
-                        input.metrics_dpi,
-                        WidthSource::PdfWidthTable,
-                    ));
-                }
-            }
-        }
-        width_from_core_font(input.font_name, input.text, input.font_size_pt).and_then(|width| {
-            let scale = (input.h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-            let width_pt = width * scale;
-            (width_pt.is_finite() && width_pt > 0.0_f64).then_some(measured_width_from_points(
-                width_pt,
-                input.metrics_dpi,
-                WidthSource::CoreFont,
-            ))
-        })
-    }
-
-    fn build_pdf_width_table_map_from_bytes(
-        pdf_bytes: &[u8],
-    ) -> Result<std::collections::BTreeMap<WidthTableKey, WidthTable>, String> {
-        let doc = Document::load_mem(pdf_bytes).map_err(|error| error.to_string())?;
-        let pages = doc.get_pages();
-        let mut map = std::collections::BTreeMap::new();
-
-        for (page_no, page_id) in pages {
-            let page_index = page_no.saturating_sub(1);
-            let (resources_opt, _unused_pages) = doc
-                .get_page_resources(page_id)
-                .map_err(|error| error.to_string())?;
-            let resources = match resources_opt {
-                Some(resources) => resources,
-                None => continue,
-            };
-            let font_object = match resources.get(b"Font").ok() {
-                Some(object) => object,
-                None => continue,
-            };
-            let font_dict = match deref_to_width_dict(&doc, font_object)
-                .or_else(|| object_to_width_dict(font_object))
-            {
-                Some(dictionary) => dictionary,
-                None => continue,
-            };
-            for (key_bytes, value_object) in font_dict.iter() {
-                let font_key = String::from_utf8_lossy(key_bytes).to_string();
-                let dict = match deref_to_width_dict(&doc, value_object)
-                    .or_else(|| object_to_width_dict(value_object))
-                {
-                    Some(dictionary) => dictionary,
-                    None => continue,
-                };
-                let width_dict = match resolve_width_target_dict(&doc, dict) {
-                    Some(dictionary) => dictionary,
-                    None => continue,
-                };
-                let first_char = width_dict
-                    .get(b"FirstChar")
-                    .ok()
-                    .and_then(object_to_width_u16);
-                let widths = width_dict
-                    .get(b"Widths")
-                    .ok()
-                    .and_then(object_to_width_f64_array);
-                let (first_char, widths) = match (first_char, widths) {
-                    (Some(first), Some(widths)) if !widths.is_empty() => (first, widths),
-                    _ => continue,
-                };
-                map.insert(
-                    WidthTableKey {
-                        page_index,
-                        font_key,
-                    },
-                    WidthTable { first_char, widths },
-                );
-            }
-        }
-
-        Ok(map)
-    }
-
-    fn resolve_width_target_dict<'a>(
-        doc: &'a Document,
-        dict: &'a Dictionary,
-    ) -> Option<&'a Dictionary> {
-        if dict.has(b"Widths") {
-            return Some(dict);
-        }
-        let subtype = dict.get(b"Subtype").ok().and_then(object_to_width_name);
-        if subtype.as_deref() == Some("Type0") {
-            let descendants = dict
-                .get(b"DescendantFonts")
-                .ok()
-                .and_then(object_to_width_array);
-            let first = descendants
-                .and_then(|array| array.first())
-                .and_then(|object| deref_to_width_dict(doc, object));
-            if let Some(descendant) = first {
-                if descendant.has(b"Widths") {
-                    return Some(descendant);
-                }
-            }
-        }
-        None
-    }
-
-    fn width_from_table(table: &WidthTable, text: &str, font_size_pt: f32) -> Option<f64> {
-        let mut sum = 0.0_f64;
-        let mut any = false;
-        for ch in text.chars() {
-            let codepoint = ch as u32;
-            if codepoint > u16::MAX as u32 {
-                continue;
-            }
-            let codepoint = codepoint as u16;
-            if codepoint < table.first_char {
-                continue;
-            }
-            let index = (codepoint - table.first_char) as usize;
-            if index >= table.widths.len() {
-                continue;
-            }
-            sum += table.widths[index] * ((font_size_pt as f64) / 1000.0_f64);
-            any = true;
-        }
-        any.then_some(sum)
-    }
-
-    fn width_from_core_font(font_name: &str, text: &str, font_size_pt: f32) -> Option<f64> {
-        let normalized = font_name.to_ascii_lowercase();
-        let table: fn(char) -> i32 = if normalized.contains("times") && normalized.contains("roman")
-        {
-            times_roman_width as fn(char) -> i32
-        } else if normalized.contains("helvetica") {
-            helvetica_width as fn(char) -> i32
-        } else {
-            return None;
-        };
-        let mut total_units = 0.0_f64;
-        for ch in text.chars() {
-            total_units += table(ch) as f64;
-        }
-        Some(total_units * ((font_size_pt as f64) / 1000.0_f64))
-    }
-
-    fn object_to_width_u16(object: &Object) -> Option<u16> {
-        match object {
-            Object::Integer(value) => (*value).try_into().ok(),
-            Object::Real(value) => (*value as i64).try_into().ok(),
-            _ => None,
-        }
-    }
-
-    fn object_to_width_f64(object: &Object) -> Option<f64> {
-        match object {
-            Object::Real(value) => Some(*value as f64),
-            Object::Integer(value) => Some(*value as f64),
-            _ => None,
-        }
-    }
-
-    fn object_to_width_f64_array(object: &Object) -> Option<Vec<f64>> {
-        match object {
-            Object::Array(values) => {
-                let mut out = Vec::with_capacity(values.len());
-                for item in values {
-                    if let Some(value) = object_to_width_f64(item) {
-                        out.push(value);
-                    }
-                }
-                Some(out)
-            }
-            _ => None,
-        }
-    }
-
-    fn object_to_width_array(object: &Object) -> Option<&Vec<Object>> {
-        match object {
-            Object::Array(values) => Some(values),
-            _ => None,
-        }
-    }
-
-    fn object_to_width_name(object: &Object) -> Option<String> {
-        match object {
-            Object::Name(name_bytes) => Some(String::from_utf8_lossy(name_bytes).to_string()),
-            _ => None,
-        }
-    }
-
-    fn object_to_width_dict(object: &Object) -> Option<&Dictionary> {
-        match object {
-            Object::Dictionary(dictionary) => Some(dictionary),
-            _ => None,
-        }
-    }
-
-    fn deref_to_width_dict<'doc>(
-        doc: &'doc Document,
-        object: &'doc Object,
-    ) -> Option<&'doc Dictionary> {
-        match object {
-            Object::Reference(object_id) => match doc.get_object(*object_id).ok()? {
-                Object::Dictionary(dictionary) => Some(dictionary),
-                _ => None,
-            },
-            Object::Dictionary(dictionary) => Some(dictionary),
-            _ => None,
-        }
+        measure_text_width_from_profile(input, asset, typography_profile)
     }
 
     fn run_center_y(run: &FontTextRun) -> f32 {
@@ -2760,233 +2467,6 @@ mod guess_impl {
 
     fn rect_center_y(rect: &Rect) -> f32 {
         (rect.y0 + rect.y1) * 0.5
-    }
-
-    fn advance_pt(
-        face: &rustybuzz::Face<'_>,
-        text: &str,
-        font_size: f32,
-        units_per_em: f32,
-    ) -> f32 {
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        let out = rustybuzz::shape(face, shaping_features(), buffer);
-        let units = out
-            .glyph_positions()
-            .iter()
-            .map(|position| position.x_advance as f32)
-            .sum::<f32>()
-            / GLYPH_UNITS_SCALE as f32;
-        units * (font_size / units_per_em.max(1.0_f32))
-    }
-
-    fn measured_width_from_points(width_pt: f64, _dpi: f32, source: WidthSource) -> MeasuredWidth {
-        MeasuredWidth {
-            pt: width_pt,
-            source,
-        }
-    }
-
-    fn times_roman_width(ch: char) -> i32 {
-        match ch {
-            ' ' => 250,
-            '!' => 333,
-            '"' => 408,
-            '#' => 500,
-            '$' => 500,
-            '%' => 833,
-            '&' => 778,
-            '\'' => 180,
-            '(' => 333,
-            ')' => 333,
-            '*' => 500,
-            '+' => 564,
-            ',' => 250,
-            '-' => 333,
-            '.' => 250,
-            '/' => 278,
-            '0' => 500,
-            '1' => 500,
-            '2' => 500,
-            '3' => 500,
-            '4' => 500,
-            '5' => 500,
-            '6' => 500,
-            '7' => 500,
-            '8' => 500,
-            '9' => 500,
-            ':' => 278,
-            ';' => 278,
-            '<' => 564,
-            '=' => 564,
-            '>' => 564,
-            '?' => 444,
-            '@' => 921,
-            'A' => 722,
-            'B' => 667,
-            'C' => 667,
-            'D' => 722,
-            'E' => 611,
-            'F' => 556,
-            'G' => 722,
-            'H' => 722,
-            'I' => 333,
-            'J' => 389,
-            'K' => 722,
-            'L' => 611,
-            'M' => 889,
-            'N' => 722,
-            'O' => 722,
-            'P' => 556,
-            'Q' => 722,
-            'R' => 667,
-            'S' => 556,
-            'T' => 611,
-            'U' => 722,
-            'V' => 722,
-            'W' => 944,
-            'X' => 722,
-            'Y' => 722,
-            'Z' => 611,
-            '[' => 333,
-            '\\' => 278,
-            ']' => 333,
-            '^' => 469,
-            '_' => 500,
-            '`' => 333,
-            'a' => 444,
-            'b' => 500,
-            'c' => 444,
-            'd' => 500,
-            'e' => 444,
-            'f' => 333,
-            'g' => 500,
-            'h' => 500,
-            'i' => 278,
-            'j' => 278,
-            'k' => 500,
-            'l' => 278,
-            'm' => 778,
-            'n' => 500,
-            'o' => 500,
-            'p' => 500,
-            'q' => 500,
-            'r' => 333,
-            's' => 389,
-            't' => 278,
-            'u' => 500,
-            'v' => 500,
-            'w' => 722,
-            'x' => 500,
-            'y' => 500,
-            'z' => 444,
-            '{' => 480,
-            '|' => 200,
-            '}' => 480,
-            '~' => 541,
-            _ => 500,
-        }
-    }
-
-    fn helvetica_width(ch: char) -> i32 {
-        match ch {
-            ' ' => 278,
-            '!' => 278,
-            '"' => 355,
-            '#' => 556,
-            '$' => 556,
-            '%' => 889,
-            '&' => 667,
-            '\'' => 191,
-            '(' => 333,
-            ')' => 333,
-            '*' => 389,
-            '+' => 584,
-            ',' => 278,
-            '-' => 333,
-            '.' => 278,
-            '/' => 278,
-            '0' => 556,
-            '1' => 556,
-            '2' => 556,
-            '3' => 556,
-            '4' => 556,
-            '5' => 556,
-            '6' => 556,
-            '7' => 556,
-            '8' => 556,
-            '9' => 556,
-            ':' => 278,
-            ';' => 278,
-            '<' => 584,
-            '=' => 584,
-            '>' => 584,
-            '?' => 556,
-            '@' => 1015,
-            'A' => 667,
-            'B' => 667,
-            'C' => 722,
-            'D' => 722,
-            'E' => 667,
-            'F' => 611,
-            'G' => 778,
-            'H' => 722,
-            'I' => 278,
-            'J' => 500,
-            'K' => 667,
-            'L' => 556,
-            'M' => 833,
-            'N' => 722,
-            'O' => 778,
-            'P' => 667,
-            'Q' => 778,
-            'R' => 722,
-            'S' => 667,
-            'T' => 611,
-            'U' => 722,
-            'V' => 667,
-            'W' => 944,
-            'X' => 667,
-            'Y' => 667,
-            'Z' => 611,
-            '[' => 278,
-            '\\' => 278,
-            ']' => 278,
-            '^' => 469,
-            '_' => 556,
-            '`' => 222,
-            'a' => 556,
-            'b' => 556,
-            'c' => 500,
-            'd' => 556,
-            'e' => 556,
-            'f' => 278,
-            'g' => 556,
-            'h' => 556,
-            'i' => 222,
-            'j' => 222,
-            'k' => 500,
-            'l' => 222,
-            'm' => 833,
-            'n' => 556,
-            'o' => 556,
-            'p' => 556,
-            'q' => 556,
-            'r' => 333,
-            's' => 500,
-            't' => 278,
-            'u' => 556,
-            'v' => 500,
-            'w' => 722,
-            'x' => 500,
-            'y' => 500,
-            'z' => 500,
-            '{' => 334,
-            '|' => 260,
-            '}' => 334,
-            '~' => 584,
-            _ => 500,
-        }
     }
 
     fn extract_context(
@@ -3056,34 +2536,6 @@ mod guess_impl {
         }
     }
 
-    fn fallback_measured_width(
-        text: &str,
-        fallback_char_width: f64,
-        fallback_space_width: f64,
-        dpi: f32,
-    ) -> MeasuredWidth {
-        let width_pt = text
-            .chars()
-            .map(|ch| {
-                if ch.is_whitespace() {
-                    fallback_space_width
-                } else {
-                    fallback_char_width.max(0.1_f64)
-                }
-            })
-            .sum::<f64>();
-        measured_width_from_points(width_pt, dpi, WidthSource::Fallback)
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    struct WidthKey {
-        page_index: u32,
-        font_key: String,
-        font_size_bits: u32,
-        h_scale_bits: u32,
-        metrics_dpi_bits: u32,
-    }
-
     #[derive(Debug, Clone)]
     struct CandidateWidthEntry {
         text: String,
@@ -3091,51 +2543,30 @@ mod guess_impl {
         source: WidthSource,
     }
 
-    struct WidthCache {
-        measured:
-            std::collections::BTreeMap<WidthKey, std::collections::BTreeMap<String, MeasuredWidth>>,
-        variants: std::collections::BTreeMap<String, Vec<String>>,
-    }
-
-    impl WidthCache {
-        fn new() -> Self {
-            Self {
-                measured: std::collections::BTreeMap::new(),
-                variants: std::collections::BTreeMap::new(),
-            }
-        }
-    }
-
     fn build_row_candidate_width_index(
-        dictionary: &[String],
-        key: &WidthKey,
-        cache: &mut WidthCache,
+        dictionary_variants: &[String],
         min_char_units: f64,
         max_char_units: f64,
         measure_width: &dyn Fn(&str) -> Option<MeasuredWidth>,
     ) -> Vec<CandidateWidthEntry> {
-        let mut seen = std::collections::BTreeSet::<String>::new();
         let mut out = Vec::<CandidateWidthEntry>::new();
-        for entry in dictionary {
-            for variant in entry_variants(entry, cache) {
-                let trimmed = variant.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let char_units = candidate_char_units(trimmed);
-                if char_units < min_char_units || char_units > max_char_units {
-                    continue;
-                }
-                if !seen.insert(trimmed.to_owned()) {
-                    continue;
-                }
-                let measured = measured_candidate_width(key, trimmed, cache, measure_width);
-                out.push(CandidateWidthEntry {
-                    text: trimmed.to_owned(),
-                    width_pt: measured.pt,
-                    source: measured.source,
-                });
+        for variant in dictionary_variants {
+            let trimmed = variant.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+            let char_units = candidate_char_units(trimmed);
+            if char_units < min_char_units || char_units > max_char_units {
+                continue;
+            }
+            let measured = measure_width(trimmed).unwrap_or_else(|| {
+                fallback_typography_width(trimmed, 0.0_f64, 0.0_f64, DEFAULT_FONT_METRICS_DPI)
+            });
+            out.push(CandidateWidthEntry {
+                text: trimmed.to_owned(),
+                width_pt: measured.pt,
+                source: measured.source,
+            });
         }
         out.sort_by(|left, right| {
             left.width_pt
@@ -3146,42 +2577,25 @@ mod guess_impl {
         out
     }
 
-    fn measured_candidate_width(
-        key: &WidthKey,
-        text: &str,
-        cache: &mut WidthCache,
-        measure_width: &dyn Fn(&str) -> Option<MeasuredWidth>,
-    ) -> MeasuredWidth {
-        if let Some(existing) = cache
-            .measured
-            .get(key)
-            .and_then(|rows| rows.get(text))
-            .copied()
-        {
-            return existing;
+    fn build_dictionary_variants(dictionary: &[String]) -> Vec<String> {
+        let mut out = Vec::<String>::new();
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        for entry in dictionary {
+            let canonical = normalize_dictionary_entry(entry);
+            if canonical.is_empty() {
+                continue;
+            }
+            for variant in build_name_variants(&canonical) {
+                let trimmed = variant.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if seen.insert(trimmed.to_owned()) {
+                    out.push(trimmed.to_owned());
+                }
+            }
         }
-        let measured = measure_width(text).unwrap_or_else(|| {
-            measured_width_from_points(0.0_f64, DEFAULT_FONT_METRICS_DPI, WidthSource::Fallback)
-        });
-        cache
-            .measured
-            .entry(key.clone())
-            .or_default()
-            .insert(text.to_owned(), measured);
-        measured
-    }
-
-    fn entry_variants(entry: &str, cache: &mut WidthCache) -> Vec<String> {
-        let canonical = normalize_dictionary_entry(entry);
-        if canonical.is_empty() {
-            return Vec::new();
-        }
-        if let Some(variants) = cache.variants.get(&canonical) {
-            return variants.clone();
-        }
-        let variants = build_name_variants(&canonical);
-        cache.variants.insert(canonical, variants.clone());
-        variants
+        out
     }
 
     fn normalize_dictionary_entry(value: &str) -> String {

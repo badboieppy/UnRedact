@@ -6,4 +6,5 @@ pub(crate) mod local_file_workflow_data;
 pub(crate) mod redactions_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod result_data_publisher;
+pub(crate) mod typography_width_data;
 pub(crate) mod visualization_data;

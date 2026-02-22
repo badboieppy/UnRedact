@@ -1,6 +1,6 @@
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
 use crate::types::runtime_defaults::{DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE};
-use crate::types::text_shaping::shaping_features;
+use crate::types::typography_shaping::shaping_features;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeMap;
 

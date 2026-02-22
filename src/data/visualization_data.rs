@@ -6,7 +6,7 @@ use crate::types::guess_types::{GuessReport, RedactionGuess};
 use crate::types::redaction_types::{Rect, RedactionKind, RedactionReport};
 use crate::types::runtime_defaults::GLYPH_UNITS_SCALE;
 use crate::types::text_overlay::TextOverlay;
-use crate::types::text_shaping::shaping_features;
+use crate::types::typography_shaping::shaping_features;
 use crate::types::visualizer_config::VisualizerConfig;
 
 const RASTER_TEXT_PADDING_PT: f32 = 1.0_f32;
