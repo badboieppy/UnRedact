@@ -60,6 +60,10 @@ h2 {
     gap: 8px;
 }
 
+.batch-actions {
+    margin-bottom: 10px;
+}
+
 button {
     border: 0;
     border-radius: 8px;

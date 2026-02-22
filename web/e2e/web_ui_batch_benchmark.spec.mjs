@@ -146,6 +146,16 @@ test.describe("web ui batch benchmark", () => {
     const summaryText = await page.locator("#summary").innerText();
     expect(summaryText).toContain("redactions guessed:");
 
+    const zipDownloadPromise = page.waitForEvent("download");
+    await page.click("#downloadBatchZipButton");
+    const zipDownload = await zipDownloadPromise;
+    expect(await zipDownload.failure()).toBeNull();
+    expect(zipDownload.suggestedFilename()).toMatch(
+      /^unredact-results-.*\.zip$/,
+    );
+    const zipPath = await zipDownload.path();
+    expect(zipPath).toBeTruthy();
+
     await fs.mkdir(benchmarkDir, { recursive: true });
     const artifact = {
       generated_at_utc: new Date().toISOString(),

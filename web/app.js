@@ -1,6 +1,7 @@
 import init, { run_unredact_web } from "./pkg/unredact.js";
 
 const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
 
 const RESULTS_DB_NAME = "unredact_web_results";
 const RESULTS_DB_VERSION = 1;
@@ -14,6 +15,9 @@ const shouldVisuallyScoreInput = document.getElementById("shouldVisuallyScore");
 const visualizeOutputInput = document.getElementById("visualizeOutput");
 const runButton = document.getElementById("runButton");
 const clearResultsButton = document.getElementById("clearResultsButton");
+const downloadBatchZipButton = document.getElementById(
+  "downloadBatchZipButton",
+);
 const statusElement = document.getElementById("status");
 const benchmarkSummaryElement = document.getElementById("benchmarkSummary");
 const batchResultsElement = document.getElementById("batchResults");
@@ -25,6 +29,7 @@ const pdfPreviewElement = document.getElementById("pdfPreview");
 
 let wasmReady = false;
 let isRunning = false;
+let isExportingBatchZip = false;
 let nextResultId = 1;
 let openDbPromise = null;
 let selectedResultId = null;
@@ -57,6 +62,21 @@ function setDownloads(items) {
   for (const item of items) {
     downloadsElement.appendChild(item);
   }
+}
+
+function successfulBatchResults() {
+  return batchResults.filter((result) => result.status === "ok");
+}
+
+function updateBatchZipButtonState() {
+  if (!downloadBatchZipButton) {
+    return;
+  }
+  downloadBatchZipButton.disabled =
+    !wasmReady ||
+    isRunning ||
+    isExportingBatchZip ||
+    successfulBatchResults().length === 0;
 }
 
 function asUint8Array(value) {
@@ -99,6 +119,199 @@ function formatMs(value) {
     return "n/a";
   }
   return `${value.toFixed(1)} ms`;
+}
+
+function safeZipPath(path) {
+  const parts = String(path ?? "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter((part) => part !== "" && part !== "." && part !== "..");
+  return parts.join("/");
+}
+
+function makeUniqueZipPath(path, usedLowerPaths) {
+  const normalized = safeZipPath(path) || "output.bin";
+  let candidate = normalized;
+  let suffix = 2;
+  while (usedLowerPaths.has(candidate.toLowerCase())) {
+    const dot = normalized.lastIndexOf(".");
+    if (dot > 0) {
+      candidate = `${normalized.slice(0, dot)} (${suffix})${normalized.slice(dot)}`;
+    } else {
+      candidate = `${normalized} (${suffix})`;
+    }
+    suffix += 1;
+  }
+  usedLowerPaths.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function writeU16(view, offset, value) {
+  view.setUint16(offset, value & 0xffff, true);
+}
+
+function writeU32(view, offset, value) {
+  view.setUint32(offset, value >>> 0, true);
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32Bytes(bytes) {
+  let value = 0xffffffff;
+  for (let index = 0; index < bytes.length; index += 1) {
+    value = CRC32_TABLE[(value ^ bytes[index]) & 0xff] ^ (value >>> 8);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+async function crc32Blob(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return crc32Bytes(bytes);
+}
+
+function dosTimestamp(date) {
+  const safeDate = date instanceof Date ? date : new Date();
+  const year = Math.max(1980, safeDate.getFullYear());
+  const month = safeDate.getMonth() + 1;
+  const day = safeDate.getDate();
+  const hours = safeDate.getHours();
+  const minutes = safeDate.getMinutes();
+  const seconds = Math.floor(safeDate.getSeconds() / 2);
+  const dosDate =
+    (((year - 1980) & 0x7f) << 9) | ((month & 0x0f) << 5) | (day & 0x1f);
+  const dosTime =
+    ((hours & 0x1f) << 11) | ((minutes & 0x3f) << 5) | (seconds & 0x1f);
+  return { dosDate, dosTime };
+}
+
+function buildZipLocalHeader(nameBytes, crc32, size, dosDate, dosTime) {
+  const header = new Uint8Array(30 + nameBytes.length);
+  const view = new DataView(header.buffer);
+  writeU32(view, 0, 0x04034b50);
+  writeU16(view, 4, 20);
+  writeU16(view, 6, 0);
+  writeU16(view, 8, 0);
+  writeU16(view, 10, dosTime);
+  writeU16(view, 12, dosDate);
+  writeU32(view, 14, crc32);
+  writeU32(view, 18, size);
+  writeU32(view, 22, size);
+  writeU16(view, 26, nameBytes.length);
+  writeU16(view, 28, 0);
+  header.set(nameBytes, 30);
+  return header;
+}
+
+function buildZipCentralHeader(
+  nameBytes,
+  crc32,
+  size,
+  dosDate,
+  dosTime,
+  localHeaderOffset,
+) {
+  const header = new Uint8Array(46 + nameBytes.length);
+  const view = new DataView(header.buffer);
+  writeU32(view, 0, 0x02014b50);
+  writeU16(view, 4, 20);
+  writeU16(view, 6, 20);
+  writeU16(view, 8, 0);
+  writeU16(view, 10, 0);
+  writeU16(view, 12, dosTime);
+  writeU16(view, 14, dosDate);
+  writeU32(view, 16, crc32);
+  writeU32(view, 20, size);
+  writeU32(view, 24, size);
+  writeU16(view, 28, nameBytes.length);
+  writeU16(view, 30, 0);
+  writeU16(view, 32, 0);
+  writeU16(view, 34, 0);
+  writeU16(view, 36, 0);
+  writeU32(view, 38, 0);
+  writeU32(view, 42, localHeaderOffset);
+  header.set(nameBytes, 46);
+  return header;
+}
+
+function buildZipEndRecord(entryCount, centralSize, centralOffset) {
+  const record = new Uint8Array(22);
+  const view = new DataView(record.buffer);
+  writeU32(view, 0, 0x06054b50);
+  writeU16(view, 4, 0);
+  writeU16(view, 6, 0);
+  writeU16(view, 8, entryCount);
+  writeU16(view, 10, entryCount);
+  writeU32(view, 12, centralSize);
+  writeU32(view, 16, centralOffset);
+  writeU16(view, 20, 0);
+  return record;
+}
+
+async function buildStoredZipBlobFromEntries(entries, onProgress) {
+  const payloadParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  const timestamp = dosTimestamp(new Date());
+
+  if (entries.length > 0xffff) {
+    throw new Error("too many files for standard ZIP export");
+  }
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (typeof onProgress === "function") {
+      onProgress(index + 1, entries.length, entry.name);
+    }
+    const nameBytes = textEncoder.encode(entry.name);
+    if (nameBytes.length > 0xffff) {
+      throw new Error(`zip entry name is too long: ${entry.name}`);
+    }
+
+    const size = entry.blob.size;
+    if (size > 0xffffffff) {
+      throw new Error(`zip entry is too large: ${entry.name}`);
+    }
+
+    const crc = await crc32Blob(entry.blob);
+    const localHeader = buildZipLocalHeader(
+      nameBytes,
+      crc,
+      size,
+      timestamp.dosDate,
+      timestamp.dosTime,
+    );
+    const centralHeader = buildZipCentralHeader(
+      nameBytes,
+      crc,
+      size,
+      timestamp.dosDate,
+      timestamp.dosTime,
+      localOffset,
+    );
+    payloadParts.push(localHeader, entry.blob);
+    centralParts.push(centralHeader);
+    localOffset += localHeader.byteLength + size;
+  }
+
+  const centralSize = centralParts.reduce(
+    (sum, part) => sum + part.byteLength,
+    0,
+  );
+  const endRecord = buildZipEndRecord(entries.length, centralSize, localOffset);
+  return new Blob([...payloadParts, ...centralParts, endRecord], {
+    type: "application/zip",
+  });
 }
 
 function fileDisplayLabel(file) {
@@ -296,6 +509,18 @@ function downloadAnchorFromUrl(fileName, url) {
   return link;
 }
 
+function triggerBlobDownload(fileName, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
 function parseJsonBytes(bytes, label) {
   const decoded = textDecoder.decode(bytes);
   try {
@@ -397,6 +622,129 @@ async function idbGetOutput(id) {
   return result ?? null;
 }
 
+function zipFolderNameForResult(result, sequenceIndex) {
+  const order = String(sequenceIndex + 1).padStart(4, "0");
+  return `results/${order}_${outputBaseName(result.label, result.id)}`;
+}
+
+async function collectBatchZipEntries(results, onProgress) {
+  const entries = [];
+  const usedPaths = new Set();
+  const manifestFiles = [];
+
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    if (typeof onProgress === "function") {
+      onProgress(index + 1, results.length, result.label);
+    }
+
+    const stored = await idbGetOutput(result.id);
+    if (!stored) {
+      throw new Error(`stored output missing for: ${result.label}`);
+    }
+
+    const folder = safeZipPath(zipFolderNameForResult(result, index));
+    const addFile = (name, blob) => {
+      if (!blob || !name) {
+        return null;
+      }
+      const path = makeUniqueZipPath(`${folder}/${name}`, usedPaths);
+      entries.push({ name: path, blob });
+      return path;
+    };
+
+    const manifestItem = {
+      result_id: result.id,
+      label: result.label,
+      status: result.status,
+      output_files: {
+        redactions: addFile(
+          result.outputNames?.redactions,
+          stored.redactionsBlob,
+        ),
+        fonts: addFile(result.outputNames?.fonts, stored.fontsBlob),
+        guesses: addFile(result.outputNames?.guesses, stored.guessesBlob),
+        visualized: addFile(
+          result.outputNames?.visualized,
+          stored.visualizedBlob,
+        ),
+      },
+    };
+    manifestFiles.push(manifestItem);
+  }
+
+  const manifest = {
+    generated_at_utc: new Date().toISOString(),
+    successful_results: results.length,
+    files: manifestFiles,
+  };
+  const manifestBlob = new Blob([`${JSON.stringify(manifest, null, 2)}\n`], {
+    type: "application/json",
+  });
+  entries.unshift({
+    name: makeUniqueZipPath("results/batch_manifest.json", usedPaths),
+    blob: manifestBlob,
+  });
+
+  return entries;
+}
+
+function batchZipFileName() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `unredact-results-${stamp}.zip`;
+}
+
+async function downloadBatchZip() {
+  if (isRunning || isExportingBatchZip) {
+    return;
+  }
+
+  const results = successfulBatchResults();
+  if (results.length === 0) {
+    setStatus("No successful results are available to export.");
+    updateBatchZipButtonState();
+    return;
+  }
+
+  isExportingBatchZip = true;
+  updateBatchZipButtonState();
+  try {
+    setStatus(`Preparing ZIP entries (0/${results.length})...`);
+    const entries = await collectBatchZipEntries(
+      results,
+      (current, total, label) => {
+        setStatus(`Preparing ZIP entries (${current}/${total}): ${label}`);
+      },
+    );
+
+    let lastProgressUpdate = -1;
+    const zipBlob = await buildStoredZipBlobFromEntries(
+      entries,
+      (current, total, entryName) => {
+        const shouldLog =
+          current === 1 ||
+          current === total ||
+          current - lastProgressUpdate >= 10;
+        if (shouldLog) {
+          lastProgressUpdate = current;
+          setStatus(`Building ZIP (${current}/${total}): ${entryName}`);
+        }
+      },
+    );
+
+    const fileName = batchZipFileName();
+    triggerBlobDownload(fileName, zipBlob);
+    setStatus(
+      `Batch ZIP downloaded: ${fileName} (${formatBytes(zipBlob.size)})`,
+    );
+  } catch (error) {
+    setStatus(`Failed to build batch ZIP: ${error}`);
+  } finally {
+    isExportingBatchZip = false;
+    updateBatchZipButtonState();
+  }
+}
+
 function revokeSelectedOutputUrls() {
   if (!selectedOutputUrls) {
     return;
@@ -481,6 +829,7 @@ function renderBatchResults() {
   if (batchResults.length === 0) {
     batchResultsElement.classList.add("empty-state");
     batchResultsElement.textContent = "No run yet.";
+    updateBatchZipButtonState();
     return;
   }
   batchResultsElement.classList.remove("empty-state");
@@ -534,6 +883,7 @@ function renderBatchResults() {
   }
 
   batchResultsElement.appendChild(list);
+  updateBatchZipButtonState();
 }
 
 function createHeapSample(label, metrics) {
@@ -642,6 +992,7 @@ async function clearAllResults() {
 function setRunningUi(busy) {
   runButton.disabled = busy || !wasmReady;
   clearResultsButton.disabled = busy;
+  updateBatchZipButtonState();
 }
 
 function buildRequestConfig() {
@@ -935,6 +1286,10 @@ runButton.addEventListener("click", () => {
 
 clearResultsButton.addEventListener("click", () => {
   void clearAllResults();
+});
+
+downloadBatchZipButton.addEventListener("click", () => {
+  void downloadBatchZip();
 });
 
 boot();
