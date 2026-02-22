@@ -87,6 +87,8 @@ pub fn run_guess_from_redactions(req: ToolingGuessRequest<'_>) -> Result<GuessRe
         redactions: req.redactions,
         dictionary: req.dictionary,
         diagnostics: req.dictionary_diagnostics,
+        preloaded_font_runs: None,
+        preloaded_font_runs_elapsed_ms: None,
         cfg: req.guess,
     })
 }

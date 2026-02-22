@@ -4,7 +4,7 @@ use crate::logic::time::Instant;
 use crate::logic::types::{
     BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
 };
-use crate::types::file_types::FontDetectionReport;
+use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::GuessReport;
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
 use crate::types::runtime_defaults::RASTER_HIGHPASS_DPI;
@@ -29,6 +29,22 @@ struct GuessStageOutput {
     elapsed_ms: u128,
 }
 
+struct RunGuessStageInputs<'a> {
+    input_name: &'a str,
+    pdf_bytes: &'a [u8],
+    redactions: &'a RedactionReport,
+    dictionary_entries: &'a [String],
+    dictionary_diagnostics: &'a [String],
+    font_runs: &'a FontRunReport,
+    preloaded_font_runs_elapsed_ms: Option<u128>,
+    cfg: &'a PipelineConfig,
+}
+
+struct FontRunsStageOutput {
+    font_runs: FontRunReport,
+    elapsed_ms: u128,
+}
+
 struct VisualizationPayloadStageOutput {
     payload: Option<VisualizationPayload>,
 }
@@ -50,14 +66,17 @@ pub fn run_redaction_guessing_component(
 
     let redaction_stage = run_redaction_stage(&input_name, &pdf_bytes, &cfg, &redactions_data)?;
     let font_stage = run_font_stage(&input_name, &pdf_bytes, cfg.include_details, &fonts_data)?;
-    let mut guess_stage = run_guess_stage(
-        &input_name,
-        &pdf_bytes,
-        &redaction_stage.redactions,
-        &dictionary_entries,
-        &dictionary_diagnostics,
-        &cfg,
-    )?;
+    let font_runs_stage = run_font_runs_stage(&input_name, &pdf_bytes, &fonts_data)?;
+    let mut guess_stage = run_guess_stage(RunGuessStageInputs {
+        input_name: &input_name,
+        pdf_bytes: &pdf_bytes,
+        redactions: &redaction_stage.redactions,
+        dictionary_entries: &dictionary_entries,
+        dictionary_diagnostics: &dictionary_diagnostics,
+        font_runs: &font_runs_stage.font_runs,
+        preloaded_font_runs_elapsed_ms: Some(font_runs_stage.elapsed_ms),
+        cfg: &cfg,
+    })?;
     guess_stage.guesses.diagnostics.push(format!(
         "timing_ms stage=redactions value={}",
         redaction_stage.elapsed_ms
@@ -72,10 +91,9 @@ pub fn run_redaction_guessing_component(
     ));
 
     let visualization_stage = build_visualization_payload_stage(
-        &input_name,
         pdf_bytes,
         &cfg,
-        &fonts_data,
+        &font_runs_stage.font_runs,
         &mut guess_stage.guesses,
     )?;
 
@@ -133,22 +151,32 @@ fn run_font_stage(
     })
 }
 
-fn run_guess_stage(
+fn run_font_runs_stage(
     input_name: &str,
     pdf_bytes: &[u8],
-    redactions: &RedactionReport,
-    dictionary_entries: &[String],
-    dictionary_diagnostics: &[String],
-    cfg: &PipelineConfig,
-) -> Result<GuessStageOutput, String> {
+    fonts_data: &FontsData,
+) -> Result<FontRunsStageOutput, String> {
+    let started = Instant::now();
+    let font_runs = fonts_data
+        .load_font_runs_from_bytes(input_name, pdf_bytes)?
+        .report;
+    Ok(FontRunsStageOutput {
+        font_runs,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn run_guess_stage(inputs: RunGuessStageInputs<'_>) -> Result<GuessStageOutput, String> {
     let started = Instant::now();
     let guesses = run_guess_from_bytes(RunGuessFromBytesRequest {
-        pdf_name: input_name,
-        pdf_bytes,
-        redactions,
-        dictionary: dictionary_entries,
-        diagnostics: dictionary_diagnostics,
-        cfg: &cfg.guess,
+        pdf_name: inputs.input_name,
+        pdf_bytes: inputs.pdf_bytes,
+        redactions: inputs.redactions,
+        dictionary: inputs.dictionary_entries,
+        diagnostics: inputs.dictionary_diagnostics,
+        preloaded_font_runs: Some(inputs.font_runs),
+        preloaded_font_runs_elapsed_ms: inputs.preloaded_font_runs_elapsed_ms,
+        cfg: &inputs.cfg.guess,
     })?;
     Ok(GuessStageOutput {
         guesses,
@@ -157,19 +185,15 @@ fn run_guess_stage(
 }
 
 fn build_visualization_payload_stage(
-    input_name: &str,
     pdf_bytes: Vec<u8>,
     cfg: &PipelineConfig,
-    fonts_data: &FontsData,
+    font_runs: &FontRunReport,
     guess_report: &mut GuessReport,
 ) -> Result<VisualizationPayloadStageOutput, String> {
     if !cfg.visualize {
         return Ok(VisualizationPayloadStageOutput { payload: None });
     }
     let started = Instant::now();
-    let font_runs = fonts_data
-        .load_font_runs_from_bytes(input_name, &pdf_bytes)?
-        .report;
     guess_report.diagnostics.push(format!(
         "timing_ms stage=visualize_payload value={}",
         started.elapsed().as_millis()
@@ -177,18 +201,19 @@ fn build_visualization_payload_stage(
     Ok(VisualizationPayloadStageOutput {
         payload: Some(VisualizationPayload {
             pdf_bytes,
-            font_runs,
+            font_runs: font_runs.clone(),
         }),
     })
 }
 
 mod guess_impl {
     use super::visual_guess_score_impl::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
+    use crate::data::dictionary_variant_data::build_dictionary_variants;
+    use crate::data::fonts_data::FontsData;
     use crate::data::typography_width_data::{
         build_typography_profile_from_pdf_bytes, fallback_typography_width,
         measure_text_width_from_profile,
     };
-    use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
     use crate::logic::time::Instant;
     use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
     use crate::types::guess_types::{
@@ -210,6 +235,8 @@ mod guess_impl {
         pub redactions: &'a RedactionReport,
         pub dictionary: &'a [String],
         pub diagnostics: &'a [String],
+        pub preloaded_font_runs: Option<&'a FontRunReport>,
+        pub preloaded_font_runs_elapsed_ms: Option<u128>,
         pub cfg: &'a GuessConfig,
     }
 
@@ -217,8 +244,22 @@ mod guess_impl {
     pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<GuessReport, String> {
         let started = Instant::now();
         let font_runs_started = Instant::now();
-        let font_runs = build_font_run_report_from_input_name(req.pdf_name, req.pdf_bytes)?;
-        let font_runs_ms = font_runs_started.elapsed().as_millis();
+        let loaded_font_runs = match req.preloaded_font_runs {
+            Some(_) => None,
+            None => Some(
+                FontsData::new()
+                    .load_font_runs_from_bytes(req.pdf_name, req.pdf_bytes)?
+                    .report,
+            ),
+        };
+        let font_runs = req.preloaded_font_runs.unwrap_or_else(|| {
+            loaded_font_runs
+                .as_ref()
+                .expect("font runs should exist after local load")
+        });
+        let font_runs_ms = req
+            .preloaded_font_runs_elapsed_ms
+            .unwrap_or_else(|| font_runs_started.elapsed().as_millis());
         let width_tables_started = Instant::now();
         let typography_profile =
             build_typography_profile_from_pdf_bytes(req.pdf_bytes).unwrap_or_default();
@@ -254,7 +295,7 @@ mod guess_impl {
         redactions: RedactionReport,
         dictionary: Vec<String>,
         diagnostics: Vec<String>,
-        font_runs: FontRunReport,
+        font_runs: &'a FontRunReport,
         typography_profile: TypographyProfile,
         pdf_bytes: Option<&'a [u8]>,
     }
@@ -267,7 +308,7 @@ mod guess_impl {
         let (mut guesses, guess_diagnostics) = build_anchor_validated_guesses(
             &inputs.redactions.redactions,
             &inputs.dictionary,
-            &inputs.font_runs,
+            inputs.font_runs,
             &inputs.typography_profile,
             cfg,
         );
@@ -289,7 +330,7 @@ mod guess_impl {
                 apply_visual_scores_from_bytes(
                     pdf_bytes,
                     &inputs.redactions,
-                    &inputs.font_runs,
+                    inputs.font_runs,
                     &mut guesses,
                     visual_cfg,
                 )
@@ -479,42 +520,6 @@ mod guess_impl {
     const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 140.0_f64;
     const JOINT_ASSIGNMENT_NULL_DELTA: f64 = 0.75_f64;
     const JOINT_ASSIGNMENT_NULL_MIN_BEST_COST: f64 = 1.4_f64;
-    const MAX_NAME_VARIANTS_PER_ENTRY: usize = 24;
-    const NAME_PREFIX_TOKENS: [&str; 24] = [
-        "mr",
-        "mrs",
-        "ms",
-        "miss",
-        "mx",
-        "dr",
-        "prof",
-        "sir",
-        "madam",
-        "lady",
-        "lord",
-        "rev",
-        "fr",
-        "hon",
-        "judge",
-        "capt",
-        "captain",
-        "lt",
-        "col",
-        "gen",
-        "adm",
-        "pres",
-        "president",
-        "governor",
-    ];
-    const NAME_SUFFIX_TOKENS: [&str; 24] = [
-        "jr", "sr", "ii", "iii", "iv", "v", "vi", "phd", "md", "esq", "esquire", "jd", "dds",
-        "dmd", "do", "rn", "cpa", "mba", "qc", "kc", "ret", "retired", "junior", "senior",
-    ];
-    const NAME_SURNAME_PARTICLE_TOKENS: [&str; 28] = [
-        "al", "ap", "ben", "bin", "da", "dal", "de", "del", "dela", "della", "der", "di", "dos",
-        "du", "el", "ibn", "la", "le", "st", "st.", "ter", "van", "vanden", "vander", "von", "zu",
-        "zum", "zur",
-    ];
 
     type MeasuredWidth = TypographyMeasuredWidth;
     type WidthSource = TypographyWidthSource;
@@ -1876,13 +1881,68 @@ mod guess_impl {
             right_text: right_hint,
             right_x: right_hint_hit.map(|hit| hit.bbox.x0 as f64),
         };
+        let row_runs = sorted_row_runs_for_anchor(redaction, runs);
+        if row_runs.is_empty() {
+            return None;
+        }
+        if let Some(anchor) =
+            try_same_run_hint_anchor(redaction, &row_runs, &hints, assets, typography_profile)
+        {
+            return Some(anchor);
+        }
 
+        let mut pairs = build_pair_candidates(
+            &row_runs,
+            redaction,
+            left_hint,
+            right_hint,
+            red_center_x,
+            red_center_y,
+        );
+        if pairs.is_empty() {
+            return recover_one_sided_anchor(
+                redaction,
+                &row_runs,
+                &hints,
+                assets,
+                typography_profile,
+            );
+        }
+        sort_pair_candidates(&mut pairs);
+        let Some(selected_pair) = pairs
+            .iter()
+            .find(|pair| pair.font_penalty == 0)
+            .or_else(|| pairs.first())
+        else {
+            return recover_one_sided_anchor(
+                redaction,
+                &row_runs,
+                &hints,
+                assets,
+                typography_profile,
+            );
+        };
+
+        build_two_sided_anchor_from_pair(
+            selected_pair,
+            redaction,
+            &row_runs,
+            &hints,
+            assets,
+            typography_profile,
+        )
+        .or_else(|| {
+            recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile)
+        })
+    }
+
+    fn sorted_row_runs_for_anchor<'a>(
+        redaction: &RedactionOccurrence,
+        runs: &[&'a FontTextRun],
+    ) -> Vec<&'a FontTextRun> {
         let mut row_runs = collect_row_runs_for_anchor(redaction, runs, true);
         if row_runs.is_empty() {
             row_runs = collect_row_runs_for_anchor(redaction, runs, false);
-        }
-        if row_runs.is_empty() {
-            return None;
         }
         row_runs.sort_by(|left_run, right_run| {
             left_run
@@ -1899,58 +1959,77 @@ mod guess_impl {
                 })
                 .then_with(|| left_run.text.cmp(&right_run.text))
         });
+        row_runs
+    }
 
-        if let (Some(left_hint_text), Some(right_hint_text)) = (left_hint, right_hint) {
-            let same_run = row_runs.iter().copied().find(|run| {
-                let run_text = run.text.trim();
-                text_matches(run_text, left_hint_text) && text_matches(run_text, right_hint_text)
-            });
-            if let Some(run) = same_run {
-                let asset = assets.get(&run.font_key);
-                let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
-                    redaction.page_index,
-                    run,
-                    Some(left_hint_text),
-                    left_hint_hit.map(|hit| hit.bbox.x0 as f64),
-                    asset,
-                    typography_profile,
-                );
-                let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
-                    redaction.page_index,
-                    run,
-                    Some(right_hint_text),
-                    right_hint_hit.map(|hit| hit.bbox.x0 as f64),
-                    asset,
-                    typography_profile,
-                );
-                if right_x > left_x {
-                    let measure_ctx = WidthMeasureContext {
-                        page_index: redaction.page_index,
-                        asset,
-                        typography_profile,
-                        h_scale_pct: run.h_scale_pct,
-                    };
-                    let calibration = estimate_row_epsilon(&row_runs, run, redaction, &measure_ctx);
-                    return Some(AnchorPairData {
-                        left_anchor_text,
-                        right_anchor_text,
-                        left_x,
-                        right_x,
-                        font_key: run.font_key.clone(),
-                        font_name: run.font_name.clone(),
-                        font_size_pt: run.font_size_pt,
-                        h_scale_pct: run.h_scale_pct,
-                        left_bbox: run.bbox,
-                        right_bbox: run.bbox,
-                        epsilon_pt: calibration.epsilon_pt,
-                        row_bias_pt: calibration.bias_pt,
-                        mode: AnchorMode::TwoSided,
-                    });
-                }
-            }
+    fn try_same_run_hint_anchor(
+        redaction: &RedactionOccurrence,
+        row_runs: &[&FontTextRun],
+        hints: &AnchorHints<'_>,
+        assets: &std::collections::BTreeMap<String, FontAsset>,
+        typography_profile: &TypographyProfile,
+    ) -> Option<AnchorPairData> {
+        let (Some(left_hint_text), Some(right_hint_text)) = (hints.left_text, hints.right_text)
+        else {
+            return None;
+        };
+        let same_run = row_runs.iter().copied().find(|run| {
+            let run_text = run.text.trim();
+            text_matches(run_text, left_hint_text) && text_matches(run_text, right_hint_text)
+        })?;
+        let asset = assets.get(&same_run.font_key);
+        let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
+            redaction.page_index,
+            same_run,
+            Some(left_hint_text),
+            hints.left_x,
+            asset,
+            typography_profile,
+        );
+        let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
+            redaction.page_index,
+            same_run,
+            Some(right_hint_text),
+            hints.right_x,
+            asset,
+            typography_profile,
+        );
+        if right_x <= left_x {
+            return None;
         }
+        let measure_ctx = WidthMeasureContext {
+            page_index: redaction.page_index,
+            asset,
+            typography_profile,
+            h_scale_pct: same_run.h_scale_pct,
+        };
+        let calibration = estimate_row_epsilon(row_runs, same_run, redaction, &measure_ctx);
+        Some(AnchorPairData {
+            left_anchor_text,
+            right_anchor_text,
+            left_x,
+            right_x,
+            font_key: same_run.font_key.clone(),
+            font_name: same_run.font_name.clone(),
+            font_size_pt: same_run.font_size_pt,
+            h_scale_pct: same_run.h_scale_pct,
+            left_bbox: same_run.bbox,
+            right_bbox: same_run.bbox,
+            epsilon_pt: calibration.epsilon_pt,
+            row_bias_pt: calibration.bias_pt,
+            mode: AnchorMode::TwoSided,
+        })
+    }
 
-        let mut pairs = Vec::new();
+    fn build_pair_candidates(
+        row_runs: &[&FontTextRun],
+        redaction: &RedactionOccurrence,
+        left_hint: Option<&str>,
+        right_hint: Option<&str>,
+        red_center_x: f64,
+        red_center_y: f32,
+    ) -> Vec<PairCandidate> {
+        let mut pairs = Vec::<PairCandidate>::new();
         for left_idx in 0..row_runs.len() {
             for right_idx in (left_idx + 1)..row_runs.len() {
                 let left_run = row_runs[left_idx];
@@ -1961,21 +2040,20 @@ mod guess_impl {
                     continue;
                 }
                 let font_penalty = if left_run.font_key == right_run.font_key
-                    && (left_run.font_size_pt - right_run.font_size_pt).abs() <= 2.0
+                    && (left_run.font_size_pt - right_run.font_size_pt).abs() <= 2.0_f32
                 {
-                    0
+                    0_u8
                 } else {
-                    1
+                    1_u8
                 };
                 let left_hint_penalty = match left_hint {
                     Some(hint) => u8::from(!text_matches(left_run.text.trim(), hint)),
-                    None => 0,
+                    None => 0_u8,
                 };
                 let right_hint_penalty = match right_hint {
                     Some(hint) => u8::from(!text_matches(right_run.text.trim(), hint)),
-                    None => 0,
+                    None => 0_u8,
                 };
-                let hint_penalty = left_hint_penalty + right_hint_penalty;
                 let contains_center_penalty =
                     u8::from(red_center_x < left_end || red_center_x > right_start);
                 let y_distance = (run_center_y(left_run) - red_center_y).abs()
@@ -1984,30 +2062,23 @@ mod guess_impl {
                     + (right_run.bbox.y1 - redaction.bbox.y1).abs();
                 let x_distance = (redaction.bbox.x0 as f64 - left_end).abs()
                     + (right_start - redaction.bbox.x1 as f64).abs();
-                let gap_width = right_start - left_end;
                 pairs.push(PairCandidate {
                     left_idx,
                     right_idx,
                     font_penalty,
-                    hint_penalty,
+                    hint_penalty: left_hint_penalty + right_hint_penalty,
                     contains_center_penalty,
                     baseline_distance: baseline_distance as f64,
                     y_distance: y_distance as f64,
                     x_distance,
-                    gap_width,
+                    gap_width: right_start - left_end,
                 });
             }
         }
-        if pairs.is_empty() {
-            return recover_one_sided_anchor(
-                redaction,
-                &row_runs,
-                &hints,
-                assets,
-                typography_profile,
-            );
-        }
+        pairs
+    }
 
+    fn sort_pair_candidates(pairs: &mut [PairCandidate]) {
         pairs.sort_by(|left_pair, right_pair| {
             left_pair
                 .font_penalty
@@ -2043,12 +2114,16 @@ mod guess_impl {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
+    }
 
-        let selected_pair = pairs
-            .iter()
-            .find(|pair| pair.font_penalty == 0)
-            .or_else(|| pairs.first())?;
-
+    fn build_two_sided_anchor_from_pair(
+        selected_pair: &PairCandidate,
+        redaction: &RedactionOccurrence,
+        row_runs: &[&FontTextRun],
+        hints: &AnchorHints<'_>,
+        assets: &std::collections::BTreeMap<String, FontAsset>,
+        typography_profile: &TypographyProfile,
+    ) -> Option<AnchorPairData> {
         let left_run = row_runs[selected_pair.left_idx];
         let right_run = row_runs[selected_pair.right_idx];
         let asset = assets
@@ -2057,45 +2132,32 @@ mod guess_impl {
         let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
             redaction.page_index,
             left_run,
-            left_hint,
-            left_hint_hit.map(|hit| hit.bbox.x0 as f64),
+            hints.left_text,
+            hints.left_x,
             asset,
             typography_profile,
         );
         let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
             redaction.page_index,
             right_run,
-            right_hint,
-            right_hint_hit.map(|hit| hit.bbox.x0 as f64),
+            hints.right_text,
+            hints.right_x,
             asset,
             typography_profile,
         );
         if left_anchor_text.trim().is_empty() || right_anchor_text.trim().is_empty() {
-            return recover_one_sided_anchor(
-                redaction,
-                &row_runs,
-                &hints,
-                assets,
-                typography_profile,
-            );
+            return None;
         }
         if right_x <= left_x {
-            return recover_one_sided_anchor(
-                redaction,
-                &row_runs,
-                &hints,
-                assets,
-                typography_profile,
-            );
+            return None;
         }
-
         let measure_ctx = WidthMeasureContext {
             page_index: redaction.page_index,
             asset,
             typography_profile,
             h_scale_pct: left_run.h_scale_pct,
         };
-        let calibration = estimate_row_epsilon(&row_runs, left_run, redaction, &measure_ctx);
+        let calibration = estimate_row_epsilon(row_runs, left_run, redaction, &measure_ctx);
         Some(AnchorPairData {
             left_anchor_text,
             right_anchor_text,
@@ -2574,410 +2636,6 @@ mod guess_impl {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.text.cmp(&right.text))
         });
-        out
-    }
-
-    fn build_dictionary_variants(dictionary: &[String]) -> Vec<String> {
-        let mut out = Vec::<String>::new();
-        let mut seen = std::collections::BTreeSet::<String>::new();
-        for entry in dictionary {
-            let canonical = normalize_dictionary_entry(entry);
-            if canonical.is_empty() {
-                continue;
-            }
-            for variant in build_name_variants(&canonical) {
-                let trimmed = variant.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if seen.insert(trimmed.to_owned()) {
-                    out.push(trimmed.to_owned());
-                }
-            }
-        }
-        out
-    }
-
-    fn normalize_dictionary_entry(value: &str) -> String {
-        let mut out = String::with_capacity(value.len());
-        let mut in_space = false;
-        for ch in value.chars() {
-            if ch.is_whitespace() {
-                if !in_space && !out.is_empty() {
-                    out.push(' ');
-                }
-                in_space = true;
-            } else {
-                out.push(ch);
-                in_space = false;
-            }
-        }
-        out.trim().to_owned()
-    }
-
-    fn build_name_variants(canonical: &str) -> Vec<String> {
-        let mut template_seen = std::collections::BTreeSet::<String>::new();
-        let mut templates = Vec::<String>::new();
-        push_unique_variant(&mut template_seen, &mut templates, canonical.to_owned());
-
-        let tokens = canonical
-            .split_whitespace()
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>();
-        if !tokens.is_empty() && has_special_name_structure(canonical, &tokens) {
-            let parts = parse_name_parts(canonical, &tokens);
-            let core = join_name_tokens(&parts.core_tokens);
-            let given = join_name_tokens(&parts.given_tokens);
-            let surname = join_name_tokens(&parts.surname_tokens);
-            let given_first = parts.given_tokens.first().cloned().unwrap_or_default();
-            let surname_last = parts.surname_tokens.last().cloned().unwrap_or_default();
-            let prefix = join_name_tokens(&parts.prefix_tokens);
-            let suffix = join_name_tokens(&parts.suffix_tokens);
-
-            if !core.is_empty() {
-                push_unique_variant(&mut template_seen, &mut templates, core.clone());
-            }
-            if !given_first.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{given_first} {surname}"),
-                );
-            }
-            if !surname.is_empty() && !given_first.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{surname}, {given_first}"),
-                );
-            }
-            if !prefix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{prefix} {given_first} {surname}"),
-                );
-            }
-            if !suffix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{given_first} {surname} {suffix}"),
-                );
-            }
-            if !prefix.is_empty()
-                && !suffix.is_empty()
-                && !given_first.is_empty()
-                && !surname.is_empty()
-            {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{prefix} {given_first} {surname} {suffix}"),
-                );
-            }
-            if !given.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{given} {surname}"),
-                );
-            }
-            if !given.is_empty() && !surname.is_empty() && !suffix.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{given} {surname} {suffix}"),
-                );
-            }
-            if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{prefix} {given} {surname}"),
-                );
-            }
-            if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() && !suffix.is_empty()
-            {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{prefix} {given} {surname} {suffix}"),
-                );
-            }
-            if !given_first.is_empty() {
-                push_unique_variant(&mut template_seen, &mut templates, given_first.clone());
-            }
-            if !surname.is_empty() {
-                push_unique_variant(&mut template_seen, &mut templates, surname.clone());
-            }
-            if !surname_last.is_empty() {
-                push_unique_variant(&mut template_seen, &mut templates, surname_last);
-            }
-            if !prefix.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{prefix} {surname}"),
-                );
-            }
-            if !suffix.is_empty() && !surname.is_empty() {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{surname} {suffix}"),
-                );
-            }
-            if !core.is_empty() && !canonical.contains(',') {
-                let mut split = core.split_whitespace();
-                if let (Some(first), Some(last)) = (split.next(), core.split_whitespace().last()) {
-                    if first != last {
-                        push_unique_variant(
-                            &mut template_seen,
-                            &mut templates,
-                            format!("{last}, {first}"),
-                        );
-                    }
-                }
-            }
-            if parts.given_tokens.len() >= 2 && !surname.is_empty() {
-                let middle_initials = parts.given_tokens[1..]
-                    .iter()
-                    .filter_map(|value| value.chars().next())
-                    .map(|ch| format!("{ch}."))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if !middle_initials.is_empty() && !given_first.is_empty() {
-                    push_unique_variant(
-                        &mut template_seen,
-                        &mut templates,
-                        format!("{given_first} {middle_initials} {surname}"),
-                    );
-                }
-            }
-        } else if tokens.len() >= 2 {
-            let first = tokens[0];
-            let last = tokens[tokens.len() - 1];
-            push_unique_variant(
-                &mut template_seen,
-                &mut templates,
-                format!("{first} {last}"),
-            );
-            if !canonical.contains(',') {
-                push_unique_variant(
-                    &mut template_seen,
-                    &mut templates,
-                    format!("{last}, {first}"),
-                );
-            }
-            push_unique_variant(&mut template_seen, &mut templates, first.to_owned());
-            push_unique_variant(&mut template_seen, &mut templates, last.to_owned());
-        }
-
-        finalize_name_variants(&templates)
-    }
-
-    fn has_special_name_structure(canonical: &str, tokens: &[&str]) -> bool {
-        canonical.contains(',')
-            || tokens
-                .iter()
-                .any(|token| is_name_prefix_token(token) || is_name_suffix_token(token))
-            || tokens
-                .iter()
-                .take(tokens.len().saturating_sub(1))
-                .any(|token| is_surname_particle_token(token))
-    }
-
-    fn finalize_name_variants(templates: &[String]) -> Vec<String> {
-        let mut seen = std::collections::BTreeSet::<String>::new();
-        let mut out = Vec::<String>::new();
-        for template in templates {
-            push_unique_variant(&mut seen, &mut out, template.clone());
-            push_unique_variant(&mut seen, &mut out, template.to_uppercase());
-            push_unique_variant(&mut seen, &mut out, template.to_lowercase());
-            push_unique_variant(&mut seen, &mut out, title_case_text(template));
-            if out.len() >= MAX_NAME_VARIANTS_PER_ENTRY {
-                break;
-            }
-        }
-        if out.len() > MAX_NAME_VARIANTS_PER_ENTRY {
-            out.truncate(MAX_NAME_VARIANTS_PER_ENTRY);
-        }
-        out
-    }
-
-    #[derive(Debug, Clone, Default)]
-    struct NameParts {
-        prefix_tokens: Vec<String>,
-        given_tokens: Vec<String>,
-        surname_tokens: Vec<String>,
-        suffix_tokens: Vec<String>,
-        core_tokens: Vec<String>,
-    }
-
-    fn parse_name_parts(canonical: &str, tokens: &[&str]) -> NameParts {
-        parse_comma_name_parts(canonical).unwrap_or_else(|| parse_space_name_parts(tokens))
-    }
-
-    fn parse_comma_name_parts(canonical: &str) -> Option<NameParts> {
-        let (left, right) = canonical.split_once(',')?;
-        let left_tokens = split_name_tokens(left);
-        let right_tokens = split_name_tokens(right);
-        if left_tokens.is_empty() || right_tokens.is_empty() {
-            return None;
-        }
-        let (prefix_tokens, mut right_core_tokens, suffix_tokens) =
-            split_prefix_suffix(&right_tokens);
-        if right_core_tokens.is_empty() {
-            right_core_tokens = right_tokens;
-        }
-        let given_tokens = right_core_tokens;
-        let surname_tokens = left_tokens;
-        let mut core_tokens = Vec::<String>::new();
-        core_tokens.extend(given_tokens.iter().cloned());
-        core_tokens.extend(surname_tokens.iter().cloned());
-        if core_tokens.is_empty() {
-            core_tokens.extend(surname_tokens.iter().cloned());
-        }
-        Some(NameParts {
-            prefix_tokens,
-            given_tokens,
-            surname_tokens,
-            suffix_tokens,
-            core_tokens,
-        })
-    }
-
-    fn parse_space_name_parts(tokens: &[&str]) -> NameParts {
-        let all_tokens = tokens
-            .iter()
-            .map(|token| normalize_dictionary_entry(token))
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>();
-        let (prefix_tokens, mut core_tokens, suffix_tokens) = split_prefix_suffix(&all_tokens);
-        if core_tokens.is_empty() {
-            core_tokens = all_tokens;
-        }
-        let (mut given_tokens, mut surname_tokens) = split_given_surname(&core_tokens);
-        if given_tokens.is_empty() && !core_tokens.is_empty() {
-            given_tokens.push(core_tokens[0].clone());
-        }
-        if surname_tokens.is_empty() && !core_tokens.is_empty() {
-            surname_tokens.push(core_tokens[core_tokens.len() - 1].clone());
-        }
-        NameParts {
-            prefix_tokens,
-            given_tokens,
-            surname_tokens,
-            suffix_tokens,
-            core_tokens,
-        }
-    }
-
-    fn split_name_tokens(value: &str) -> Vec<String> {
-        value
-            .split_whitespace()
-            .map(normalize_dictionary_entry)
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>()
-    }
-
-    fn split_prefix_suffix(tokens: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
-        let mut prefix_end = 0_usize;
-        while prefix_end < tokens.len() && is_name_prefix_token(&tokens[prefix_end]) {
-            prefix_end += 1;
-        }
-        let mut suffix_start = tokens.len();
-        while suffix_start > prefix_end && is_name_suffix_token(&tokens[suffix_start - 1]) {
-            suffix_start -= 1;
-        }
-        (
-            tokens[..prefix_end].to_vec(),
-            tokens[prefix_end..suffix_start].to_vec(),
-            tokens[suffix_start..].to_vec(),
-        )
-    }
-
-    fn split_given_surname(tokens: &[String]) -> (Vec<String>, Vec<String>) {
-        if tokens.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
-        if tokens.len() == 1 {
-            return (vec![tokens[0].clone()], Vec::new());
-        }
-        let mut surname_start = tokens.len() - 1;
-        while surname_start > 0 && is_surname_particle_token(&tokens[surname_start - 1]) {
-            surname_start -= 1;
-        }
-        if surname_start == 0 {
-            return (Vec::new(), tokens.to_vec());
-        }
-        (
-            tokens[..surname_start].to_vec(),
-            tokens[surname_start..].to_vec(),
-        )
-    }
-
-    fn join_name_tokens(tokens: &[String]) -> String {
-        tokens.join(" ")
-    }
-
-    fn name_token_lookup_key(value: &str) -> String {
-        value
-            .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\'' && ch != '-')
-            .trim_end_matches('.')
-            .to_ascii_lowercase()
-    }
-
-    fn is_name_prefix_token(value: &str) -> bool {
-        let key = name_token_lookup_key(value);
-        !key.is_empty() && NAME_PREFIX_TOKENS.contains(&key.as_str())
-    }
-
-    fn is_name_suffix_token(value: &str) -> bool {
-        let key = name_token_lookup_key(value);
-        !key.is_empty() && NAME_SUFFIX_TOKENS.contains(&key.as_str())
-    }
-
-    fn is_surname_particle_token(value: &str) -> bool {
-        let key = name_token_lookup_key(value);
-        !key.is_empty() && NAME_SURNAME_PARTICLE_TOKENS.contains(&key.as_str())
-    }
-
-    fn push_unique_variant(
-        seen: &mut std::collections::BTreeSet<String>,
-        out: &mut Vec<String>,
-        value: String,
-    ) {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let normalized = normalize_dictionary_entry(trimmed);
-        if normalized.is_empty() {
-            return;
-        }
-        if seen.insert(normalized.clone()) {
-            out.push(normalized);
-        }
-    }
-
-    fn title_case_text(value: &str) -> String {
-        let mut out = String::with_capacity(value.len());
-        let mut new_word = true;
-        for ch in value.chars() {
-            if ch.is_alphabetic() {
-                if new_word {
-                    out.extend(ch.to_uppercase());
-                    new_word = false;
-                } else {
-                    out.extend(ch.to_lowercase());
-                }
-            } else {
-                new_word = ch == ' ' || ch == '-' || ch == '\'';
-                out.push(ch);
-            }
-        }
         out
     }
 
@@ -3483,151 +3141,12 @@ mod redaction_impl {
         hits: &[UnderlyingTextHit],
         red_bbox: &Rect,
     ) -> Vec<UnderlyingTextHit> {
-        let band = Rect::new(
-            red_bbox.x0,
-            red_bbox.y0 - Y_BAND_PADDING_PT,
-            red_bbox.x1,
-            red_bbox.y1 + Y_BAND_PADDING_PT,
-        );
-
-        let mut by_line: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
         let red_center_y = (red_bbox.y0 + red_bbox.y1) * 0.5;
-        for (idx, hit) in hits.iter().enumerate() {
-            let hit_center_y = (hit.bbox.y0 + hit.bbox.y1) * 0.5;
-            let close_in_y = (hit_center_y - red_center_y).abs() <= LINE_SEARCH_WINDOW_PT;
-            if vertical_overlap(&hit.bbox, &band) <= 0.0 && !close_in_y {
-                continue;
-            }
-            by_line.entry(line_bucket(&hit.bbox)).or_default().push(idx);
-        }
-
-        let mut best_line: Option<LineMatch> = None;
-
-        for mut line in by_line.into_values() {
-            line.sort_by(|a, b| {
-                let left = &hits[*a].bbox;
-                let right = &hits[*b].bbox;
-                left.x0
-                    .partial_cmp(&right.x0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        left.x1
-                            .partial_cmp(&right.x1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            });
-
-            let before_anchor = line
-                .iter()
-                .enumerate()
-                .filter(|(_, idx)| {
-                    let bbox = &hits[**idx].bbox;
-                    bbox.x0 < red_bbox.x0
-                })
-                .map(|(pos, _)| pos)
-                .next_back()
-                .filter(|pos| {
-                    let idx = line[*pos];
-                    let gap = (red_bbox.x0 - hits[idx].bbox.x1).max(0.0);
-                    gap <= MAX_CONTEXT_GAP_PT || horizontal_overlap(&hits[idx].bbox, red_bbox) > 0.0
-                })
-                .or_else(|| {
-                    line.iter()
-                        .enumerate()
-                        .filter(|(_, idx)| hits[**idx].bbox.x0 < red_bbox.x0)
-                        .map(|(pos, _)| pos)
-                        .next_back()
-                });
-
-            let after_anchor = line
-                .iter()
-                .enumerate()
-                .filter(|(_, idx)| {
-                    let bbox = &hits[**idx].bbox;
-                    bbox.x1 > red_bbox.x1
-                })
-                .map(|(pos, _)| pos)
-                .next()
-                .filter(|pos| {
-                    let idx = line[*pos];
-                    let gap = (hits[idx].bbox.x0 - red_bbox.x1).max(0.0);
-                    gap <= MAX_CONTEXT_GAP_PT || horizontal_overlap(&hits[idx].bbox, red_bbox) > 0.0
-                })
-                .or_else(|| {
-                    line.iter()
-                        .enumerate()
-                        .filter(|(_, idx)| hits[**idx].bbox.x1 > red_bbox.x1)
-                        .map(|(pos, _)| pos)
-                        .next()
-                });
-
-            if before_anchor.is_none() && after_anchor.is_none() {
-                continue;
-            }
-
-            let overlap_pt = line
-                .iter()
-                .map(|idx| horizontal_overlap(&hits[*idx].bbox, red_bbox))
-                .sum::<f32>();
-            if overlap_pt > LARGE_OVERLAP_PT && before_anchor.is_none() {
-                continue;
-            }
-
-            let line_center_y = {
-                let sum = line
-                    .iter()
-                    .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5)
-                    .sum::<f32>();
-                sum / line.len() as f32
-            };
-
-            let mut context_rank = match (before_anchor.is_some(), after_anchor.is_some()) {
-                (true, true) => 0_i32,
-                (true, false) => 1_i32,
-                (false, true) => 2_i32,
-                (false, false) => 3_i32,
-            };
-            if overlap_pt > LARGE_OVERLAP_PT && before_anchor.is_some() && after_anchor.is_some() {
-                context_rank += 2_i32;
-            }
-            let y_rank = ((line_center_y - red_center_y).abs() * 100.0).round() as i32;
-            let before_gap_rank = if let Some(pos) = before_anchor {
-                let idx = line[pos];
-                ((red_bbox.x0 - hits[idx].bbox.x1).max(0.0) * 100.0).round() as i32
-            } else {
-                100_000_i32
-            };
-            let after_gap_rank = if let Some(pos) = after_anchor {
-                let idx = line[pos];
-                ((hits[idx].bbox.x0 - red_bbox.x1).max(0.0) * 100.0).round() as i32
-            } else {
-                100_000_i32
-            };
-
-            let score = (context_rank, y_rank, before_gap_rank, after_gap_rank);
-            match &best_line {
-                None => best_line = Some((line, before_anchor, after_anchor, score)),
-                Some((_, _, _, best_score)) if score < *best_score => {
-                    best_line = Some((line, before_anchor, after_anchor, score));
-                }
-                _ => {}
-            }
-        }
-
-        let Some((line, before_anchor, after_anchor, _)) = best_line else {
-            let page_index = hits.first().map(|h| h.page_index).unwrap_or_default();
-            return vec![
-                UnderlyingTextHit {
-                    page_index,
-                    bbox: *red_bbox,
-                    text: String::new(),
-                },
-                UnderlyingTextHit {
-                    page_index,
-                    bbox: *red_bbox,
-                    text: String::new(),
-                },
-            ];
+        let by_line = collect_line_candidates(hits, red_bbox, red_center_y);
+        let Some((line, before_anchor, after_anchor, _)) =
+            select_best_context_line(hits, red_bbox, red_center_y, by_line)
+        else {
+            return empty_context_hits(hits, red_bbox);
         };
 
         let before_phrase = before_anchor
@@ -3645,6 +3164,184 @@ mod redaction_impl {
         vec![
             build_phrase_hit(page_index, &before_phrase, hits, red_bbox),
             build_phrase_hit(page_index, &after_phrase, hits, red_bbox),
+        ]
+    }
+
+    fn collect_line_candidates(
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+        red_center_y: f32,
+    ) -> BTreeMap<i32, Vec<usize>> {
+        let band = Rect::new(
+            red_bbox.x0,
+            red_bbox.y0 - Y_BAND_PADDING_PT,
+            red_bbox.x1,
+            red_bbox.y1 + Y_BAND_PADDING_PT,
+        );
+        let mut by_line = BTreeMap::<i32, Vec<usize>>::new();
+        for (idx, hit) in hits.iter().enumerate() {
+            let hit_center_y = (hit.bbox.y0 + hit.bbox.y1) * 0.5_f32;
+            let close_in_y = (hit_center_y - red_center_y).abs() <= LINE_SEARCH_WINDOW_PT;
+            if vertical_overlap(&hit.bbox, &band) <= 0.0_f32 && !close_in_y {
+                continue;
+            }
+            by_line.entry(line_bucket(&hit.bbox)).or_default().push(idx);
+        }
+        by_line
+    }
+
+    fn select_best_context_line(
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+        red_center_y: f32,
+        by_line: BTreeMap<i32, Vec<usize>>,
+    ) -> Option<LineMatch> {
+        let mut best_line = None::<LineMatch>;
+        for mut line in by_line.into_values() {
+            line.sort_by(|a, b| {
+                let left = &hits[*a].bbox;
+                let right = &hits[*b].bbox;
+                left.x0
+                    .partial_cmp(&right.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.x1
+                            .partial_cmp(&right.x1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            let before_anchor = select_before_anchor(&line, hits, red_bbox);
+            let after_anchor = select_after_anchor(&line, hits, red_bbox);
+            if before_anchor.is_none() && after_anchor.is_none() {
+                continue;
+            }
+
+            let overlap_pt = line
+                .iter()
+                .map(|idx| horizontal_overlap(&hits[*idx].bbox, red_bbox))
+                .sum::<f32>();
+            if overlap_pt > LARGE_OVERLAP_PT && before_anchor.is_none() {
+                continue;
+            }
+
+            let line_center_y = line
+                .iter()
+                .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5_f32)
+                .sum::<f32>()
+                / line.len() as f32;
+            let mut context_rank = match (before_anchor.is_some(), after_anchor.is_some()) {
+                (true, true) => 0_i32,
+                (true, false) => 1_i32,
+                (false, true) => 2_i32,
+                (false, false) => 3_i32,
+            };
+            if overlap_pt > LARGE_OVERLAP_PT && before_anchor.is_some() && after_anchor.is_some() {
+                context_rank += 2_i32;
+            }
+            let y_rank = ((line_center_y - red_center_y).abs() * 100.0_f32).round() as i32;
+            let before_gap_rank = context_gap_rank_before(&line, before_anchor, hits, red_bbox);
+            let after_gap_rank = context_gap_rank_after(&line, after_anchor, hits, red_bbox);
+            let score = (context_rank, y_rank, before_gap_rank, after_gap_rank);
+            match &best_line {
+                None => best_line = Some((line, before_anchor, after_anchor, score)),
+                Some((_, _, _, best_score)) if score < *best_score => {
+                    best_line = Some((line, before_anchor, after_anchor, score));
+                }
+                _ => {}
+            }
+        }
+        best_line
+    }
+
+    fn select_before_anchor(
+        line: &[usize],
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+    ) -> Option<usize> {
+        line.iter()
+            .enumerate()
+            .filter(|(_, idx)| hits[**idx].bbox.x0 < red_bbox.x0)
+            .map(|(pos, _)| pos)
+            .next_back()
+            .filter(|pos| {
+                let idx = line[*pos];
+                let gap = (red_bbox.x0 - hits[idx].bbox.x1).max(0.0_f32);
+                gap <= MAX_CONTEXT_GAP_PT || horizontal_overlap(&hits[idx].bbox, red_bbox) > 0.0_f32
+            })
+            .or_else(|| {
+                line.iter()
+                    .enumerate()
+                    .filter(|(_, idx)| hits[**idx].bbox.x0 < red_bbox.x0)
+                    .map(|(pos, _)| pos)
+                    .next_back()
+            })
+    }
+
+    fn select_after_anchor(
+        line: &[usize],
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+    ) -> Option<usize> {
+        line.iter()
+            .enumerate()
+            .filter(|(_, idx)| hits[**idx].bbox.x1 > red_bbox.x1)
+            .map(|(pos, _)| pos)
+            .next()
+            .filter(|pos| {
+                let idx = line[*pos];
+                let gap = (hits[idx].bbox.x0 - red_bbox.x1).max(0.0_f32);
+                gap <= MAX_CONTEXT_GAP_PT || horizontal_overlap(&hits[idx].bbox, red_bbox) > 0.0_f32
+            })
+            .or_else(|| {
+                line.iter()
+                    .enumerate()
+                    .filter(|(_, idx)| hits[**idx].bbox.x1 > red_bbox.x1)
+                    .map(|(pos, _)| pos)
+                    .next()
+            })
+    }
+
+    fn context_gap_rank_before(
+        line: &[usize],
+        before_anchor: Option<usize>,
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+    ) -> i32 {
+        if let Some(pos) = before_anchor {
+            let idx = line[pos];
+            ((red_bbox.x0 - hits[idx].bbox.x1).max(0.0_f32) * 100.0_f32).round() as i32
+        } else {
+            100_000_i32
+        }
+    }
+
+    fn context_gap_rank_after(
+        line: &[usize],
+        after_anchor: Option<usize>,
+        hits: &[UnderlyingTextHit],
+        red_bbox: &Rect,
+    ) -> i32 {
+        if let Some(pos) = after_anchor {
+            let idx = line[pos];
+            ((hits[idx].bbox.x0 - red_bbox.x1).max(0.0_f32) * 100.0_f32).round() as i32
+        } else {
+            100_000_i32
+        }
+    }
+
+    fn empty_context_hits(hits: &[UnderlyingTextHit], red_bbox: &Rect) -> Vec<UnderlyingTextHit> {
+        let page_index = hits.first().map(|hit| hit.page_index).unwrap_or_default();
+        vec![
+            UnderlyingTextHit {
+                page_index,
+                bbox: *red_bbox,
+                text: String::new(),
+            },
+            UnderlyingTextHit {
+                page_index,
+                bbox: *red_bbox,
+                text: String::new(),
+            },
         ]
     }
 
@@ -3751,15 +3448,14 @@ mod redaction_impl {
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use lopdf::{Document, Object, ObjectId};
-
+    use crate::data::visual_score_data::{
+        annotate_overlays, apply_page_crop_boxes, build_page_boxes, render_pages_to_rgba,
+    };
     use crate::data::visualization_data::{VisualizationData, VisualizationInputs};
-    use crate::dependency::hayro_renderer::HayroRenderer;
-    use crate::dependency::pdf_annotator::PdfAnnotator;
     use crate::logic::time::Instant;
     use crate::types::file_types::FontRunReport;
     use crate::types::guess_types::{GuessReport, RedactionGuess};
-    use crate::types::redaction_types::{PdfRenderer as _, Rect, RedactionReport, RenderedPage};
+    use crate::types::redaction_types::{Rect, RedactionReport, RenderedPage};
     use crate::types::text_overlay::TextOverlay;
 
     const BACKGROUND_LUMA_THRESHOLD: u8 = 245_u8;
@@ -3904,16 +3600,13 @@ mod visual_guess_score_impl {
             return Ok(diagnostics);
         }
 
-        let annotator = PdfAnnotator;
         let context_overlays_by_redaction =
             build_context_overlays_by_redaction(&overlays_by_redaction);
         let (annotated_bytes, annotate_overlay_ms) = {
             let annotate_overlay_started = Instant::now();
-            let bytes = annotator.annotate(
+            let bytes = annotate_overlays(
                 &inputs.pdf_bytes,
-                &[],
                 &inputs.overlays,
-                OVERLAY_TEXT_COLOR,
                 OVERLAY_TEXT_COLOR,
                 OVERLAY_BORDER_WIDTH,
             )?;
@@ -3939,32 +3632,21 @@ mod visual_guess_score_impl {
             scoring_page_boxes.insert(*page_index, *crop_box);
         }
 
-        let (base_renderer, overlay_renderer, renderer_init_ms) = {
-            let renderer_init_started = Instant::now();
-            let base_renderer = HayroRenderer::new_from_bytes(&base_pdf_bytes_for_visual)?;
-            let overlay_renderer = HayroRenderer::new_from_bytes(&overlay_pdf_bytes_for_visual)?;
-            (
-                base_renderer,
-                overlay_renderer,
-                renderer_init_started.elapsed().as_millis(),
-            )
-        };
         let mut pages_to_render = BTreeSet::<u32>::new();
         for overlays in overlays_by_redaction.values() {
             if let Some(first) = overlays.first() {
                 pages_to_render.insert(first.page_index);
             }
         }
-        let mut base_pages = BTreeMap::<u32, RenderedPage>::new();
-        let mut overlay_pages = BTreeMap::<u32, RenderedPage>::new();
+        let renderer_init_ms = 0_u128;
         let pages_render_started = Instant::now();
-        for page_index in pages_to_render {
-            let base = base_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
-            let overlay =
-                overlay_renderer.render_page_to_rgba(page_index as usize, effective_dpi)?;
-            base_pages.insert(page_index, base);
-            overlay_pages.insert(page_index, overlay);
-        }
+        let base_pages =
+            render_pages_to_rgba(&base_pdf_bytes_for_visual, &pages_to_render, effective_dpi)?;
+        let overlay_pages = render_pages_to_rgba(
+            &overlay_pdf_bytes_for_visual,
+            &pages_to_render,
+            effective_dpi,
+        )?;
         let page_render_ms = pages_render_started.elapsed().as_millis();
 
         let mut rows_with_top_guess = 0_usize;
@@ -4054,7 +3736,6 @@ mod visual_guess_score_impl {
                 rerank_rows_considered += 1;
                 let rerank_eval_started = Instant::now();
                 match score_top_k_candidates_for_row(
-                    &annotator,
                     &base_pdf_bytes_for_visual,
                     redaction.page_index,
                     base_page,
@@ -4540,7 +4221,6 @@ mod visual_guess_score_impl {
 
     #[allow(clippy::too_many_arguments)]
     fn score_top_k_candidates_for_row(
-        annotator: &PdfAnnotator,
         pdf_bytes: &[u8],
         page_index: u32,
         base_page: &RenderedPage,
@@ -4597,19 +4277,20 @@ mod visual_guess_score_impl {
             ) else {
                 continue;
             };
-            let annotated = annotator.annotate(
+            let annotated = annotate_overlays(
                 pdf_bytes,
-                &[],
                 &overlays,
-                OVERLAY_TEXT_COLOR,
                 OVERLAY_TEXT_COLOR,
                 OVERLAY_BORDER_WIDTH,
             )?;
-            let renderer = HayroRenderer::new_from_bytes(&annotated)?;
-            let overlaid_page = renderer.render_page_to_rgba(page_index as usize, dpi)?;
+            let page_indices = BTreeSet::from([page_index]);
+            let overlaid_pages = render_pages_to_rgba(&annotated, &page_indices, dpi)?;
+            let Some(overlaid_page) = overlaid_pages.get(&page_index) else {
+                continue;
+            };
             let Some(score) = score_row_overlay(
                 base_page,
-                &overlaid_page,
+                overlaid_page,
                 page_box,
                 fixed_window_bbox,
                 redaction_bbox,
@@ -4713,40 +4394,6 @@ mod visual_guess_score_impl {
             }
         }
         out
-    }
-
-    fn apply_page_crop_boxes(
-        pdf_bytes: &[u8],
-        page_crop_boxes: &BTreeMap<u32, Rect>,
-    ) -> Result<Vec<u8>, String> {
-        if page_crop_boxes.is_empty() {
-            return Ok(pdf_bytes.to_vec());
-        }
-        let mut doc = Document::load_mem(pdf_bytes).map_err(|error| error.to_string())?;
-        for (page_no, page_id) in doc.get_pages() {
-            let page_index = page_no.saturating_sub(1);
-            let Some(crop) = page_crop_boxes.get(&page_index).copied() else {
-                continue;
-            };
-            let page_object = doc
-                .get_object_mut(page_id)
-                .map_err(|error| error.to_string())?;
-            let page_dict = match page_object {
-                Object::Dictionary(value) => value,
-                _ => continue,
-            };
-            let box_array = Object::Array(vec![
-                Object::Real(crop.x0),
-                Object::Real(crop.y0),
-                Object::Real(crop.x1),
-                Object::Real(crop.y1),
-            ]);
-            page_dict.set("CropBox", box_array.clone());
-            page_dict.set("MediaBox", box_array);
-        }
-        let mut out = Vec::<u8>::new();
-        doc.save_to(&mut out).map_err(|error| error.to_string())?;
-        Ok(out)
     }
 
     fn score_row_overlay(
@@ -4946,83 +4593,6 @@ mod visual_guess_score_impl {
         }
         Some((x0_px, y0_px, x1_px, y1_px))
     }
-
-    fn build_page_boxes(pdf_bytes: &[u8]) -> Result<BTreeMap<u32, Rect>, String> {
-        let doc = Document::load_mem(pdf_bytes).map_err(|error| error.to_string())?;
-        let mut boxes = BTreeMap::<u32, Rect>::new();
-        for (page_no, page_id) in doc.get_pages() {
-            let page_index = page_no.saturating_sub(1);
-            let page_box = page_render_box_from_page(&doc, page_id)
-                .unwrap_or(Rect::new(0.0_f32, 0.0_f32, 612.0_f32, 792.0_f32));
-            boxes.insert(page_index, page_box);
-        }
-        Ok(boxes)
-    }
-
-    fn page_render_box_from_page(doc: &Document, page_id: ObjectId) -> Option<Rect> {
-        inherited_page_rect(doc, page_id, b"CropBox")
-            .or_else(|| inherited_page_rect(doc, page_id, b"MediaBox"))
-    }
-
-    fn inherited_page_rect(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Rect> {
-        let mut current_id = page_id;
-        let mut depth = 0_usize;
-        loop {
-            if depth > 32 {
-                return None;
-            }
-            depth += 1;
-            let object = doc.get_object(current_id).ok()?;
-            let dict = match object {
-                Object::Dictionary(value) => value,
-                _ => return None,
-            };
-
-            if let Ok(value) = dict.get(key) {
-                if let Some(rect) = object_to_rect_resolved(doc, value) {
-                    return Some(rect);
-                }
-            }
-
-            let parent = match dict.get(b"Parent").ok()? {
-                Object::Reference(parent_id) => *parent_id,
-                _ => return None,
-            };
-            current_id = parent;
-        }
-    }
-
-    fn object_to_rect_resolved(doc: &Document, object: &Object) -> Option<Rect> {
-        match object {
-            Object::Reference(object_id) => {
-                doc.get_object(*object_id).ok().and_then(object_to_rect)
-            }
-            _ => object_to_rect(object),
-        }
-    }
-
-    fn object_to_rect(object: &Object) -> Option<Rect> {
-        let values = match object {
-            Object::Array(items) => items,
-            _ => return None,
-        };
-        if values.len() < 4 {
-            return None;
-        }
-        let x0 = object_to_f32(values.first()?)?;
-        let y0 = object_to_f32(values.get(1)?)?;
-        let x1 = object_to_f32(values.get(2)?)?;
-        let y1 = object_to_f32(values.get(3)?)?;
-        Some(Rect::new(x0, y0, x1, y1))
-    }
-
-    fn object_to_f32(object: &Object) -> Option<f32> {
-        match object {
-            Object::Integer(value) => Some(*value as f32),
-            Object::Real(value) => Some(*value),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5193,6 +4763,8 @@ mod tests {
             redactions: &redactions,
             dictionary: &dictionary,
             diagnostics: &diagnostics,
+            preloaded_font_runs: None,
+            preloaded_font_runs_elapsed_ms: None,
             cfg: &cfg,
         })
         .expect("guessing should succeed");
@@ -5202,6 +4774,8 @@ mod tests {
             redactions: &redactions,
             dictionary: &dictionary,
             diagnostics: &diagnostics,
+            preloaded_font_runs: None,
+            preloaded_font_runs_elapsed_ms: None,
             cfg: &cfg,
         })
         .expect("guessing should succeed");
@@ -5235,6 +4809,8 @@ mod tests {
             redactions: &redactions,
             dictionary: &dictionary,
             diagnostics: &diagnostics,
+            preloaded_font_runs: None,
+            preloaded_font_runs_elapsed_ms: None,
             cfg: &cfg,
         })
         .expect("guessing should succeed");
@@ -5260,6 +4836,8 @@ mod tests {
             redactions: &redactions,
             dictionary: &dictionary,
             diagnostics: &[],
+            preloaded_font_runs: None,
+            preloaded_font_runs_elapsed_ms: None,
             cfg: &cfg,
         })
         .expect("guessing should succeed");
@@ -5424,6 +5002,8 @@ mod tests {
             redactions: &redactions,
             dictionary: &dictionary,
             diagnostics: &[],
+            preloaded_font_runs: None,
+            preloaded_font_runs_elapsed_ms: None,
             cfg: &cfg,
         })
         .expect("guessing should succeed");

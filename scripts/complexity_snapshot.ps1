@@ -39,6 +39,31 @@ function Top-ByCount($map, [int]$top = 12) {
     }
 }
 
+function Get-LocMetrics([string[]]$lines, [string[]]$commentStartPatterns) {
+    $total = 0
+    $code = 0
+    foreach ($line in $lines) {
+        $total += 1
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        $isComment = $false
+        foreach ($pattern in $commentStartPatterns) {
+            if ($trimmed -match $pattern) {
+                $isComment = $true
+                break
+            }
+        }
+        if (-not $isComment) {
+            $code += 1
+        }
+    }
+    return [ordered]@{
+        total = $total
+        code = $code
+    }
+}
+
 $repoRoot = Get-RepoRoot
 Push-Location $repoRoot
 try {
@@ -70,9 +95,20 @@ try {
     $conditionByFile = @{}
     $runtimeFlagMentions = 0
     $envMentions = 0
+    $locTotal = 0
+    $locCode = 0
+    $locByFile = @{}
+    $codeLocByFile = @{}
 
     foreach ($file in $rustFiles) {
         $lines = Read-Lines $file
+        $rel = Resolve-Path $file -Relative
+        $loc = Get-LocMetrics $lines @("^\s*//", "^\s*/\*", "^\s*\*", "^\s*\*/")
+        $locTotal += $loc.total
+        $locCode += $loc.code
+        $locByFile[$rel] = $loc.total
+        $codeLocByFile[$rel] = $loc.code
+
         $cfgMentions += Count-Matches $lines "^\s*#\[\s*cfg"
         $publicExports += Count-Matches $lines "^\s*pub(\(|\s)"
         $runtimeFlagMentions += Count-Matches $lines "--[a-zA-Z0-9][a-zA-Z0-9_-]*"
@@ -83,13 +119,19 @@ try {
         $whileCount = Count-Matches $lines "^\s*while\s+"
         $total = $ifCount + $matchCount + $whileCount
         if ($total -gt 0) {
-            $rel = Resolve-Path $file -Relative
             $conditionByFile[$rel] = $total
         }
     }
 
     foreach ($file in $webFiles) {
         $lines = Read-Lines $file
+        $rel = Resolve-Path $file -Relative
+        $loc = Get-LocMetrics $lines @("^\s*//", "^\s*/\*", "^\s*\*", "^\s*\*/", "^\s*<!--", "^\s*-->")
+        $locTotal += $loc.total
+        $locCode += $loc.code
+        $locByFile[$rel] = $loc.total
+        $codeLocByFile[$rel] = $loc.code
+
         $runtimeFlagMentions += Count-Matches $lines "--[a-zA-Z0-9][a-zA-Z0-9_-]*"
         $envMentions += Count-Matches $lines "UNREDACT_[A-Z0-9_]+"
 
@@ -98,7 +140,6 @@ try {
         $ternaryCount = Count-Matches $lines "\?.*:"
         $total = $ifCount + $switchCount + $ternaryCount
         if ($total -gt 0) {
-            $rel = Resolve-Path $file -Relative
             if ($conditionByFile.ContainsKey($rel)) {
                 $conditionByFile[$rel] += $total
             } else {
@@ -119,9 +160,14 @@ try {
             env_var_mentions = $envMentions
             public_export_lines = $publicExports
             condition_lines = $conditionTotal
+            loc_total_lines = $locTotal
+            loc_code_lines = $locCode
+            loc_non_code_lines = ($locTotal - $locCode)
         }
         features = ($featureNames | Sort-Object -Unique)
         top_condition_files = @(Top-ByCount $conditionByFile 15)
+        top_loc_files = @(Top-ByCount $locByFile 15)
+        top_code_loc_files = @(Top-ByCount $codeLocByFile 15)
     }
 
     $outFull = Join-Path $repoRoot $OutPath
