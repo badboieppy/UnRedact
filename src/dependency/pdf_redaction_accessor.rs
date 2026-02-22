@@ -7,6 +7,56 @@ use crate::types::redaction_types::{
 
 const MAX_RASTER_ANALYSIS_DPI: f32 = 120.0;
 
+#[derive(Debug, Clone, Copy)]
+struct DetailPolicy {
+    include_details: bool,
+}
+
+impl DetailPolicy {
+    #[inline]
+    fn new(include_details: bool) -> Self {
+        Self { include_details }
+    }
+
+    #[inline]
+    fn new_meta(self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
+
+    #[inline]
+    fn insert_owned(self, meta: &mut BTreeMap<String, String>, key: &str, value: String) {
+        if self.include_details && !value.is_empty() {
+            meta.insert(key.to_owned(), value);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DrawScanOptions {
+    detail: DetailPolicy,
+    include_full_page_rects: bool,
+    is_page_level: bool,
+}
+
+impl DrawScanOptions {
+    #[inline]
+    fn page_level(include_details: bool, include_full_page_rects: bool) -> Self {
+        Self {
+            detail: DetailPolicy::new(include_details),
+            include_full_page_rects,
+            is_page_level: true,
+        }
+    }
+
+    #[inline]
+    fn nested(self) -> Self {
+        Self {
+            is_page_level: false,
+            ..self
+        }
+    }
+}
+
 pub trait RedactionDataRetriever {
     fn page_indices(&self) -> Vec<u32>;
     fn annotation_redactions(
@@ -78,7 +128,12 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
         let page_id = self
             .page_id(page_index)
             .ok_or_else(|| format!("page_missing:index={page_index}"))?;
-        extract_annotation_redactions(&self.doc, page_id, page_index, include_details)
+        extract_annotation_redactions(
+            &self.doc,
+            page_id,
+            page_index,
+            DetailPolicy::new(include_details),
+        )
     }
 
     #[inline]
@@ -95,8 +150,7 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
             &self.doc,
             page_id,
             page_index,
-            include_details,
-            include_full_page_rects,
+            DrawScanOptions::page_level(include_details, include_full_page_rects),
         )
     }
 
@@ -133,7 +187,7 @@ fn extract_annotation_redactions(
     doc: &Document,
     page_id: ObjectId,
     page_index: u32,
-    include_details: bool,
+    detail: DetailPolicy,
 ) -> Result<Vec<RedactionOccurrence>, String> {
     let page_obj = doc.get_object(page_id).map_err(|e| e.to_string())?;
     let page_dict = match page_obj {
@@ -210,27 +264,13 @@ fn extract_annotation_redactions(
             Some(r) => r,
         };
 
-        let mut meta: BTreeMap<String, String> = BTreeMap::new();
-        if include_details {
-            if !subtype.is_empty() {
-                meta.insert("Subtype".to_owned(), subtype);
-            }
-            if !rt.is_empty() {
-                meta.insert("RT".to_owned(), rt);
-            }
-            if !it.is_empty() {
-                meta.insert("IT".to_owned(), it);
-            }
-            if !ft.is_empty() {
-                meta.insert("FT".to_owned(), ft);
-            }
-            if !nm.is_empty() {
-                meta.insert("NM".to_owned(), nm);
-            }
-            if !contents.is_empty() {
-                meta.insert("Contents".to_owned(), contents);
-            }
-        }
+        let mut meta = detail.new_meta();
+        detail.insert_owned(&mut meta, "Subtype", subtype);
+        detail.insert_owned(&mut meta, "RT", rt);
+        detail.insert_owned(&mut meta, "IT", it);
+        detail.insert_owned(&mut meta, "FT", ft);
+        detail.insert_owned(&mut meta, "NM", nm);
+        detail.insert_owned(&mut meta, "Contents", contents);
 
         let score = score_rect_as_redaction(&rect);
         out.push(RedactionOccurrence {
@@ -250,8 +290,7 @@ fn extract_page_drawn_redactions(
     doc: &Document,
     page_id: ObjectId,
     page_index: u32,
-    include_details: bool,
-    include_full_page_rects: bool,
+    options: DrawScanOptions,
 ) -> Result<Vec<RedactionOccurrence>, String> {
     let page_obj = doc.get_object(page_id).map_err(|e| e.to_string())?;
     let page_dict = match page_obj {
@@ -288,9 +327,7 @@ fn extract_page_drawn_redactions(
     let mut out = extract_drawn_from_ops(
         doc,
         page_index,
-        include_details,
-        include_full_page_rects,
-        true,
+        options,
         &decoded.operations,
         &xobject,
         &mut diagnostics,
@@ -300,8 +337,7 @@ fn extract_page_drawn_redactions(
     let mut xo = extract_from_xobjects(
         doc,
         page_index,
-        include_details,
-        include_full_page_rects,
+        options,
         &decoded.operations,
         &xobject,
         &mut diagnostics,
@@ -312,15 +348,10 @@ fn extract_page_drawn_redactions(
     Ok(out)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "PDF content graph traversal requires this contextual parameter set."
-)]
 fn extract_from_xobjects(
     doc: &Document,
     page_index: u32,
-    include_details: bool,
-    include_full_page_rects: bool,
+    options: DrawScanOptions,
     ops: &[lopdf::content::Operation],
     xobject_dict: &Dictionary,
     diagnostics: &mut Vec<String>,
@@ -380,9 +411,7 @@ fn extract_from_xobjects(
         let mut sub = extract_drawn_from_ops(
             doc,
             page_index,
-            include_details,
-            include_full_page_rects,
-            false,
+            options.nested(),
             &decoded.operations,
             xobject_dict,
             diagnostics,
@@ -393,8 +422,7 @@ fn extract_from_xobjects(
         let mut nested = extract_from_xobjects(
             doc,
             page_index,
-            include_details,
-            include_full_page_rects,
+            options.nested(),
             &decoded.operations,
             xobject_dict,
             diagnostics,
@@ -406,16 +434,10 @@ fn extract_from_xobjects(
     out
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Operation scanning needs page/state/options to avoid global mutable state."
-)]
 fn extract_drawn_from_ops(
     _doc: &Document,
     page_index: u32,
-    include_details: bool,
-    include_full_page_rects: bool,
-    is_page_level: bool,
+    options: DrawScanOptions,
     ops: &[lopdf::content::Operation],
     _xobject_dict: &Dictionary,
     _diagnostics: &mut Vec<String>,
@@ -448,22 +470,23 @@ fn extract_drawn_from_ops(
                     };
                     let keep = is_black
                         && score > 0.2
-                        && (include_full_page_rects
-                            || !is_page_level
+                        && (options.include_full_page_rects
+                            || !options.is_page_level
                             || !rect_is_near_full_page(&rect));
 
                     if keep {
-                        let mut meta: BTreeMap<String, String> = BTreeMap::new();
-                        if include_details {
-                            meta.insert(
-                                "fill_rgb".to_owned(),
-                                format!(
-                                    "{:.3},{:.3},{:.3}",
-                                    state.fill_r, state.fill_g, state.fill_b
-                                ),
-                            );
-                            meta.insert("path_kind".to_owned(), op.operator.clone());
-                        }
+                        let mut meta = options.detail.new_meta();
+                        options.detail.insert_owned(
+                            &mut meta,
+                            "fill_rgb",
+                            format!(
+                                "{:.3},{:.3},{:.3}",
+                                state.fill_r, state.fill_g, state.fill_b
+                            ),
+                        );
+                        options
+                            .detail
+                            .insert_owned(&mut meta, "path_kind", op.operator.clone());
                         out.push(RedactionOccurrence {
                             page_index,
                             bbox: rect,
@@ -488,21 +511,20 @@ fn extract_drawn_from_ops(
 
                     let keep = is_black
                         && score > 0.2
-                        && (include_full_page_rects
-                            || !is_page_level
+                        && (options.include_full_page_rects
+                            || !options.is_page_level
                             || !rect_is_near_full_page(&rect));
 
                     if keep {
-                        let mut meta: BTreeMap<String, String> = BTreeMap::new();
-                        if include_details {
-                            meta.insert(
-                                "fill_rgb".to_owned(),
-                                format!(
-                                    "{:.3},{:.3},{:.3}",
-                                    state.fill_r, state.fill_g, state.fill_b
-                                ),
-                            );
-                        }
+                        let mut meta = options.detail.new_meta();
+                        options.detail.insert_owned(
+                            &mut meta,
+                            "fill_rgb",
+                            format!(
+                                "{:.3},{:.3},{:.3}",
+                                state.fill_r, state.fill_g, state.fill_b
+                            ),
+                        );
                         out.push(RedactionOccurrence {
                             page_index,
                             bbox: rect,
@@ -1538,56 +1560,15 @@ fn extract_raster_page_redactions(
                 &split_region,
             );
 
-            let mut meta: BTreeMap<String, String> = BTreeMap::new();
-            if cfg.include_details {
-                meta.insert(
-                    "raster_dpi".to_owned(),
-                    format!("{:.1}", capture.effective_dpi),
-                );
-                meta.insert(
-                    "raster_dpi_requested".to_owned(),
-                    format!("{:.1}", cfg.raster_dpi),
-                );
-                meta.insert(
-                    "raster_dpi_effective".to_owned(),
-                    format!("{:.1}", capture.effective_dpi),
-                );
-                meta.insert(
-                    "image_dims_px".to_owned(),
-                    format!("{}x{}", capture.width_px, capture.height_px),
-                );
-                meta.insert(
-                    "region_area_fraction".to_owned(),
-                    format!("{:.4}", split_region.area_fraction),
-                );
-                meta.insert(
-                    "region_avg_luminance".to_owned(),
-                    format!("{:.1}", split_region.avg_luminance),
-                );
-            }
-            meta.insert(
-                "profile_split_confidence".to_owned(),
-                format!("{:.3}", split_profile.split_confidence),
+            let meta = build_raster_redaction_meta(
+                DetailPolicy::new(cfg.include_details),
+                cfg,
+                &capture,
+                &split_region,
+                &split_profile,
+                split_index,
+                split_count,
             );
-            meta.insert(
-                "profile_max_gap_px".to_owned(),
-                split_profile.max_gap_px.to_string(),
-            );
-            meta.insert(
-                "profile_dark_ratio".to_owned(),
-                format!("{:.3}", split_profile.dark_ratio),
-            );
-            let run_labels = split_profile
-                .dark_runs
-                .iter()
-                .map(|(x0, x1)| format!("{x0}-{x1}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            meta.insert("profile_dark_runs".to_owned(), run_labels);
-            if split_count > 1 {
-                meta.insert("profile_split_index".to_owned(), split_index.to_string());
-                meta.insert("profile_split_count".to_owned(), split_count.to_string());
-            }
 
             out.push(RedactionOccurrence {
                 page_index,
@@ -1601,6 +1582,73 @@ fn extract_raster_page_redactions(
     }
 
     Ok(out)
+}
+
+fn build_raster_redaction_meta(
+    detail: DetailPolicy,
+    cfg: &RedactionFinderConfig,
+    capture: &RasterRenderCapture,
+    split_region: &DarkRegion,
+    split_profile: &DarkRunProfile,
+    split_index: usize,
+    split_count: usize,
+) -> BTreeMap<String, String> {
+    let mut meta = detail.new_meta();
+    detail.insert_owned(
+        &mut meta,
+        "raster_dpi",
+        format!("{:.1}", capture.effective_dpi),
+    );
+    detail.insert_owned(
+        &mut meta,
+        "raster_dpi_requested",
+        format!("{:.1}", cfg.raster_dpi),
+    );
+    detail.insert_owned(
+        &mut meta,
+        "raster_dpi_effective",
+        format!("{:.1}", capture.effective_dpi),
+    );
+    detail.insert_owned(
+        &mut meta,
+        "image_dims_px",
+        format!("{}x{}", capture.width_px, capture.height_px),
+    );
+    detail.insert_owned(
+        &mut meta,
+        "region_area_fraction",
+        format!("{:.4}", split_region.area_fraction),
+    );
+    detail.insert_owned(
+        &mut meta,
+        "region_avg_luminance",
+        format!("{:.1}", split_region.avg_luminance),
+    );
+
+    meta.insert(
+        "profile_split_confidence".to_owned(),
+        format!("{:.3}", split_profile.split_confidence),
+    );
+    meta.insert(
+        "profile_max_gap_px".to_owned(),
+        split_profile.max_gap_px.to_string(),
+    );
+    meta.insert(
+        "profile_dark_ratio".to_owned(),
+        format!("{:.3}", split_profile.dark_ratio),
+    );
+    let run_labels = split_profile
+        .dark_runs
+        .iter()
+        .map(|(x0, x1)| format!("{x0}-{x1}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    meta.insert("profile_dark_runs".to_owned(), run_labels);
+    if split_count > 1 {
+        meta.insert("profile_split_index".to_owned(), split_index.to_string());
+        meta.insert("profile_split_count".to_owned(), split_count.to_string());
+    }
+    meta
 }
 
 /// Convert RGBA (8-bit per channel, row-major, top-left origin) into 8-bit

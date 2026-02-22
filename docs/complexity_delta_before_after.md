@@ -93,3 +93,22 @@ From `benchmark/complexity_snapshot.json`:
 Note:
 - These values are useful for quick trend monitoring, but are computed with a different scanner than deep-analysis inventories and should not be directly subtracted against the baseline deep-analysis metrics.
 
+## Next Refactor Pass (Current Turn)
+
+Compared snapshots:
+- Before: `benchmark/complexity_snapshot_before_next_refactor.json`
+- After: `benchmark/complexity_snapshot_after_next_refactor.json`
+
+| Metric | Before | After | Delta |
+|---|---:|---:|---:|
+| Compile features | 5 | 5 | 0 |
+| `cfg` mentions | 27 | 27 | 0 |
+| Runtime flag mentions | 4 | 4 | 0 |
+| Env var mentions | 33 | 33 | 0 |
+| Public export lines | 443 | 442 | -1 |
+| Condition lines | 833 | 814 | -19 |
+
+Top condition hotspots after this pass:
+- `src/logic/redaction_guessing_component.rs` (319)
+- `src/dependency/pdf_redaction_accessor.rs` (103)
+- `web/app.js` (69)

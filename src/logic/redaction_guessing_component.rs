@@ -1,10 +1,33 @@
 use crate::data::fonts_data::FontsData;
 use crate::data::redactions_data::RedactionsData;
 use crate::logic::time::Instant;
-use crate::logic::types::{BytesPipelineOutputs, BytesPipelineRequest, VisualizationPayload};
-use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
+use crate::logic::types::{
+    BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
+};
+use crate::types::file_types::FontDetectionReport;
+use crate::types::guess_types::GuessReport;
+use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
 
 const INCLUDE_FULL_PAGE_RECTS: bool = false;
+
+struct RedactionStageOutput {
+    redactions: RedactionReport,
+    elapsed_ms: u128,
+}
+
+struct FontStageOutput {
+    fonts: FontDetectionReport,
+    elapsed_ms: u128,
+}
+
+struct GuessStageOutput {
+    guesses: GuessReport,
+    elapsed_ms: u128,
+}
+
+struct VisualizationPayloadStageOutput {
+    payload: Option<VisualizationPayload>,
+}
 
 #[inline]
 pub fn run_redaction_guessing_component(
@@ -21,7 +44,58 @@ pub fn run_redaction_guessing_component(
     let redactions_data = RedactionsData::new();
     let fonts_data = FontsData::new();
 
-    let redactions_started = Instant::now();
+    let redaction_stage = run_redaction_stage(&input_name, &pdf_bytes, &cfg, &redactions_data)?;
+    let font_stage = run_font_stage(&input_name, &pdf_bytes, cfg.include_details, &fonts_data)?;
+    let mut guess_stage = run_guess_stage(
+        &input_name,
+        &pdf_bytes,
+        &redaction_stage.redactions,
+        &dictionary_entries,
+        &dictionary_diagnostics,
+        &cfg,
+    )?;
+    guess_stage.guesses.diagnostics.push(format!(
+        "timing_ms stage=redactions value={}",
+        redaction_stage.elapsed_ms
+    ));
+    guess_stage.guesses.diagnostics.push(format!(
+        "timing_ms stage=fonts value={}",
+        font_stage.elapsed_ms
+    ));
+    guess_stage.guesses.diagnostics.push(format!(
+        "timing_ms stage=guess value={}",
+        guess_stage.elapsed_ms
+    ));
+
+    let visualization_stage = build_visualization_payload_stage(
+        &input_name,
+        pdf_bytes,
+        &cfg,
+        &fonts_data,
+        &mut guess_stage.guesses,
+    )?;
+
+    guess_stage.guesses.diagnostics.push(format!(
+        "timing_ms stage=orchestrator_total value={}",
+        component_started.elapsed().as_millis()
+    ));
+
+    Ok(BytesPipelineOutputs {
+        redactions: redaction_stage.redactions,
+        fonts: font_stage.fonts,
+        guesses: guess_stage.guesses,
+        visualization_payload: visualization_stage.payload,
+        visualized_pdf_bytes: None,
+    })
+}
+
+fn run_redaction_stage(
+    input_name: &str,
+    pdf_bytes: &[u8],
+    cfg: &PipelineConfig,
+    redactions_data: &RedactionsData,
+) -> Result<RedactionStageOutput, String> {
+    let started = Instant::now();
     let redaction_cfg = RedactionFinderConfig {
         include_details: cfg.include_details,
         mode: RedactionMode::All,
@@ -30,65 +104,77 @@ pub fn run_redaction_guessing_component(
         raster_dpi: cfg.raster_dpi,
     };
     let output = if cfg.enable_image_analysis {
-        let renderer = redactions_data.build_renderer(&pdf_bytes)?;
-        run_redaction_scan_from_bytes(&pdf_bytes, Some(&renderer), redaction_cfg)?
+        let renderer = redactions_data.build_renderer(pdf_bytes)?;
+        run_redaction_scan_from_bytes(pdf_bytes, Some(&renderer), redaction_cfg)?
     } else {
-        run_redaction_scan_from_bytes(&pdf_bytes, None, redaction_cfg)?
+        run_redaction_scan_from_bytes(pdf_bytes, None, redaction_cfg)?
     };
-    let redactions = build_report_from_input_name(&input_name, output);
-    let redactions_ms = redactions_started.elapsed().as_millis();
+    Ok(RedactionStageOutput {
+        redactions: build_report_from_input_name(input_name, output),
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
 
-    let fonts_started = Instant::now();
-    let fonts = fonts_data.detect_fonts_from_bytes(&input_name, &pdf_bytes, cfg.include_details)?;
-    let fonts_ms = fonts_started.elapsed().as_millis();
+fn run_font_stage(
+    input_name: &str,
+    pdf_bytes: &[u8],
+    include_details: bool,
+    fonts_data: &FontsData,
+) -> Result<FontStageOutput, String> {
+    let started = Instant::now();
+    let fonts = fonts_data.detect_fonts_from_bytes(input_name, pdf_bytes, include_details)?;
+    Ok(FontStageOutput {
+        fonts,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
 
-    let guess_started = Instant::now();
-    let mut guess_report = run_guess_from_bytes(RunGuessFromBytesRequest {
-        pdf_name: &input_name,
-        pdf_bytes: &pdf_bytes,
-        redactions: &redactions,
-        dictionary: &dictionary_entries,
-        diagnostics: &dictionary_diagnostics,
+fn run_guess_stage(
+    input_name: &str,
+    pdf_bytes: &[u8],
+    redactions: &RedactionReport,
+    dictionary_entries: &[String],
+    dictionary_diagnostics: &[String],
+    cfg: &PipelineConfig,
+) -> Result<GuessStageOutput, String> {
+    let started = Instant::now();
+    let guesses = run_guess_from_bytes(RunGuessFromBytesRequest {
+        pdf_name: input_name,
+        pdf_bytes,
+        redactions,
+        dictionary: dictionary_entries,
+        diagnostics: dictionary_diagnostics,
         cfg: &cfg.guess,
     })?;
-    let guess_ms = guess_started.elapsed().as_millis();
-    guess_report
-        .diagnostics
-        .push(format!("timing_ms stage=redactions value={redactions_ms}"));
-    guess_report
-        .diagnostics
-        .push(format!("timing_ms stage=fonts value={fonts_ms}"));
-    guess_report
-        .diagnostics
-        .push(format!("timing_ms stage=guess value={guess_ms}"));
+    Ok(GuessStageOutput {
+        guesses,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
 
-    let visualization_payload = if cfg.visualize {
-        let visualize_payload_started = Instant::now();
-        let font_runs = fonts_data
-            .load_font_runs_from_bytes(&input_name, &pdf_bytes)?
-            .report;
-        guess_report.diagnostics.push(format!(
-            "timing_ms stage=visualize_payload value={}",
-            visualize_payload_started.elapsed().as_millis()
-        ));
-        Some(VisualizationPayload {
+fn build_visualization_payload_stage(
+    input_name: &str,
+    pdf_bytes: Vec<u8>,
+    cfg: &PipelineConfig,
+    fonts_data: &FontsData,
+    guess_report: &mut GuessReport,
+) -> Result<VisualizationPayloadStageOutput, String> {
+    if !cfg.visualize {
+        return Ok(VisualizationPayloadStageOutput { payload: None });
+    }
+    let started = Instant::now();
+    let font_runs = fonts_data
+        .load_font_runs_from_bytes(input_name, &pdf_bytes)?
+        .report;
+    guess_report.diagnostics.push(format!(
+        "timing_ms stage=visualize_payload value={}",
+        started.elapsed().as_millis()
+    ));
+    Ok(VisualizationPayloadStageOutput {
+        payload: Some(VisualizationPayload {
             pdf_bytes,
             font_runs,
-        })
-    } else {
-        None
-    };
-    guess_report.diagnostics.push(format!(
-        "timing_ms stage=orchestrator_total value={}",
-        component_started.elapsed().as_millis()
-    ));
-
-    Ok(BytesPipelineOutputs {
-        redactions,
-        fonts,
-        guesses: guess_report,
-        visualization_payload,
-        visualized_pdf_bytes: None,
+        }),
     })
 }
 

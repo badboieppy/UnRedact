@@ -95,9 +95,16 @@ function asUint8Array(value) {
   throw new Error("Unsupported byte payload shape");
 }
 
+function choose(condition, whenTrue, whenFalse) {
+  if (condition) {
+    return whenTrue;
+  }
+  return whenFalse;
+}
+
 function normalizeNumber(value, fallback = 0) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return choose(Number.isFinite(parsed), parsed, fallback);
 }
 
 function formatBytes(value) {
@@ -111,7 +118,7 @@ function formatBytes(value) {
     scaled /= 1024;
     index += 1;
   }
-  return `${scaled.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+  return `${scaled.toFixed(choose(index === 0, 0, 2))} ${units[index]}`;
 }
 
 function formatMs(value) {
@@ -181,7 +188,7 @@ async function crc32Blob(blob) {
 }
 
 function dosTimestamp(date) {
-  const safeDate = date instanceof Date ? date : new Date();
+  const safeDate = choose(date instanceof Date, date, new Date());
   const year = Math.max(1980, safeDate.getFullYear());
   const month = safeDate.getMonth() + 1;
   const day = safeDate.getDate();
@@ -366,7 +373,7 @@ function topGuessText(row) {
 }
 
 function summarizeGuessReport(report) {
-  const guesses = Array.isArray(report?.guesses) ? report.guesses : [];
+  const guesses = reportGuesses(report);
   const rowsWithExact = guesses.filter(
     (row) => Array.isArray(row?.exact_matches) && row.exact_matches.length > 0,
   ).length;
@@ -381,10 +388,14 @@ function summarizeGuessReport(report) {
 }
 
 function summarizeGuessReportCompact(report) {
-  const guesses = Array.isArray(report?.guesses) ? report.guesses : [];
+  const guesses = reportGuesses(report);
   return {
     guessCount: guesses.length,
-    topGuess: guesses.length > 0 ? topGuessText(guesses[0]) : "(no guess)",
+    topGuess: choose(
+      guesses.length > 0,
+      topGuessText(guesses[0]),
+      "(no guess)",
+    ),
   };
 }
 
@@ -396,7 +407,7 @@ function clearGuessVisualization(message) {
 
 function formatMaybeNumber(value, digits = 2) {
   const number = Number(value);
-  return Number.isFinite(number) ? number.toFixed(digits) : "—";
+  return choose(Number.isFinite(number), number.toFixed(digits), "—");
 }
 
 function valueOrDash(value) {
@@ -404,7 +415,11 @@ function valueOrDash(value) {
     return "—";
   }
   const text = String(value).trim();
-  return text === "" ? "—" : text;
+  return choose(text === "", "—", text);
+}
+
+function reportGuesses(report) {
+  return choose(Array.isArray(report?.guesses), report.guesses, []);
 }
 
 function exactMatchesText(row) {
@@ -447,7 +462,7 @@ function guessBboxLabel(bbox) {
 }
 
 function buildFoundRedactionRows(report) {
-  const guesses = Array.isArray(report?.guesses) ? report.guesses : [];
+  const guesses = reportGuesses(report);
   return guesses.map((row, index) => {
     const bestCandidate = topCandidate(row);
     const context = row?.context ?? {};
@@ -469,7 +484,7 @@ function buildFoundRedactionRows(report) {
       confidence: formatMaybeNumber(context.confidence_score, 3),
       visualMeanAbsDiff: formatMaybeNumber(row?.visual_mean_abs_diff, 3),
       visualChangedRatio: formatMaybeNumber(row?.visual_changed_pixel_ratio, 4),
-      visualDropped: row?.visual_dropped ? "yes" : "no",
+      visualDropped: choose(Boolean(row?.visual_dropped), "yes", "no"),
       leftContext: valueOrDash(context.left_anchor_text),
       rightContext: valueOrDash(context.right_anchor_text),
     };
@@ -623,7 +638,7 @@ function outputBaseName(label, id) {
     .replace(/\.pdf$/i, "")
     .replace(/\//g, "__")
     .replace(/[^A-Za-z0-9._-]/g, "_");
-  return normalized.trim() !== "" ? normalized : `file_${id}`;
+  return choose(normalized.trim() !== "", normalized, `file_${id}`);
 }
 
 function requestAsPromise(request) {
@@ -920,7 +935,7 @@ function renderBatchResults() {
 
     const badge = document.createElement("span");
     badge.className = `batch-status-badge ${result.status}`;
-    badge.textContent = result.status === "ok" ? "OK" : "ERROR";
+    badge.textContent = choose(result.status === "ok", "OK", "ERROR");
     heading.appendChild(badge);
     row.appendChild(heading);
 

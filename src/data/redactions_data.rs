@@ -2,11 +2,39 @@ use crate::dependency::hayro_renderer::HayroRenderer;
 use crate::dependency::pdf_redaction_accessor::PdfFileRetriever as DependencyPdfFileRetriever;
 use crate::dependency::pdf_redaction_accessor::RedactionDataRetriever as DependencyRedactionDataRetriever;
 use crate::types::redaction_types::{
-    PdfRenderer, RedactionFinderConfig, RedactionOccurrence, UnderlyingTextHit,
+    PdfRenderer, RedactionFinderConfig, RedactionOccurrence, RenderedPage, UnderlyingTextHit,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct RedactionsData;
+
+pub struct PdfPageRenderer {
+    inner: HayroRenderer,
+}
+
+impl PdfPageRenderer {
+    #[inline]
+    pub fn new_from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let inner = HayroRenderer::new_from_bytes(bytes)?;
+        Ok(Self { inner })
+    }
+}
+
+impl PdfRenderer for PdfPageRenderer {
+    #[inline]
+    fn page_count(&self) -> usize {
+        self.inner.page_count()
+    }
+
+    #[inline]
+    fn render_page_to_rgba(
+        &self,
+        page_index: usize,
+        target_dpi: f32,
+    ) -> Result<RenderedPage, String> {
+        self.inner.render_page_to_rgba(page_index, target_dpi)
+    }
+}
 
 impl RedactionsData {
     #[inline]
@@ -15,8 +43,8 @@ impl RedactionsData {
     }
 
     #[inline]
-    pub fn build_renderer(&self, bytes: &[u8]) -> Result<HayroRenderer, String> {
-        HayroRenderer::new_from_bytes(bytes)
+    pub fn build_renderer(&self, bytes: &[u8]) -> Result<PdfPageRenderer, String> {
+        PdfPageRenderer::new_from_bytes(bytes)
     }
 }
 
