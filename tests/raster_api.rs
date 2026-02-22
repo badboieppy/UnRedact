@@ -46,10 +46,9 @@ fn service_image_analysis_toggle_controls_raster_detection() {
     let cfg_on = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        raster_dpi: 96.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            ..GuessConfig::default()
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),

@@ -3,13 +3,16 @@ use serde::{Deserialize, Serialize};
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
+use crate::types::runtime_defaults::{
+    DEFAULT_ENABLE_IMAGE_ANALYSIS, DEFAULT_INCLUDE_DETAILS, DEFAULT_VISUALIZE_OUTPUT,
+};
 use crate::types::visualizer_config::VisualizerConfig;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PipelineConfig {
     pub include_details: bool,
     pub enable_image_analysis: bool,
-    pub raster_dpi: f32,
     pub guess: GuessConfig,
     pub visualize: bool,
     pub visualizer: VisualizerConfig,
@@ -19,11 +22,10 @@ impl Default for PipelineConfig {
     #[inline]
     fn default() -> Self {
         Self {
-            include_details: false,
-            enable_image_analysis: true,
-            raster_dpi: 200.0_f32,
+            include_details: DEFAULT_INCLUDE_DETAILS,
+            enable_image_analysis: DEFAULT_ENABLE_IMAGE_ANALYSIS,
             guess: GuessConfig::default(),
-            visualize: false,
+            visualize: DEFAULT_VISUALIZE_OUTPUT,
             visualizer: VisualizerConfig::default(),
         }
     }

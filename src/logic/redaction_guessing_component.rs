@@ -7,6 +7,7 @@ use crate::logic::types::{
 use crate::types::file_types::FontDetectionReport;
 use crate::types::guess_types::GuessReport;
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
+use crate::types::runtime_defaults::RASTER_HIGHPASS_DPI;
 
 pub use guess_impl::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
 pub use redaction_impl::{build_report_from_input_name, run_redaction_scan_from_bytes};
@@ -104,7 +105,7 @@ fn run_redaction_stage(
         mode: RedactionMode::All,
         include_full_page_rects: INCLUDE_FULL_PAGE_RECTS,
         enable_image_analysis: cfg.enable_image_analysis,
-        raster_dpi: cfg.raster_dpi,
+        raster_dpi: RASTER_HIGHPASS_DPI,
     };
     let output = if cfg.enable_image_analysis {
         let renderer = redactions_data.build_renderer(pdf_bytes)?;
@@ -195,6 +196,7 @@ mod guess_impl {
     use crate::types::redaction_types::{
         Rect, RedactionKind, RedactionOccurrence, RedactionReport,
     };
+    use crate::types::runtime_defaults::DEFAULT_FONT_METRICS_DPI;
 
     pub struct RunGuessFromBytesRequest<'a> {
         pub pdf_name: &'a str,
@@ -458,7 +460,6 @@ mod guess_impl {
         widths: Vec<f64>,
     }
 
-    const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
     const FIXED_MAX_CANDIDATES: usize = 50;
     const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
     const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
@@ -1521,7 +1522,7 @@ mod guess_impl {
                     font_size_pt: anchor.font_size_pt,
                     h_scale_pct: anchor.h_scale_pct,
                     text,
-                    metrics_dpi: DEFAULT_METRICS_DPI,
+                    metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 asset,
                 width_tables,
@@ -1531,7 +1532,7 @@ mod guess_impl {
                     text,
                     fallback_char_width,
                     fallback_space_width,
-                    DEFAULT_METRICS_DPI,
+                    DEFAULT_FONT_METRICS_DPI,
                 ))
             })
         };
@@ -1541,7 +1542,7 @@ mod guess_impl {
             font_key: anchor.font_key.clone(),
             font_size_bits: anchor.font_size_pt.to_bits(),
             h_scale_bits: anchor.h_scale_pct.to_bits(),
-            metrics_dpi_bits: DEFAULT_METRICS_DPI.to_bits(),
+            metrics_dpi_bits: DEFAULT_FONT_METRICS_DPI.to_bits(),
         };
         let has_width_table_for_anchor = width_tables.contains_key(&WidthTableKey {
             page_index: redaction.page_index,
@@ -1553,7 +1554,7 @@ mod guess_impl {
                 left_anchor_text,
                 fallback_char_width,
                 fallback_space_width,
-                DEFAULT_METRICS_DPI,
+                DEFAULT_FONT_METRICS_DPI,
             )
         });
         let space_width = measure_width(" ").unwrap_or_else(|| {
@@ -1561,7 +1562,7 @@ mod guess_impl {
                 " ",
                 fallback_char_width,
                 fallback_space_width,
-                DEFAULT_METRICS_DPI,
+                DEFAULT_FONT_METRICS_DPI,
             )
         });
         let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
@@ -2308,7 +2309,7 @@ mod guess_impl {
                             font_size_pt: run.font_size_pt,
                             h_scale_pct: run.h_scale_pct,
                             text: prefix,
-                            metrics_dpi: DEFAULT_METRICS_DPI,
+                            metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                         },
                         asset,
                         width_tables,
@@ -2378,7 +2379,7 @@ mod guess_impl {
                 font_size_pt: left_run.font_size_pt,
                 h_scale_pct: measure_ctx.h_scale_pct,
                 text: " ",
-                metrics_dpi: DEFAULT_METRICS_DPI,
+                metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
             measure_ctx.asset,
             measure_ctx.width_tables,
@@ -2419,7 +2420,7 @@ mod guess_impl {
                     font_size_pt: current.font_size_pt,
                     h_scale_pct: current.h_scale_pct,
                     text: current_text,
-                    metrics_dpi: DEFAULT_METRICS_DPI,
+                    metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 measure_ctx.asset,
                 measure_ctx.width_tables,
@@ -2437,7 +2438,7 @@ mod guess_impl {
                     font_size_pt: current.font_size_pt,
                     h_scale_pct: current.h_scale_pct,
                     text: " ",
-                    metrics_dpi: DEFAULT_METRICS_DPI,
+                    metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                 },
                 measure_ctx.asset,
                 measure_ctx.width_tables,
@@ -3173,7 +3174,7 @@ mod guess_impl {
             return existing;
         }
         let measured = measure_width(text).unwrap_or_else(|| {
-            measured_width_from_points(0.0_f64, DEFAULT_METRICS_DPI, WidthSource::Fallback)
+            measured_width_from_points(0.0_f64, DEFAULT_FONT_METRICS_DPI, WidthSource::Fallback)
         });
         cache
             .measured
@@ -3785,6 +3786,7 @@ mod redaction_impl {
         PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionMode,
         RedactionOccurrence, RedactionReport, UnderlyingTextHit,
     };
+    use crate::types::runtime_defaults::{RASTER_HIGHPASS_DPI, RASTER_PREPASS_DPI};
 
     const LINE_BUCKET_PT: f32 = 2.0;
     const Y_BAND_PADDING_PT: f32 = 2.0;
@@ -3793,8 +3795,6 @@ mod redaction_impl {
     const MAX_CONTEXT_GAP_PT: f32 = 80.0;
     const LARGE_OVERLAP_PT: f32 = 20.0;
     const MAX_CONTEXT_WORDS_PER_SIDE: usize = 2;
-    const RASTER_PREPASS_DPI: f32 = 18.0;
-    const RASTER_HIGHPASS_DPI: f32 = 96.0;
     type LineMatchScore = (i32, i32, i32, i32);
     type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
 

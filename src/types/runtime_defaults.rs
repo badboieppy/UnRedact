@@ -1,0 +1,8 @@
+pub const DEFAULT_INCLUDE_DETAILS: bool = false;
+pub const DEFAULT_ENABLE_IMAGE_ANALYSIS: bool = true;
+pub const DEFAULT_VISUALIZE_OUTPUT: bool = false;
+pub const DEFAULT_VISUAL_SCORE_ENABLED: bool = true;
+pub const DEFAULT_VISUAL_SCORE_DPI: f32 = 200.0_f32;
+pub const DEFAULT_FONT_METRICS_DPI: f32 = 200.0_f32;
+pub const RASTER_PREPASS_DPI: f32 = 18.0_f32;
+pub const RASTER_HIGHPASS_DPI: f32 = 96.0_f32;

@@ -22,10 +22,9 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
     let cfg = UnredactWebConfig {
         include_details: false,
         enable_image_analysis: true,
-        raster_dpi: 200.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            ..GuessConfig::default()
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),

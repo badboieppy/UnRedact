@@ -15,10 +15,9 @@ fn web_request_dto_roundtrips_via_json() {
         cfg: UnredactWebConfig {
             include_details: true,
             enable_image_analysis: false,
-            raster_dpi: 96.0_f32,
             guess: GuessConfig {
                 visual_score: true,
-                visual_score_dpi: 200.0_f32,
+                ..GuessConfig::default()
             },
             visualize: true,
             visualizer: VisualizerConfig::default(),
@@ -48,4 +47,44 @@ fn web_output_dto_roundtrips_via_json() {
         .unwrap_or_else(|error| panic!("failed to decode output DTO: {error}"));
 
     assert_eq!(decoded, output);
+}
+
+#[test]
+fn web_request_dto_defaults_cfg_when_missing() {
+    let decoded: UnredactWebRequest = serde_json::from_str(
+        r#"{
+            "input_name":"sample.pdf",
+            "pdf_bytes":[1,2,3]
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("failed to decode request DTO with missing cfg: {error}"));
+
+    assert_eq!(decoded.input_name, "sample.pdf");
+    assert_eq!(decoded.pdf_bytes, vec![1_u8, 2_u8, 3_u8]);
+    assert!(decoded.dictionary_file_bytes.is_none());
+    assert_eq!(decoded.cfg, UnredactWebConfig::default());
+}
+
+#[test]
+fn web_request_dto_merges_partial_cfg_with_defaults() {
+    let decoded: UnredactWebRequest = serde_json::from_str(
+        r#"{
+            "input_name":"sample.pdf",
+            "pdf_bytes":[1,2,3],
+            "cfg": { "visualize": true }
+        }"#,
+    )
+    .unwrap_or_else(|error| panic!("failed to decode request DTO with partial cfg: {error}"));
+
+    assert!(decoded.cfg.visualize);
+    assert_eq!(
+        decoded.cfg.guess,
+        GuessConfig::default(),
+        "nested guess config should default when omitted"
+    );
+    assert_eq!(
+        decoded.cfg.visualizer,
+        VisualizerConfig::default(),
+        "visualizer config should default when omitted"
+    );
 }

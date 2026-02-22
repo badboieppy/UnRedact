@@ -42,23 +42,19 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    const DEFAULT_RASTER_DPI: f32 = 200.0_f32;
-    const DEFAULT_VISUAL_SCORE_DPI: f32 = 200.0_f32;
-
     let args = Args::parse();
 
     let output_dir = args.output_dir.clone().unwrap_or_else(default_output_dir);
 
     let cfg = UnredactServiceConfig {
-        include_details: false,
         enable_image_analysis: !args.no_image_analysis,
-        raster_dpi: DEFAULT_RASTER_DPI,
         guess: GuessConfig {
             visual_score: args.should_visually_score,
-            visual_score_dpi: DEFAULT_VISUAL_SCORE_DPI,
+            ..GuessConfig::default()
         },
         visualize: args.visualize,
         visualizer: VisualizerConfig::default(),
+        ..UnredactServiceConfig::default()
     };
 
     if args.input.is_dir() {

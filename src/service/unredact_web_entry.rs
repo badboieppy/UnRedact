@@ -14,6 +14,7 @@ pub struct UnredactWebRequest {
     pub input_name: String,
     pub pdf_bytes: Vec<u8>,
     pub dictionary_file_bytes: Option<Vec<u8>>,
+    #[serde(default)]
     pub cfg: UnredactWebConfig,
 }
 

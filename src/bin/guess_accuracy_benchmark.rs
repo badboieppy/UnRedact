@@ -313,10 +313,9 @@ fn benchmark_config() -> UnredactServiceConfig {
     UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        raster_dpi: 200.0_f32,
         guess: GuessConfig {
             visual_score: true,
-            visual_score_dpi: 200.0_f32,
+            ..GuessConfig::default()
         },
         visualize: false,
         visualizer: VisualizerConfig::default(),

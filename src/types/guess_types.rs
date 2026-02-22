@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::redaction_types::Rect;
+use crate::types::runtime_defaults::{DEFAULT_VISUAL_SCORE_DPI, DEFAULT_VISUAL_SCORE_ENABLED};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GuessConfig {
-    #[serde(default = "default_visual_score_enabled")]
     pub visual_score: bool,
-    #[serde(default = "default_visual_score_dpi")]
     pub visual_score_dpi: f32,
 }
 
@@ -14,8 +14,8 @@ impl Default for GuessConfig {
     #[inline]
     fn default() -> Self {
         Self {
-            visual_score: default_visual_score_enabled(),
-            visual_score_dpi: default_visual_score_dpi(),
+            visual_score: DEFAULT_VISUAL_SCORE_ENABLED,
+            visual_score_dpi: DEFAULT_VISUAL_SCORE_DPI,
         }
     }
 }
@@ -101,12 +101,4 @@ pub struct GuessContext {
         default
     )]
     pub has_anchor_pair: bool,
-}
-
-fn default_visual_score_enabled() -> bool {
-    true
-}
-
-fn default_visual_score_dpi() -> f32 {
-    200.0_f32
 }

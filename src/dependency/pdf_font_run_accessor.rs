@@ -1,9 +1,9 @@
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
+use crate::types::runtime_defaults::DEFAULT_FONT_METRICS_DPI;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-const DEFAULT_METRICS_DPI: f32 = 200.0_f32;
 const GLYPH_UNITS_SCALE: f32 = 64.0_f32;
 
 #[derive(Debug, Clone)]
@@ -223,7 +223,7 @@ fn extract_text_runs(
                         &show.text,
                         st.font_size_pt.abs().max(1.0_f32),
                         st.h_scale_pct,
-                        DEFAULT_METRICS_DPI,
+                        DEFAULT_FONT_METRICS_DPI,
                     )
                 });
                 apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
@@ -242,7 +242,7 @@ fn extract_text_runs(
                     h_scale_pct: st.h_scale_pct.max(1.0_f32),
                     measured_width_pt: Some(metrics.width_pt),
                     measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
                     char_advances_pt: metrics.char_advances_pt,
                     char_advances_px: metrics.char_advances_px,
                 });
@@ -279,7 +279,7 @@ fn extract_text_runs(
                         &show.text,
                         st.font_size_pt.abs().max(1.0_f32),
                         st.h_scale_pct,
-                        DEFAULT_METRICS_DPI,
+                        DEFAULT_FONT_METRICS_DPI,
                     )
                 });
                 apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
@@ -298,7 +298,7 @@ fn extract_text_runs(
                     h_scale_pct: st.h_scale_pct.max(1.0_f32),
                     measured_width_pt: Some(metrics.width_pt),
                     measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
                     char_advances_pt: metrics.char_advances_pt,
                     char_advances_px: metrics.char_advances_px,
                 });
@@ -328,7 +328,7 @@ fn extract_text_runs(
                         &show.text,
                         st.font_size_pt.abs().max(1.0_f32),
                         st.h_scale_pct,
-                        DEFAULT_METRICS_DPI,
+                        DEFAULT_FONT_METRICS_DPI,
                     )
                 });
                 apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
@@ -347,7 +347,7 @@ fn extract_text_runs(
                     h_scale_pct: st.h_scale_pct.max(1.0_f32),
                     measured_width_pt: Some(metrics.width_pt),
                     measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_METRICS_DPI),
+                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
                     char_advances_pt: metrics.char_advances_pt,
                     char_advances_px: metrics.char_advances_px,
                 });
@@ -547,7 +547,7 @@ fn apply_pdf_spacing_adjustments(metrics: &mut TextMetrics, show: &ShowTextOp, s
     if !metrics.width_pt.is_finite() || metrics.width_pt <= 0.0_f32 {
         metrics.width_pt = 0.001_f32;
     }
-    metrics.width_px = points_to_pixels(metrics.width_pt, DEFAULT_METRICS_DPI);
+    metrics.width_px = points_to_pixels(metrics.width_pt, DEFAULT_FONT_METRICS_DPI);
     metrics.char_advances_pt = normalize_char_advances(
         &show.text,
         metrics.char_advances_pt.clone(),
@@ -556,7 +556,7 @@ fn apply_pdf_spacing_adjustments(metrics: &mut TextMetrics, show: &ShowTextOp, s
     metrics.char_advances_px = metrics
         .char_advances_pt
         .iter()
-        .map(|value| points_to_pixels(*value, DEFAULT_METRICS_DPI))
+        .map(|value| points_to_pixels(*value, DEFAULT_FONT_METRICS_DPI))
         .collect::<Vec<_>>();
 }
 
@@ -588,7 +588,7 @@ fn measure_run_metrics(
                     font_size,
                     units_per_em,
                     scale,
-                    DEFAULT_METRICS_DPI,
+                    DEFAULT_FONT_METRICS_DPI,
                 ) {
                     return Some(metrics);
                 }
@@ -596,7 +596,7 @@ fn measure_run_metrics(
         }
     }
 
-    core_font_metrics(font_name, text, font_size, scale, DEFAULT_METRICS_DPI)
+    core_font_metrics(font_name, text, font_size, scale, DEFAULT_FONT_METRICS_DPI)
 }
 
 fn shape_text_metrics(
