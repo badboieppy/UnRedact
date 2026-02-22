@@ -1,3 +1,5 @@
+#![cfg(feature = "cli-entry")]
+
 use std::path::{Path, PathBuf};
 
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};

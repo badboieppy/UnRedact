@@ -1,3 +1,5 @@
+#![cfg(feature = "web-entry")]
+
 use std::path::Path;
 
 use unredact::service::unredact_web_entry::{run, UnredactWebConfig, UnredactWebRequest};

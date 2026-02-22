@@ -1,3 +1,5 @@
+#![cfg(feature = "web-entry")]
+
 use unredact::service::unredact_web_entry::{
     UnredactWebConfig, UnredactWebOutputs, UnredactWebRequest,
 };

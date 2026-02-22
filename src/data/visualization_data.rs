@@ -830,6 +830,7 @@ mod tests {
                     anchor_left_x: Some(80.0_f32),
                     anchor_right_x: Some(190.0_f32),
                     anchor_font_key: Some("F1".to_owned()),
+                    anchor_font_name: None,
                     anchor_font_size_pt: Some(11.0_f32),
                     anchor_h_scale_pct: Some(100.0_f32),
                     anchor_row_bias_pt: Some(0.0_f32),

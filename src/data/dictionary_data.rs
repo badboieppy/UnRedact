@@ -22,7 +22,26 @@ impl DictionaryData {
         &self,
         dictionary_bytes: Option<&[u8]>,
     ) -> Result<DictionaryInputs, String> {
-        load_dictionary_from_bytes(dictionary_bytes)
+        let mut diagnostics = Vec::<String>::new();
+        let dictionary = if let Some(bytes) = dictionary_bytes {
+            let text = String::from_utf8_lossy(bytes);
+            let mut entries = Vec::<String>::new();
+            for line in text.lines() {
+                if let Some(parsed) = parse_dictionary_line(line) {
+                    entries.push(parsed);
+                }
+            }
+            diagnostics.push("dictionary_source=file".to_owned());
+            normalize_dictionary(entries)
+        } else {
+            diagnostics.push("dictionary_source=default_names".to_owned());
+            build_default_name_dictionary()
+        };
+        diagnostics.push(format!("dictionary_size={}", dictionary.len()));
+        Ok(DictionaryInputs {
+            dictionary,
+            diagnostics,
+        })
     }
 }
 
@@ -31,32 +50,6 @@ impl Default for DictionaryData {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[inline]
-pub fn load_dictionary_from_bytes(
-    dictionary_bytes: Option<&[u8]>,
-) -> Result<DictionaryInputs, String> {
-    let mut diagnostics = Vec::<String>::new();
-    let dictionary = if let Some(bytes) = dictionary_bytes {
-        let text = String::from_utf8_lossy(bytes);
-        let mut entries = Vec::<String>::new();
-        for line in text.lines() {
-            if let Some(parsed) = parse_dictionary_line(line) {
-                entries.push(parsed);
-            }
-        }
-        diagnostics.push("dictionary_source=file".to_owned());
-        normalize_dictionary(entries)
-    } else {
-        diagnostics.push("dictionary_source=default_names".to_owned());
-        build_default_name_dictionary()
-    };
-    diagnostics.push(format!("dictionary_size={}", dictionary.len()));
-    Ok(DictionaryInputs {
-        dictionary,
-        diagnostics,
-    })
 }
 
 #[inline]

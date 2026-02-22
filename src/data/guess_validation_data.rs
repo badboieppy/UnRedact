@@ -48,27 +48,6 @@ impl Default for GuessValidationData {
     }
 }
 
-#[inline]
-pub fn load_reports(
-    file_store: &FileStore,
-    redactions_path: &Path,
-    fonts_path: &Path,
-) -> Result<GuessReportInputs, String> {
-    let redactions_bytes = file_store.read(redactions_path)?;
-    let fonts_bytes = file_store.read(fonts_path)?;
-
-    let redactions: RedactionReport = serde_json::from_slice(&redactions_bytes)
-        .map_err(|e| format!("failed to decode redactions: {e}"))?;
-    let fonts: FontDetectionReport =
-        serde_json::from_slice(&fonts_bytes).map_err(|e| format!("failed to decode fonts: {e}"))?;
-
-    Ok(GuessReportInputs {
-        redactions,
-        fonts,
-        diagnostics: Vec::new(),
-    })
-}
-
 impl ReportDataSource for GuessValidationData {
     #[inline]
     fn load_reports(
@@ -76,6 +55,18 @@ impl ReportDataSource for GuessValidationData {
         redactions_path: &Path,
         fonts_path: &Path,
     ) -> Result<GuessReportInputs, String> {
-        load_reports(&self.file_store, redactions_path, fonts_path)
+        let redactions_bytes = self.file_store.read(redactions_path)?;
+        let fonts_bytes = self.file_store.read(fonts_path)?;
+
+        let redactions: RedactionReport = serde_json::from_slice(&redactions_bytes)
+            .map_err(|e| format!("failed to decode redactions: {e}"))?;
+        let fonts: FontDetectionReport = serde_json::from_slice(&fonts_bytes)
+            .map_err(|e| format!("failed to decode fonts: {e}"))?;
+
+        Ok(GuessReportInputs {
+            redactions,
+            fonts,
+            diagnostics: Vec::new(),
+        })
     }
 }
