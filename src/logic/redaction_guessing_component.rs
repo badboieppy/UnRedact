@@ -8,6 +8,9 @@ use crate::types::file_types::FontDetectionReport;
 use crate::types::guess_types::GuessReport;
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
 
+pub use guess_impl::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
+pub use redaction_impl::{build_report_from_input_name, run_redaction_scan_from_bytes};
+
 const INCLUDE_FULL_PAGE_RECTS: bool = false;
 
 struct RedactionStageOutput {
@@ -3771,146 +3774,6 @@ mod guess_impl {
 
         penalty.max(0.0)
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{run_from_bytes, RunGuessFromBytesRequest};
-        use crate::logic::redaction_guessing_component::{
-            build_report_from_input_name, run_redaction_scan_from_bytes,
-        };
-        use crate::types::guess_types::GuessConfig;
-        use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
-
-        fn sample_pdf_bytes() -> Vec<u8> {
-            let input = std::path::Path::new("test_data/EFTA00101126.pdf");
-            std::fs::read(input)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
-        }
-
-        fn sample_redaction_report(
-            pdf_bytes: &[u8],
-        ) -> crate::types::redaction_types::RedactionReport {
-            let cfg = RedactionFinderConfig {
-                include_details: false,
-                mode: RedactionMode::All,
-                include_full_page_rects: false,
-                enable_image_analysis: false,
-                raster_dpi: 96.0_f32,
-            };
-            let scan = run_redaction_scan_from_bytes(pdf_bytes, None, cfg)
-                .expect("redaction scan should succeed");
-            build_report_from_input_name("memory://EFTA00101126.pdf", scan)
-        }
-
-        fn diagnostics_without_timing(lines: &[String]) -> Vec<String> {
-            lines
-                .iter()
-                .filter(|line| !line.starts_with("timing_ms stage="))
-                .cloned()
-                .collect::<Vec<_>>()
-        }
-
-        #[test]
-        fn run_from_bytes_is_deterministic_for_same_inputs() {
-            let pdf_bytes = sample_pdf_bytes();
-            let redactions = sample_redaction_report(&pdf_bytes);
-            let dictionary = vec![
-                "SARAH KELLEN".to_owned(),
-                "GHISLANE MAXWELL".to_owned(),
-                "ALPHA".to_owned(),
-            ];
-            let diagnostics = vec![
-                "dictionary_source=file".to_owned(),
-                "dictionary_size=3".to_owned(),
-            ];
-            let cfg = GuessConfig {
-                visual_score: false,
-                visual_score_dpi: 200.0_f32,
-            };
-
-            let report_a = run_from_bytes(RunGuessFromBytesRequest {
-                pdf_name: "EFTA00101126.pdf",
-                pdf_bytes: &pdf_bytes,
-                redactions: &redactions,
-                dictionary: &dictionary,
-                diagnostics: &diagnostics,
-                cfg: &cfg,
-            })
-            .expect("guessing should succeed");
-            let report_b = run_from_bytes(RunGuessFromBytesRequest {
-                pdf_name: "EFTA00101126.pdf",
-                pdf_bytes: &pdf_bytes,
-                redactions: &redactions,
-                dictionary: &dictionary,
-                diagnostics: &diagnostics,
-                cfg: &cfg,
-            })
-            .expect("guessing should succeed");
-
-            assert_eq!(report_a.input_redactions, report_b.input_redactions);
-            assert_eq!(report_a.input_fonts, report_b.input_fonts);
-            assert_eq!(report_a.guesses, report_b.guesses);
-            assert_eq!(
-                diagnostics_without_timing(&report_a.diagnostics),
-                diagnostics_without_timing(&report_b.diagnostics)
-            );
-        }
-
-        #[test]
-        fn run_from_bytes_propagates_dictionary_diagnostics() {
-            let pdf_bytes = sample_pdf_bytes();
-            let redactions = sample_redaction_report(&pdf_bytes);
-            let dictionary = vec!["SARAH KELLEN".to_owned()];
-            let diagnostics = vec![
-                "dictionary_source=file".to_owned(),
-                "dictionary_size=1".to_owned(),
-            ];
-            let cfg = GuessConfig {
-                visual_score: false,
-                visual_score_dpi: 200.0_f32,
-            };
-
-            let report = run_from_bytes(RunGuessFromBytesRequest {
-                pdf_name: "EFTA00101126.pdf",
-                pdf_bytes: &pdf_bytes,
-                redactions: &redactions,
-                dictionary: &dictionary,
-                diagnostics: &diagnostics,
-                cfg: &cfg,
-            })
-            .expect("guessing should succeed");
-
-            for expected in diagnostics {
-                assert!(report.diagnostics.iter().any(|line| line == &expected));
-            }
-        }
-
-        #[test]
-        fn run_from_bytes_emits_visual_score_disabled_marker_when_off() {
-            let pdf_bytes = sample_pdf_bytes();
-            let redactions = sample_redaction_report(&pdf_bytes);
-            let dictionary = vec!["SARAH KELLEN".to_owned()];
-            let cfg = GuessConfig {
-                visual_score: false,
-                visual_score_dpi: 200.0_f32,
-            };
-
-            let report = run_from_bytes(RunGuessFromBytesRequest {
-                pdf_name: "EFTA00101126.pdf",
-                pdf_bytes: &pdf_bytes,
-                redactions: &redactions,
-                dictionary: &dictionary,
-                diagnostics: &[],
-                cfg: &cfg,
-            })
-            .expect("guessing should succeed");
-
-            assert!(report
-                .diagnostics
-                .iter()
-                .any(|line| line == "visual_score=disabled"));
-        }
-    }
 }
 
 mod redaction_impl {
@@ -4482,255 +4345,7 @@ mod redaction_impl {
             text: words.join(" "),
         }
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{
-            build_report_from_input_name, run_redaction_scan, run_redaction_scan_from_bytes,
-        };
-        use crate::data::redactions_data::RedactionDataRetriever;
-        use crate::types::redaction_types::{
-            PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionKind,
-            RedactionMode, RedactionOccurrence, RenderedPage, UnderlyingTextHit,
-        };
-        use std::cell::RefCell;
-        use std::collections::BTreeMap;
-
-        #[derive(Clone)]
-        struct FakeRenderer {
-            page_count: usize,
-            page: RenderedPage,
-        }
-
-        impl PdfRenderer for FakeRenderer {
-            fn page_count(&self) -> usize {
-                self.page_count
-            }
-
-            fn render_page_to_rgba(
-                &self,
-                page_index: usize,
-                _target_dpi: f32,
-            ) -> Result<RenderedPage, String> {
-                if page_index >= self.page_count {
-                    return Err(format!(
-                        "page_out_of_bounds:index={} page_count={}",
-                        page_index, self.page_count
-                    ));
-                }
-                Ok(self.page.clone())
-            }
-        }
-
-        struct FakeRasterRetriever {
-            pages: Vec<u32>,
-            prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
-            highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
-            calls: RefCell<Vec<(u32, f32)>>,
-        }
-
-        impl FakeRasterRetriever {
-            fn new(
-                pages: Vec<u32>,
-                prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
-                highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
-            ) -> Self {
-                Self {
-                    pages,
-                    prepass,
-                    highpass,
-                    calls: RefCell::new(Vec::new()),
-                }
-            }
-        }
-
-        impl RedactionDataRetriever for FakeRasterRetriever {
-            fn page_indices(&self) -> Vec<u32> {
-                self.pages.clone()
-            }
-
-            fn annotation_redactions(
-                &self,
-                _page_index: u32,
-                _include_details: bool,
-            ) -> Result<Vec<RedactionOccurrence>, String> {
-                Ok(Vec::new())
-            }
-
-            fn drawn_redactions(
-                &self,
-                _page_index: u32,
-                _include_details: bool,
-                _include_full_page_rects: bool,
-            ) -> Result<Vec<RedactionOccurrence>, String> {
-                Ok(Vec::new())
-            }
-
-            fn raster_redactions(
-                &self,
-                page_index: u32,
-                cfg: &RedactionFinderConfig,
-            ) -> Result<Vec<RedactionOccurrence>, String> {
-                self.calls.borrow_mut().push((page_index, cfg.raster_dpi));
-                if (cfg.raster_dpi - 18.0_f32).abs() < f32::EPSILON {
-                    return Ok(self.prepass.get(&page_index).cloned().unwrap_or_default());
-                }
-                if (cfg.raster_dpi - 96.0_f32).abs() < f32::EPSILON {
-                    return Ok(self.highpass.get(&page_index).cloned().unwrap_or_default());
-                }
-                Err(format!("unexpected_dpi={}", cfg.raster_dpi))
-            }
-
-            fn underlying_text_hits(
-                &self,
-                _page_index: u32,
-            ) -> Result<Vec<UnderlyingTextHit>, String> {
-                Ok(Vec::new())
-            }
-        }
-
-        fn occ(page_index: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> RedactionOccurrence {
-            RedactionOccurrence {
-                page_index,
-                bbox: Rect::new(x0, y0, x1, y1),
-                kind: RedactionKind::RasterDarkRegion,
-                score: 1.0_f32,
-                meta: BTreeMap::new(),
-                underlying_text: Vec::new(),
-            }
-        }
-
-        #[test]
-        fn run_redaction_scan_uses_two_pass_raster_strategy() {
-            let mut prepass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
-            prepass.insert(0, vec![occ(0, 10.0_f32, 10.0_f32, 30.0_f32, 20.0_f32)]);
-            prepass.insert(2, vec![occ(2, 50.0_f32, 10.0_f32, 80.0_f32, 20.0_f32)]);
-            let mut highpass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
-            highpass.insert(0, vec![occ(0, 12.0_f32, 10.0_f32, 32.0_f32, 20.0_f32)]);
-
-            let retriever = FakeRasterRetriever::new(vec![0, 1, 2], prepass, highpass);
-            let cfg = RedactionFinderConfig {
-                include_details: false,
-                mode: RedactionMode::All,
-                include_full_page_rects: false,
-                enable_image_analysis: true,
-                raster_dpi: 200.0_f32,
-            };
-
-            let out = run_redaction_scan(&retriever, cfg);
-            let calls = retriever
-                .calls
-                .borrow()
-                .iter()
-                .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                calls,
-                vec![
-                    "0:18.0".to_owned(),
-                    "1:18.0".to_owned(),
-                    "2:18.0".to_owned(),
-                    "0:96.0".to_owned(),
-                    "2:96.0".to_owned(),
-                ]
-            );
-            assert_eq!(out.redactions.len(), 2);
-            assert!(out
-                .diagnostics
-                .iter()
-                .any(|line| line.starts_with("raster_two_pass=")));
-        }
-
-        #[test]
-        fn run_redaction_scan_from_bytes_is_deterministic_for_same_input() {
-            let input = std::path::Path::new("test_data/EFTA02238592.pdf");
-            let bytes = std::fs::read(input)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
-            let cfg = RedactionFinderConfig {
-                include_details: false,
-                mode: RedactionMode::All,
-                include_full_page_rects: false,
-                enable_image_analysis: false,
-                raster_dpi: 96.0_f32,
-            };
-
-            let output_a =
-                run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
-            let output_b =
-                run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
-            assert_eq!(output_a, output_b);
-        }
-
-        #[test]
-        fn build_report_from_input_name_sorts_and_counts_pages() {
-            let output = RedactionFinderOutput {
-                redactions: vec![
-                    occ(1, 30.0_f32, 200.0_f32, 50.0_f32, 210.0_f32),
-                    occ(0, 40.0_f32, 150.0_f32, 60.0_f32, 160.0_f32),
-                    occ(0, 10.0_f32, 140.0_f32, 20.0_f32, 150.0_f32),
-                ],
-                diagnostics: vec!["d1".to_owned()],
-            };
-
-            let report = build_report_from_input_name("memory://sample.pdf", output);
-            assert_eq!(report.count, 3_u32);
-            assert_eq!(report.page_counts.get(&0).copied(), Some(2_u32));
-            assert_eq!(report.page_counts.get(&1).copied(), Some(1_u32));
-            assert_eq!(report.redactions[0].page_index, 0_u32);
-            assert!((report.redactions[0].bbox.x0 - 10.0_f32).abs() < 0.01_f32);
-        }
-
-        #[test]
-        fn run_redaction_scan_from_bytes_with_renderer_supports_image_analysis() {
-            let input = std::path::Path::new("test_data/EFTA02238592.pdf");
-            let bytes = std::fs::read(input)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
-            let page_count = lopdf::Document::load_mem(&bytes)
-                .expect("pdf should parse")
-                .get_pages()
-                .len();
-            let mut pixels = vec![240_u8; 64_usize * 64_usize * 4_usize];
-            for px in pixels.chunks_exact_mut(4_usize) {
-                px[3] = 255_u8;
-            }
-            for y in 24_usize..40_usize {
-                for x in 8_usize..56_usize {
-                    let idx = (y * 64_usize + x) * 4_usize;
-                    pixels[idx] = 5_u8;
-                    pixels[idx + 1] = 5_u8;
-                    pixels[idx + 2] = 5_u8;
-                }
-            }
-            let renderer = FakeRenderer {
-                page_count,
-                page: RenderedPage {
-                    width_px: 64_u32,
-                    height_px: 64_u32,
-                    dpi: 96.0_f32,
-                    pixels,
-                },
-            };
-            let cfg = RedactionFinderConfig {
-                include_details: false,
-                mode: RedactionMode::All,
-                include_full_page_rects: false,
-                enable_image_analysis: true,
-                raster_dpi: 96.0_f32,
-            };
-
-            let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg)
-                .expect("scan should succeed");
-            assert!(output
-                .redactions
-                .iter()
-                .any(|value| matches!(value.kind, RedactionKind::RasterDarkRegion)));
-        }
-    }
 }
-
-pub use guess_impl::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
-
-pub use redaction_impl::{build_report_from_input_name, run_redaction_scan_from_bytes};
 
 mod visual_guess_score_impl {
     use std::collections::{BTreeMap, BTreeSet};
@@ -6007,66 +5622,424 @@ mod visual_guess_score_impl {
             _ => None,
         }
     }
+}
 
-    #[cfg(test)]
-    mod tests {
-        use crate::logic::redaction_guessing_component::{
-            build_report_from_input_name, run_guess_from_bytes, run_redaction_scan_from_bytes,
-            RunGuessFromBytesRequest,
+#[cfg(test)]
+mod tests {
+    use super::redaction_impl::run_redaction_scan;
+    use super::{
+        build_report_from_input_name, run_guess_from_bytes, run_redaction_scan_from_bytes,
+        RunGuessFromBytesRequest,
+    };
+    use crate::data::redactions_data::RedactionDataRetriever;
+    use crate::types::guess_types::GuessConfig;
+    use crate::types::redaction_types::{
+        PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionKind,
+        RedactionMode, RedactionOccurrence, RenderedPage, UnderlyingTextHit,
+    };
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    fn sample_pdf_bytes() -> Vec<u8> {
+        let input = std::path::Path::new("test_data/EFTA00101126.pdf");
+        std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
+    }
+
+    fn sample_redaction_report(pdf_bytes: &[u8]) -> crate::types::redaction_types::RedactionReport {
+        let cfg = RedactionFinderConfig {
+            include_details: false,
+            mode: RedactionMode::All,
+            include_full_page_rects: false,
+            enable_image_analysis: false,
+            raster_dpi: 96.0_f32,
         };
-        use crate::types::guess_types::GuessConfig;
-        use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode};
+        let scan = run_redaction_scan_from_bytes(pdf_bytes, None, cfg)
+            .expect("redaction scan should succeed");
+        build_report_from_input_name("memory://EFTA00101126.pdf", scan)
+    }
 
-        #[test]
-        fn visual_scoring_path_executes_through_public_api() {
-            let input = std::path::Path::new("test_data/EFTA00101126.pdf");
-            let pdf_bytes = std::fs::read(input)
-                .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+    fn diagnostics_without_timing(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| !line.starts_with("timing_ms stage="))
+            .cloned()
+            .collect::<Vec<_>>()
+    }
 
-            let scan_cfg = RedactionFinderConfig {
-                include_details: false,
-                mode: RedactionMode::All,
-                include_full_page_rects: false,
-                enable_image_analysis: false,
-                raster_dpi: 96.0_f32,
-            };
-            let scan = run_redaction_scan_from_bytes(&pdf_bytes, None, scan_cfg)
-                .expect("redaction scan should succeed");
-            let redactions = build_report_from_input_name("memory://EFTA00101126.pdf", scan);
+    #[derive(Clone)]
+    struct FakeRenderer {
+        page_count: usize,
+        page: RenderedPage,
+    }
 
-            let dictionary = vec![
-                "SARAH KELLEN".to_owned(),
-                "GHISLANE MAXWELL".to_owned(),
-                "ALPHA".to_owned(),
-            ];
-            let cfg = GuessConfig {
-                visual_score: true,
-                visual_score_dpi: 200.0_f32,
-            };
-            let report = run_guess_from_bytes(RunGuessFromBytesRequest {
-                pdf_name: "EFTA00101126.pdf",
-                pdf_bytes: &pdf_bytes,
-                redactions: &redactions,
-                dictionary: &dictionary,
-                diagnostics: &[],
-                cfg: &cfg,
-            })
-            .expect("guessing should succeed");
-
-            assert!(
-                !report
-                    .diagnostics
-                    .iter()
-                    .any(|line| line == "visual_score=disabled"),
-                "visual scoring path should not emit disabled marker"
-            );
-            assert!(
-                report
-                    .diagnostics
-                    .iter()
-                    .any(|line| line.starts_with("visual_score=")),
-                "expected visual score diagnostics in public-path execution"
-            );
+    impl PdfRenderer for FakeRenderer {
+        fn page_count(&self) -> usize {
+            self.page_count
         }
+
+        fn render_page_to_rgba(
+            &self,
+            page_index: usize,
+            _target_dpi: f32,
+        ) -> Result<RenderedPage, String> {
+            if page_index >= self.page_count {
+                return Err(format!(
+                    "page_out_of_bounds:index={} page_count={}",
+                    page_index, self.page_count
+                ));
+            }
+            Ok(self.page.clone())
+        }
+    }
+
+    struct FakeRasterRetriever {
+        pages: Vec<u32>,
+        prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+        highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+        calls: RefCell<Vec<(u32, f32)>>,
+    }
+
+    impl FakeRasterRetriever {
+        fn new(
+            pages: Vec<u32>,
+            prepass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+            highpass: BTreeMap<u32, Vec<RedactionOccurrence>>,
+        ) -> Self {
+            Self {
+                pages,
+                prepass,
+                highpass,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RedactionDataRetriever for FakeRasterRetriever {
+        fn page_indices(&self) -> Vec<u32> {
+            self.pages.clone()
+        }
+
+        fn annotation_redactions(
+            &self,
+            _page_index: u32,
+            _include_details: bool,
+        ) -> Result<Vec<RedactionOccurrence>, String> {
+            Ok(Vec::new())
+        }
+
+        fn drawn_redactions(
+            &self,
+            _page_index: u32,
+            _include_details: bool,
+            _include_full_page_rects: bool,
+        ) -> Result<Vec<RedactionOccurrence>, String> {
+            Ok(Vec::new())
+        }
+
+        fn raster_redactions(
+            &self,
+            page_index: u32,
+            cfg: &RedactionFinderConfig,
+        ) -> Result<Vec<RedactionOccurrence>, String> {
+            self.calls.borrow_mut().push((page_index, cfg.raster_dpi));
+            if (cfg.raster_dpi - 18.0_f32).abs() < f32::EPSILON {
+                return Ok(self.prepass.get(&page_index).cloned().unwrap_or_default());
+            }
+            if (cfg.raster_dpi - 96.0_f32).abs() < f32::EPSILON {
+                return Ok(self.highpass.get(&page_index).cloned().unwrap_or_default());
+            }
+            Err(format!("unexpected_dpi={}", cfg.raster_dpi))
+        }
+
+        fn underlying_text_hits(&self, _page_index: u32) -> Result<Vec<UnderlyingTextHit>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn occ(page_index: u32, x0: f32, y0: f32, x1: f32, y1: f32) -> RedactionOccurrence {
+        RedactionOccurrence {
+            page_index,
+            bbox: Rect::new(x0, y0, x1, y1),
+            kind: RedactionKind::RasterDarkRegion,
+            score: 1.0_f32,
+            meta: BTreeMap::new(),
+            underlying_text: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn run_from_bytes_is_deterministic_for_same_inputs() {
+        let pdf_bytes = sample_pdf_bytes();
+        let redactions = sample_redaction_report(&pdf_bytes);
+        let dictionary = vec![
+            "SARAH KELLEN".to_owned(),
+            "GHISLANE MAXWELL".to_owned(),
+            "ALPHA".to_owned(),
+        ];
+        let diagnostics = vec![
+            "dictionary_source=file".to_owned(),
+            "dictionary_size=3".to_owned(),
+        ];
+        let cfg = GuessConfig {
+            visual_score: false,
+            visual_score_dpi: 200.0_f32,
+        };
+
+        let report_a = run_guess_from_bytes(RunGuessFromBytesRequest {
+            pdf_name: "EFTA00101126.pdf",
+            pdf_bytes: &pdf_bytes,
+            redactions: &redactions,
+            dictionary: &dictionary,
+            diagnostics: &diagnostics,
+            cfg: &cfg,
+        })
+        .expect("guessing should succeed");
+        let report_b = run_guess_from_bytes(RunGuessFromBytesRequest {
+            pdf_name: "EFTA00101126.pdf",
+            pdf_bytes: &pdf_bytes,
+            redactions: &redactions,
+            dictionary: &dictionary,
+            diagnostics: &diagnostics,
+            cfg: &cfg,
+        })
+        .expect("guessing should succeed");
+
+        assert_eq!(report_a.input_redactions, report_b.input_redactions);
+        assert_eq!(report_a.input_fonts, report_b.input_fonts);
+        assert_eq!(report_a.guesses, report_b.guesses);
+        assert_eq!(
+            diagnostics_without_timing(&report_a.diagnostics),
+            diagnostics_without_timing(&report_b.diagnostics)
+        );
+    }
+
+    #[test]
+    fn run_from_bytes_propagates_dictionary_diagnostics() {
+        let pdf_bytes = sample_pdf_bytes();
+        let redactions = sample_redaction_report(&pdf_bytes);
+        let dictionary = vec!["SARAH KELLEN".to_owned()];
+        let diagnostics = vec![
+            "dictionary_source=file".to_owned(),
+            "dictionary_size=1".to_owned(),
+        ];
+        let cfg = GuessConfig {
+            visual_score: false,
+            visual_score_dpi: 200.0_f32,
+        };
+
+        let report = run_guess_from_bytes(RunGuessFromBytesRequest {
+            pdf_name: "EFTA00101126.pdf",
+            pdf_bytes: &pdf_bytes,
+            redactions: &redactions,
+            dictionary: &dictionary,
+            diagnostics: &diagnostics,
+            cfg: &cfg,
+        })
+        .expect("guessing should succeed");
+
+        for expected in diagnostics {
+            assert!(report.diagnostics.iter().any(|line| line == &expected));
+        }
+    }
+
+    #[test]
+    fn run_from_bytes_emits_visual_score_disabled_marker_when_off() {
+        let pdf_bytes = sample_pdf_bytes();
+        let redactions = sample_redaction_report(&pdf_bytes);
+        let dictionary = vec!["SARAH KELLEN".to_owned()];
+        let cfg = GuessConfig {
+            visual_score: false,
+            visual_score_dpi: 200.0_f32,
+        };
+
+        let report = run_guess_from_bytes(RunGuessFromBytesRequest {
+            pdf_name: "EFTA00101126.pdf",
+            pdf_bytes: &pdf_bytes,
+            redactions: &redactions,
+            dictionary: &dictionary,
+            diagnostics: &[],
+            cfg: &cfg,
+        })
+        .expect("guessing should succeed");
+
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|line| line == "visual_score=disabled"));
+    }
+
+    #[test]
+    fn run_redaction_scan_uses_two_pass_raster_strategy() {
+        let mut prepass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
+        prepass.insert(0, vec![occ(0, 10.0_f32, 10.0_f32, 30.0_f32, 20.0_f32)]);
+        prepass.insert(2, vec![occ(2, 50.0_f32, 10.0_f32, 80.0_f32, 20.0_f32)]);
+        let mut highpass = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
+        highpass.insert(0, vec![occ(0, 12.0_f32, 10.0_f32, 32.0_f32, 20.0_f32)]);
+
+        let retriever = FakeRasterRetriever::new(vec![0, 1, 2], prepass, highpass);
+        let cfg = RedactionFinderConfig {
+            include_details: false,
+            mode: RedactionMode::All,
+            include_full_page_rects: false,
+            enable_image_analysis: true,
+            raster_dpi: 200.0_f32,
+        };
+
+        let out = run_redaction_scan(&retriever, cfg);
+        let calls = retriever
+            .calls
+            .borrow()
+            .iter()
+            .map(|(page_index, dpi)| format!("{page_index}:{dpi:.1}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![
+                "0:18.0".to_owned(),
+                "1:18.0".to_owned(),
+                "2:18.0".to_owned(),
+                "0:96.0".to_owned(),
+                "2:96.0".to_owned(),
+            ]
+        );
+        assert_eq!(out.redactions.len(), 2);
+        assert!(out
+            .diagnostics
+            .iter()
+            .any(|line| line.starts_with("raster_two_pass=")));
+    }
+
+    #[test]
+    fn run_redaction_scan_from_bytes_is_deterministic_for_same_input() {
+        let input = std::path::Path::new("test_data/EFTA02238592.pdf");
+        let bytes = std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+        let cfg = RedactionFinderConfig {
+            include_details: false,
+            mode: RedactionMode::All,
+            include_full_page_rects: false,
+            enable_image_analysis: false,
+            raster_dpi: 96.0_f32,
+        };
+
+        let output_a =
+            run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
+        let output_b =
+            run_redaction_scan_from_bytes(&bytes, None, cfg).expect("scan should succeed");
+        assert_eq!(output_a, output_b);
+    }
+
+    #[test]
+    fn build_report_from_input_name_sorts_and_counts_pages() {
+        let output = RedactionFinderOutput {
+            redactions: vec![
+                occ(1, 30.0_f32, 200.0_f32, 50.0_f32, 210.0_f32),
+                occ(0, 40.0_f32, 150.0_f32, 60.0_f32, 160.0_f32),
+                occ(0, 10.0_f32, 140.0_f32, 20.0_f32, 150.0_f32),
+            ],
+            diagnostics: vec!["d1".to_owned()],
+        };
+
+        let report = build_report_from_input_name("memory://sample.pdf", output);
+        assert_eq!(report.count, 3_u32);
+        assert_eq!(report.page_counts.get(&0).copied(), Some(2_u32));
+        assert_eq!(report.page_counts.get(&1).copied(), Some(1_u32));
+        assert_eq!(report.redactions[0].page_index, 0_u32);
+        assert!((report.redactions[0].bbox.x0 - 10.0_f32).abs() < 0.01_f32);
+    }
+
+    #[test]
+    fn run_redaction_scan_from_bytes_with_renderer_supports_image_analysis() {
+        let input = std::path::Path::new("test_data/EFTA02238592.pdf");
+        let bytes = std::fs::read(input)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
+        let page_count = lopdf::Document::load_mem(&bytes)
+            .expect("pdf should parse")
+            .get_pages()
+            .len();
+        let mut pixels = vec![240_u8; 64_usize * 64_usize * 4_usize];
+        for px in pixels.chunks_exact_mut(4_usize) {
+            px[3] = 255_u8;
+        }
+        for y in 24_usize..40_usize {
+            for x in 8_usize..56_usize {
+                let idx = (y * 64_usize + x) * 4_usize;
+                pixels[idx] = 5_u8;
+                pixels[idx + 1] = 5_u8;
+                pixels[idx + 2] = 5_u8;
+            }
+        }
+        let renderer = FakeRenderer {
+            page_count,
+            page: RenderedPage {
+                width_px: 64_u32,
+                height_px: 64_u32,
+                dpi: 96.0_f32,
+                pixels,
+            },
+        };
+        let cfg = RedactionFinderConfig {
+            include_details: false,
+            mode: RedactionMode::All,
+            include_full_page_rects: false,
+            enable_image_analysis: true,
+            raster_dpi: 96.0_f32,
+        };
+
+        let output = run_redaction_scan_from_bytes(&bytes, Some(&renderer), cfg)
+            .expect("scan should succeed");
+        assert!(output
+            .redactions
+            .iter()
+            .any(|value| matches!(value.kind, RedactionKind::RasterDarkRegion)));
+    }
+
+    #[test]
+    fn visual_scoring_path_executes_through_public_api() {
+        let pdf_bytes = sample_pdf_bytes();
+        let scan_cfg = RedactionFinderConfig {
+            include_details: false,
+            mode: RedactionMode::All,
+            include_full_page_rects: false,
+            enable_image_analysis: false,
+            raster_dpi: 96.0_f32,
+        };
+        let scan = run_redaction_scan_from_bytes(&pdf_bytes, None, scan_cfg)
+            .expect("redaction scan should succeed");
+        let redactions = build_report_from_input_name("memory://EFTA00101126.pdf", scan);
+        let dictionary = vec![
+            "SARAH KELLEN".to_owned(),
+            "GHISLANE MAXWELL".to_owned(),
+            "ALPHA".to_owned(),
+        ];
+        let cfg = GuessConfig {
+            visual_score: true,
+            visual_score_dpi: 200.0_f32,
+        };
+        let report = run_guess_from_bytes(RunGuessFromBytesRequest {
+            pdf_name: "EFTA00101126.pdf",
+            pdf_bytes: &pdf_bytes,
+            redactions: &redactions,
+            dictionary: &dictionary,
+            diagnostics: &[],
+            cfg: &cfg,
+        })
+        .expect("guessing should succeed");
+
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|line| line == "visual_score=disabled"),
+            "visual scoring path should not emit disabled marker"
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|line| line.starts_with("visual_score=")),
+            "expected visual score diagnostics in public-path execution"
+        );
     }
 }

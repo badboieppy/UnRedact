@@ -1,3 +1,6 @@
+#[cfg(not(target_family = "wasm"))]
+pub use std::time::Instant;
+
 #[cfg(target_family = "wasm")]
 #[derive(Debug, Clone, Copy)]
 pub struct Instant {
@@ -19,6 +22,3 @@ impl Instant {
         std::time::Duration::from_secs_f64(elapsed_ms / 1000.0_f64)
     }
 }
-
-#[cfg(not(target_family = "wasm"))]
-pub use std::time::Instant;
