@@ -1,4 +1,5 @@
 pub mod file_types;
+pub mod time;
 pub mod guess_types;
 pub mod redaction_types;
 pub mod runtime_defaults;

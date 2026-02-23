@@ -12,7 +12,7 @@ pub struct VisualizationRenderRequest<'a> {
 }
 
 #[inline]
-pub fn run_visualization_render_component(
+pub fn render_visualization(
     req: VisualizationRenderRequest<'_>,
 ) -> Result<Option<Vec<u8>>, String> {
     let Some(payload) = req.payload else {

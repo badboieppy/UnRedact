@@ -50,7 +50,7 @@ impl ToolingPdfRenderer {
 
 #[inline]
 pub fn default_name_dictionary_entries() -> &'static [&'static str] {
-    crate::data::default_name_dictionary::DEFAULT_NAME_DICTIONARY
+    crate::data::model::default_name_dictionary::DEFAULT_NAME_DICTIONARY
 }
 
 #[inline]

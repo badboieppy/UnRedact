@@ -1,9 +1,10 @@
-pub(crate) mod default_name_dictionary;
 pub(crate) mod dictionary_data;
 pub(crate) mod dictionary_variant_data;
 pub(crate) mod fonts_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod local_file_workflow_data;
+pub(crate) mod model;
+pub(crate) mod redaction_scan_data;
 pub(crate) mod redactions_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod result_data_publisher;

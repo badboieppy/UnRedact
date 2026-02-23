@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::default_name_dictionary::DEFAULT_NAME_DICTIONARY;
+use super::model::default_name_dictionary::DEFAULT_NAME_DICTIONARY;
 
 #[derive(Debug, Clone)]
 pub struct DictionaryInputs {

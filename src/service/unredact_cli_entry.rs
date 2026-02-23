@@ -2,13 +2,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::logic::time::Instant;
+use crate::types::time::Instant;
 use crate::logic::{
     build_output_file_paths, discover_pdf_inputs, ensure_batch_output_dir_for_input,
-    read_dictionary_input, read_input_pdf_bytes, run_dictionary_list_convertion_component,
-    run_redaction_guessing_component, run_visualization_render_component,
-    validate_batch_input_directory, write_batch_manifest, write_encoded_outputs,
-    BytesPipelineRequest, DictionaryListRequest, OutputFilePaths, PipelineConfig,
+    read_dictionary_input, read_input_pdf_bytes, render_visualization,
+    run_redaction_guessing_component, validate_batch_input_directory, write_batch_manifest,
+    write_encoded_outputs, BytesPipelineRequest, OutputFilePaths, PipelineConfig,
     VisualizationRenderRequest,
 };
 
@@ -98,22 +97,19 @@ pub fn run_batch_from_paths(
 #[inline]
 pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String> {
     let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
-    let dictionary_input = read_dictionary_input(req.dictionary_path.as_deref())?;
-    let dictionary_outputs =
-        run_dictionary_list_convertion_component(DictionaryListRequest { dictionary_input })?;
+    let dictionary_bytes = read_dictionary_input(req.dictionary_path.as_deref())?;
     let should_visualize = req.cfg.visualize;
     let visualizer = req.cfg.visualizer;
     let bytes_req = BytesPipelineRequest {
         input_name: req.input.to_string_lossy().to_string(),
         pdf_bytes: read_input_pdf_bytes(&req.input)?,
-        dictionary_entries: dictionary_outputs.dictionary_entries,
-        dictionary_diagnostics: dictionary_outputs.dictionary_diagnostics,
+        dictionary_bytes,
         cfg: req.cfg,
     };
     let mut bytes_outputs = run_redaction_guessing_component(bytes_req)?;
     let visualize_ms = if should_visualize {
         let visualize_started = Instant::now();
-        let rendered = run_visualization_render_component(VisualizationRenderRequest {
+        let rendered = render_visualization(VisualizationRenderRequest {
             redactions: &bytes_outputs.redactions,
             guesses: &bytes_outputs.guesses,
             payload: bytes_outputs.visualization_payload.as_ref(),

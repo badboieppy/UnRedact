@@ -1,11 +1,14 @@
 #![cfg(feature = "cli-entry")]
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
+use unredact::types::guess_types::{GuessConfig, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
+
+mod common;
+use common::{load_guess_report, test_output_dir};
 
 const TARGET_NAMES: [&str; 10] = [
     "SARAH KELLEN",
@@ -25,10 +28,6 @@ const NOISE_WORDS: [&str; 24] = [
     "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
     "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
 ];
-
-fn test_output_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("unredact_test_efta00038617_{}", std::process::id()))
-}
 
 fn write_name_dictionary(path: &Path) {
     let mut lines = TARGET_NAMES
@@ -61,25 +60,6 @@ fn write_name_dictionary(path: &Path) {
         path.display(),
         write_result.err()
     );
-}
-
-fn load_report(path: &Path) -> GuessReport {
-    let bytes_result = std::fs::read(path);
-    assert!(
-        bytes_result.is_ok(),
-        "failed to read guesses report {}: {:?}",
-        path.display(),
-        bytes_result.err()
-    );
-    let bytes = bytes_result.expect("guesses report bytes should exist");
-    let report_result = serde_json::from_slice::<GuessReport>(&bytes);
-    assert!(
-        report_result.is_ok(),
-        "failed to parse guesses report {}: {:?}",
-        path.display(),
-        report_result.err()
-    );
-    report_result.expect("guesses report should parse")
 }
 
 fn collect_candidate_text_upper(rows: &[&RedactionGuess]) -> BTreeSet<String> {
@@ -144,7 +124,7 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
     let input = Path::new("test_data/EFTA00038617.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
-    let output_dir = test_output_dir();
+    let output_dir = test_output_dir("efta00038617");
     if output_dir.exists() {
         let remove_result = std::fs::remove_dir_all(&output_dir);
         assert!(
@@ -183,7 +163,7 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         run_result.err()
     );
     let outputs = run_result.expect("pipeline run should succeed in test");
-    let report = load_report(&outputs.guesses_path);
+    let report = load_guess_report(&outputs.guesses_path);
 
     let page_two = report
         .guesses
@@ -301,5 +281,81 @@ fn efta00038617_page2_served_names_are_present_with_full_name_dictionary() {
         mean_multi_span_candidates <= 900.0_f64,
         "mean multi-span candidate volume too high: {:.1}",
         mean_multi_span_candidates
+    );
+}
+
+#[test]
+fn efta00101126_last_two_redactions_include_sarah_kellen_uppercase() {
+    let input = Path::new("test_data/EFTA00101126.pdf");
+    assert!(input.exists(), "missing test input: {}", input.display());
+
+    let output_dir = test_output_dir("efta00101126");
+    if output_dir.exists() {
+        let remove_result = std::fs::remove_dir_all(&output_dir);
+        assert!(
+            remove_result.is_ok(),
+            "failed to clean output dir {}: {:?}",
+            output_dir.display(),
+            remove_result.err()
+        );
+    }
+
+    let cfg = UnredactServiceConfig {
+        include_details: false,
+        enable_image_analysis: true,
+        guess: GuessConfig {
+            visual_score: true,
+            ..GuessConfig::default()
+        },
+        visualize: false,
+        visualizer: VisualizerConfig::default(),
+    };
+
+    let dictionary_path = Path::new("assets/names.txt");
+    assert!(
+        dictionary_path.exists(),
+        "missing dictionary input: {}",
+        dictionary_path.display()
+    );
+
+    let run_result = run_from_paths(input, &output_dir, Some(dictionary_path), cfg);
+    assert!(
+        run_result.is_ok(),
+        "pipeline run failed: {:?}",
+        run_result.err()
+    );
+    let outputs = run_result.expect("pipeline run should succeed in test");
+
+    let report = load_guess_report(&outputs.guesses_path);
+
+    assert!(
+        report.guesses.len() >= 2,
+        "expected at least 2 guesses, got {}",
+        report.guesses.len()
+    );
+
+    let second_last = &report.guesses[report.guesses.len() - 2];
+    let last = &report.guesses[report.guesses.len() - 1];
+
+    assert!(
+        second_last.context.has_anchor_pair,
+        "second-to-last redaction should be guessable"
+    );
+    assert!(
+        last.context.has_anchor_pair,
+        "last redaction should be guessable"
+    );
+
+    let second_top_exact = second_last.exact_matches.first().map(|v| v.as_str());
+    let last_top_exact = last.exact_matches.first().map(|v| v.as_str());
+    assert_eq!(
+        second_top_exact,
+        Some("SARAH KELLEN"),
+        "second-to-last top exact mismatch"
+    );
+    assert_eq!(
+        last_top_exact,
+        Some("SARAH KELLEN"),
+        "last top exact mismatch"
     );
 }

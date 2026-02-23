@@ -5,10 +5,7 @@ use crate::data::result_data_publisher::{
     ResultDataPublisher, ResultPublishPaths, ResultPublishPayload, ResultPublishRequest,
 };
 
-use super::{
-    dictionary_list_convertion_component::DictionaryListInput,
-    file_byte_convertion_component::EncodedPipelineOutputs,
-};
+use super::types::EncodedPipelineOutputs;
 
 const BATCH_MANIFEST_NAME: &str = "batch_manifest.json";
 
@@ -63,16 +60,14 @@ pub fn write_encoded_outputs(
 }
 
 #[inline]
-pub fn read_dictionary_input(
-    dictionary_path: Option<&Path>,
-) -> Result<DictionaryListInput, String> {
+pub fn read_dictionary_input(dictionary_path: Option<&Path>) -> Result<Option<Vec<u8>>, String> {
     let path = match dictionary_path {
         Some(path) => path,
-        None => return Ok(DictionaryListInput::Missing),
+        None => return Ok(None),
     };
     let local_data = LocalFileWorkflowData::new();
     let bytes = local_data.read_bytes(path)?;
-    Ok(DictionaryListInput::FileBytes(bytes))
+    Ok(Some(bytes))
 }
 
 #[inline]

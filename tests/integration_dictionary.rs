@@ -1,11 +1,14 @@
 #![cfg(feature = "cli-entry")]
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
+
+mod common;
+use common::{load_guess_report, test_output_dir};
 
 const TARGET_NAMES: [&str; 10] = [
     "SARAH KELLEN",
@@ -33,13 +36,6 @@ const ALT_FORMAT_DICTIONARY_LINES: [&str; 10] = [
     "DR. RICHARD BARNETT",
 ];
 
-fn test_output_dir() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "unredact_test_dictionary_entry_format_behavior_{}",
-        std::process::id()
-    ))
-}
-
 fn write_dictionary(path: &Path) {
     let mut lines = ALT_FORMAT_DICTIONARY_LINES
         .iter()
@@ -57,26 +53,6 @@ fn write_dictionary(path: &Path) {
         path.display(),
         write_result.err()
     );
-}
-
-fn load_report(path: &Path) -> GuessReport {
-    let bytes_result = std::fs::read(path);
-    assert!(
-        bytes_result.is_ok(),
-        "failed to read guesses report {}: {:?}",
-        path.display(),
-        bytes_result.err()
-    );
-    let report_result = serde_json::from_slice::<GuessReport>(
-        &bytes_result.expect("guesses report bytes should exist"),
-    );
-    assert!(
-        report_result.is_ok(),
-        "failed to parse guesses report {}: {:?}",
-        path.display(),
-        report_result.err()
-    );
-    report_result.expect("guesses report should parse")
 }
 
 fn first_bullet_rows(report: &GuessReport) -> Vec<&RedactionGuess> {
@@ -144,7 +120,7 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
     let input = Path::new("test_data/EFTA00038617.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
-    let output_dir = test_output_dir();
+    let output_dir = test_output_dir("dictionary_entry_format_behavior");
     if output_dir.exists() {
         let remove_result = std::fs::remove_dir_all(&output_dir);
         assert!(
@@ -183,7 +159,7 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
         run_result.err()
     );
     let outputs = run_result.expect("pipeline run should succeed in test");
-    let report = load_report(&outputs.guesses_path);
+    let report = load_guess_report(&outputs.guesses_path);
     let rows = first_bullet_rows(&report);
     assert!(
         rows.len() >= 10,
