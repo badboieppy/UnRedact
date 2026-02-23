@@ -4,11 +4,11 @@ use crate::data::visual_score_data::{
     annotate_overlays, apply_page_crop_boxes, build_page_boxes, render_pages_to_rgba,
 };
 use crate::data::visualization_data::{VisualizationData, VisualizationInputs};
-use crate::types::time::Instant;
 use crate::types::file_types::FontRunReport;
 use crate::types::guess_types::{GuessReport, RedactionGuess};
 use crate::types::redaction_types::{Rect, RedactionReport, RenderedPage};
 use crate::types::text_overlay::TextOverlay;
+use crate::types::time::Instant;
 
 const BACKGROUND_LUMA_THRESHOLD: u8 = 245_u8;
 const CHANGED_LUMA_DELTA: u8 = 24_u8;
@@ -72,6 +72,18 @@ struct CandidateVisualScore {
     score: RowPixelScore,
     blended_score: f32,
     combined_gain: f32,
+}
+
+struct RowCandidateScoringInput<'a> {
+    pdf_bytes: &'a [u8],
+    page_index: u32,
+    base_page: &'a RenderedPage,
+    page_box: Rect,
+    redaction_bbox: Rect,
+    template_overlays: &'a [TextOverlay],
+    guess: &'a RedactionGuess,
+    dpi: f32,
+    min_ink_pixels: u32,
 }
 
 #[inline]
@@ -284,17 +296,17 @@ fn apply_visual_scores_with_inputs(
         if rerank_enabled && should_visual_rerank_row(guess, overlays) {
             rerank_rows_considered += 1;
             let rerank_eval_started = Instant::now();
-            match score_top_k_candidates_for_row(
-                &base_pdf_bytes_for_visual,
-                redaction.page_index,
+            match score_top_k_candidates_for_row(RowCandidateScoringInput {
+                pdf_bytes: &base_pdf_bytes_for_visual,
+                page_index: redaction.page_index,
                 base_page,
                 page_box,
-                redaction.bbox,
-                overlays,
+                redaction_bbox: redaction.bbox,
+                template_overlays: overlays,
                 guess,
-                effective_dpi,
-                effective_min_ink_pixels,
-            ) {
+                dpi: effective_dpi,
+                min_ink_pixels: effective_min_ink_pixels,
+            }) {
                 Ok(mut candidate_scores) if !candidate_scores.is_empty() => {
                     rerank_eval_ms += rerank_eval_started.elapsed().as_millis();
                     rerank_rows_scored += 1;
@@ -766,18 +778,20 @@ fn build_candidate_overlays_from_template(
     Some(vec![left, guess, right])
 }
 
-#[allow(clippy::too_many_arguments)]
 fn score_top_k_candidates_for_row(
-    pdf_bytes: &[u8],
-    page_index: u32,
-    base_page: &RenderedPage,
-    page_box: Rect,
-    redaction_bbox: Rect,
-    template_overlays: &[TextOverlay],
-    guess: &RedactionGuess,
-    dpi: f32,
-    min_ink_pixels: u32,
+    input: RowCandidateScoringInput<'_>,
 ) -> Result<Vec<CandidateVisualScore>, String> {
+    let RowCandidateScoringInput {
+        pdf_bytes,
+        page_index,
+        base_page,
+        page_box,
+        redaction_bbox,
+        template_overlays,
+        guess,
+        dpi,
+        min_ink_pixels,
+    } = input;
     let texts = rerank_candidate_texts(guess);
     if texts.len() < 2 {
         return Ok(Vec::new());

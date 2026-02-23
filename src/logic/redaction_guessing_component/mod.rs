@@ -4,7 +4,6 @@ use crate::data::redaction_scan_data::{
     build_report_from_input_name, run_redaction_scan_from_bytes,
 };
 use crate::data::redactions_data::RedactionsData;
-use crate::types::time::Instant;
 use crate::logic::types::{
     BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
 };
@@ -12,8 +11,11 @@ use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::GuessReport;
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
 use crate::types::runtime_defaults::RASTER_HIGHPASS_DPI;
+use crate::types::time::Instant;
 
+pub(crate) mod common;
 pub(crate) mod guess_logic;
+pub(crate) mod joint_assignment;
 pub(crate) mod visual_logic;
 
 pub use guess_logic::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};

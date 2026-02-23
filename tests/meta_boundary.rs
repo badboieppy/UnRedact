@@ -22,9 +22,7 @@ fn integration_tests_only_use_service_and_public_types_interfaces() {
         if path.extension().and_then(|value| value.to_str()) != Some("rs") {
             continue;
         }
-        if path.file_name().and_then(|value| value.to_str())
-            == Some("meta_boundary.rs")
-        {
+        if path.file_name().and_then(|value| value.to_str()) == Some("meta_boundary.rs") {
             continue;
         }
 
@@ -122,9 +120,9 @@ fn source_code_architecture_layers_are_respected() {
                     // but usually frowned upon in strict layering anyway.
                     let imported_module_raw = parts[0];
                     let imported_module = imported_module_raw
-                         .trim_end_matches(';')
-                         .trim_end_matches(',')
-                         .trim_start_matches('{'); // Handle basic single-item groups if any
+                        .trim_end_matches(';')
+                        .trim_end_matches(',')
+                        .trim_start_matches('{'); // Handle basic single-item groups if any
 
                     // We only care about imports from our main architectural layers
                     let known_layers = ["service", "logic", "data", "dependency", "types"];

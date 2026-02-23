@@ -1,6 +1,8 @@
 use crate::dependency::hayro_renderer::HayroRenderer;
-use crate::dependency::pdf_redaction_accessor::PdfFileRetriever as DependencyPdfFileRetriever;
-use crate::dependency::pdf_redaction_accessor::RedactionDataRetriever as DependencyRedactionDataRetriever;
+use crate::dependency::pdf_redaction::{
+    PdfFileRetriever as DependencyPdfFileRetriever,
+    RedactionDataRetriever as DependencyRedactionDataRetriever,
+};
 use crate::types::redaction_types::{
     PdfRenderer, RedactionFinderConfig, RedactionOccurrence, RenderedPage, UnderlyingTextHit,
 };
@@ -60,18 +62,17 @@ pub trait RedactionDataRetriever {
     fn annotation_redactions(
         &self,
         page_index: u32,
-        include_details: bool,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn drawn_redactions(
         &self,
         page_index: u32,
-        include_details: bool,
-        include_full_page_rects: bool,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn raster_redactions(
         &self,
         page_index: u32,
-        cfg: &RedactionFinderConfig,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String>;
     fn underlying_text_hits(&self, page_index: u32) -> Result<Vec<UnderlyingTextHit>, String>;
 }
@@ -101,35 +102,25 @@ impl RedactionDataRetriever for PdfFileRetriever<'_> {
     fn annotation_redactions(
         &self,
         page_index: u32,
-        include_details: bool,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String> {
-        DependencyRedactionDataRetriever::annotation_redactions(
-            &self.inner,
-            page_index,
-            include_details,
-        )
+        DependencyRedactionDataRetriever::annotation_redactions(&self.inner, page_index, cfg)
     }
 
     #[inline]
     fn drawn_redactions(
         &self,
         page_index: u32,
-        include_details: bool,
-        include_full_page_rects: bool,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String> {
-        DependencyRedactionDataRetriever::drawn_redactions(
-            &self.inner,
-            page_index,
-            include_details,
-            include_full_page_rects,
-        )
+        DependencyRedactionDataRetriever::drawn_redactions(&self.inner, page_index, cfg)
     }
 
     #[inline]
     fn raster_redactions(
         &self,
         page_index: u32,
-        cfg: &RedactionFinderConfig,
+        cfg: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String> {
         DependencyRedactionDataRetriever::raster_redactions(&self.inner, page_index, cfg)
     }

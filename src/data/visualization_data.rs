@@ -31,6 +31,18 @@ struct RasterOverlayLayout {
     font_size_pt: f32,
 }
 
+struct AnchorPairOverlayInput<'a> {
+    redaction_index: usize,
+    redaction: &'a crate::types::redaction_types::RedactionOccurrence,
+    guess: &'a RedactionGuess,
+    selected_text: &'a str,
+    left_bbox: Option<Rect>,
+    right_bbox: Option<Rect>,
+    runs: &'a [FontTextRun],
+    assets: &'a std::collections::BTreeMap<String, FontAsset>,
+    width_map: &'a std::collections::BTreeMap<FontWidthKey, FontWidthTable>,
+}
+
 impl VisualizationData {
     #[inline]
     pub fn new() -> Self {
@@ -127,15 +139,17 @@ fn build_overlays(
             && !context_right.is_empty()
             && push_anchor_pair_overlays(
                 &mut out,
-                idx,
-                redaction,
-                guess,
-                selected.trim(),
-                left_hit.map(|hit| hit.bbox),
-                right_hit.map(|hit| hit.bbox),
-                &font_runs.runs,
-                &assets,
-                width_map,
+                AnchorPairOverlayInput {
+                    redaction_index: idx,
+                    redaction,
+                    guess,
+                    selected_text: selected.trim(),
+                    left_bbox: left_hit.map(|hit| hit.bbox),
+                    right_bbox: right_hit.map(|hit| hit.bbox),
+                    runs: &font_runs.runs,
+                    assets: &assets,
+                    width_map,
+                },
             )
         {
             continue;
@@ -324,19 +338,21 @@ fn build_overlays(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_anchor_pair_overlays(
     overlays: &mut Vec<TextOverlay>,
-    redaction_index: usize,
-    redaction: &crate::types::redaction_types::RedactionOccurrence,
-    guess: &RedactionGuess,
-    selected_text: &str,
-    left_bbox: Option<Rect>,
-    right_bbox: Option<Rect>,
-    runs: &[FontTextRun],
-    assets: &std::collections::BTreeMap<String, FontAsset>,
-    width_map: &std::collections::BTreeMap<FontWidthKey, FontWidthTable>,
+    input: AnchorPairOverlayInput<'_>,
 ) -> bool {
+    let AnchorPairOverlayInput {
+        redaction_index,
+        redaction,
+        guess,
+        selected_text,
+        left_bbox,
+        right_bbox,
+        runs,
+        assets,
+        width_map,
+    } = input;
     let context_left = guess.context.left_anchor_text.trim();
     let context_right = guess.context.right_anchor_text.trim();
     if context_left.is_empty() || context_right.is_empty() {

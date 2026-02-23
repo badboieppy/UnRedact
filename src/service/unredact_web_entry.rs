@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::time::Instant;
 use crate::logic::{
     encode_outputs, render_visualization, run_redaction_guessing_component, BytesPipelineRequest,
     EncodedPipelineOutputs, PipelineConfig, VisualizationRenderRequest,
 };
+use crate::types::time::Instant;
 
 pub type UnredactWebConfig = PipelineConfig;
 

@@ -18,6 +18,20 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
         pdf_bytes_result.err()
     );
     let pdf_bytes = pdf_bytes_result.expect("pdf bytes should exist");
+    let dictionary = Path::new("assets/names.txt");
+    assert!(
+        dictionary.exists(),
+        "missing dictionary input: {}",
+        dictionary.display()
+    );
+    let dictionary_bytes_result = std::fs::read(dictionary);
+    assert!(
+        dictionary_bytes_result.is_ok(),
+        "failed to read dictionary {}: {:?}",
+        dictionary.display(),
+        dictionary_bytes_result.err()
+    );
+    let dictionary_bytes = dictionary_bytes_result.expect("dictionary bytes should exist");
 
     let cfg = UnredactWebConfig {
         include_details: false,
@@ -33,7 +47,7 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
     let web_result = run(UnredactWebRequest {
         input_name: input.to_string_lossy().to_string(),
         pdf_bytes,
-        dictionary_file_bytes: None,
+        dictionary_file_bytes: Some(dictionary_bytes),
         cfg,
     });
     assert!(

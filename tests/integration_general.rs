@@ -4,11 +4,22 @@ use std::path::Path;
 
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::GuessConfig;
-use unredact::types::redaction_types::RedactionKind;
+use unredact::types::redaction_types::{RedactionKind, RedactionReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 mod common;
-use common::{load_guess_report, load_redaction_report, test_output_dir};
+use common::{load_guess_report, test_output_dir};
+
+fn load_redaction_report(path: &Path) -> RedactionReport {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|error| panic!("failed to read redactions {}: {error}", path.display()));
+    serde_json::from_slice::<RedactionReport>(&bytes).unwrap_or_else(|error| {
+        panic!(
+            "failed to parse redactions report {}: {error}",
+            path.display()
+        )
+    })
+}
 
 fn smoke_cfg() -> UnredactServiceConfig {
     UnredactServiceConfig {

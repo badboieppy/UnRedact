@@ -169,7 +169,7 @@ It writes an artifact to:
 4. Or run it via Cargo test flow (opt-in):
 
 ```bash
-UNREDACT_RUN_WEB_UI_BENCHMARK=1 cargo test --test web_ui_batch_benchmark -- --nocapture
+UNREDACT_RUN_WEB_UI_BENCHMARK=1 cargo test --test integration_web_ui_benchmark -- --nocapture
 ```
 
 Without `UNREDACT_RUN_WEB_UI_BENCHMARK=1`, that cargo test auto-skips.

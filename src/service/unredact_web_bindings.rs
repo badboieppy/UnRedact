@@ -2,6 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use super::unredact_web_entry::{run, UnredactWebOutputs, UnredactWebRequest};
 
+// wasm-bindgen exports ignore `#[inline]`, so this binding intentionally
+// exempts the crate-level inline-public-items lint.
 #[wasm_bindgen]
 #[allow(clippy::missing_inline_in_public_items)]
 pub fn run_unredact_web(request: JsValue) -> Result<JsValue, JsValue> {

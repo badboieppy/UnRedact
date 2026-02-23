@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::time::Instant;
 use crate::logic::{
     build_output_file_paths, discover_pdf_inputs, ensure_batch_output_dir_for_input,
     read_dictionary_input, read_input_pdf_bytes, render_visualization,
@@ -10,6 +9,7 @@ use crate::logic::{
     write_encoded_outputs, BytesPipelineRequest, OutputFilePaths, PipelineConfig,
     VisualizationRenderRequest,
 };
+use crate::types::time::Instant;
 
 pub type UnredactServiceConfig = PipelineConfig;
 

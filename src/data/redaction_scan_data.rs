@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
-use crate::types::time::Instant;
 use crate::types::redaction_types::{
     PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionMode,
     RedactionOccurrence, RedactionReport, UnderlyingTextHit,
 };
 use crate::types::runtime_defaults::{RASTER_HIGHPASS_DPI, RASTER_PREPASS_DPI};
+use crate::types::time::Instant;
 
 const LINE_BUCKET_PT: f32 = 2.0;
 const Y_BAND_PADDING_PT: f32 = 2.0;
@@ -99,10 +99,10 @@ fn collect_vector_redactions(
 ) {
     for page_index in page_indices {
         if plan.include_annotations {
-            collect_page_annotations(retriever, *page_index, cfg.include_details, acc);
+            collect_page_annotations(retriever, *page_index, cfg, acc);
         }
         if plan.include_drawn {
-            collect_page_drawn(retriever, *page_index, cfg.include_details, acc);
+            collect_page_drawn(retriever, *page_index, cfg, acc);
         }
     }
 }
@@ -110,10 +110,10 @@ fn collect_vector_redactions(
 fn collect_page_annotations(
     retriever: &dyn RedactionDataRetriever,
     page_index: u32,
-    include_details: bool,
+    cfg: &RedactionFinderConfig,
     acc: &mut ScanAccumulator,
 ) {
-    match retriever.annotation_redactions(page_index, include_details) {
+    match retriever.annotation_redactions(page_index, *cfg) {
         Ok(v) => acc.occurrences.extend(v),
         Err(m) => acc
             .diagnostics
@@ -124,10 +124,10 @@ fn collect_page_annotations(
 fn collect_page_drawn(
     retriever: &dyn RedactionDataRetriever,
     page_index: u32,
-    include_details: bool,
+    cfg: &RedactionFinderConfig,
     acc: &mut ScanAccumulator,
 ) {
-    match retriever.drawn_redactions(page_index, include_details, false) {
+    match retriever.drawn_redactions(page_index, *cfg) {
         Ok(v) => acc.occurrences.extend(v),
         Err(m) => acc
             .diagnostics
@@ -208,7 +208,7 @@ fn collect_raster_redactions_two_pass(
     let mut prepass_by_page = BTreeMap::<u32, Vec<RedactionOccurrence>>::new();
     let mut candidate_pages = Vec::<u32>::new();
     for page_index in page_indices {
-        match retriever.raster_redactions(*page_index, &prepass_cfg) {
+        match retriever.raster_redactions(*page_index, prepass_cfg) {
             Ok(v) => {
                 if !v.is_empty() {
                     candidate_pages.push(*page_index);
@@ -230,7 +230,7 @@ fn collect_raster_redactions_two_pass(
     let mut highpass_fallback_pages = 0_usize;
     for page_index in &candidate_pages {
         highpass_pages += 1;
-        match retriever.raster_redactions(*page_index, &highpass_cfg) {
+        match retriever.raster_redactions(*page_index, highpass_cfg) {
             Ok(v) if !v.is_empty() => out.extend(v),
             Ok(_) => {
                 highpass_fallback_pages += 1;
@@ -594,3 +594,5 @@ fn build_phrase_hit(
         text: words.join(" "),
     }
 }
+
+
