@@ -161,15 +161,11 @@ fn build_report_from_parts_with_fonts_inputs(
 
 fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
     for guess in guesses {
-        let base = if !guess.exact_matches.is_empty() {
-            1.0_f64
-        } else {
-            guess
-                .candidates
-                .first()
-                .map(|candidate| candidate.score as f64)
-                .unwrap_or(0.0_f64)
-        };
+        let base = guess
+            .candidates
+            .first()
+            .map(|candidate| candidate.score as f64)
+            .unwrap_or(0.0_f64);
         let anchor = if !guess.context.has_anchor_pair {
             0.35_f64
         } else if guess.context.anchor_mode.as_deref() == Some("two_sided") {
@@ -270,6 +266,8 @@ struct PairCandidate {
     right_idx: usize,
     font_penalty: u8,
     hint_penalty: u8,
+    straddle_penalty: u8,
+    overlap_penalty: u8,
     contains_center_penalty: u8,
     baseline_distance: f64,
     y_distance: f64,
@@ -281,16 +279,17 @@ const FIXED_MAX_CANDIDATES: usize = 50;
 const FIXED_TOLERANCE_PT: f64 = 4.0_f64;
 const FIXED_VISUAL_MIN_INK_PIXELS: u32 = 64_u32;
 const FIXED_VISUAL_DROP_THRESHOLD: Option<f32> = None;
-const MULTI_SPAN_ANCHOR_PRIOR_WEIGHT: f64 = 0.15_f64;
-const MULTI_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.70_f64;
-const SINGLE_SPAN_BOX_PRIOR_WEIGHT: f64 = 0.12_f64;
 const RASTER_WIDTH_NOISE_PT: f64 = 2.50_f64;
-const MULTI_SPAN_BOX_ERROR_RATIO: f64 = 0.45_f64;
-const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
 const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
-const MULTI_SPAN_WIDTH_BAND_LIMIT: usize = 900;
 const SINGLE_SPAN_WIDTH_BAND_LIMIT: usize = 700;
-const CURATED_NAME_PRIOR_BONUS_PT: f64 = 0.30_f64;
+const CURATED_NAME_PRIOR_BONUS_PT: f64 = 1.10_f64;
+const LIST_CONTEXT_MAX_CANDIDATES: usize = 200;
+const TWO_SIDED_MAX_CANDIDATES: usize = 600;
+const EXACT_MATCH_RAW_ERROR_EPSILON_PT: f64 = 0.0001_f64;
+const ANCHOR_PAIR_STRADDLE_TOLERANCE_PT: f64 = 2.0_f64;
+const ANCHOR_PAIR_MAX_OVERLAP_PT: f64 = 1.0_f64;
+const ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT: f32 = 4.0_f32;
+const ONE_SIDED_LIST_CONTEXT_SIDE_ALIGNMENT_MIN_PT: f64 = 24.0_f64;
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
 
@@ -474,15 +473,11 @@ fn build_anchor_validated_guesses(
         if !guess.context.has_anchor_pair {
             continue;
         }
-        let top = if let Some(first) = guess.exact_matches.first() {
-            first.clone()
-        } else {
-            guess
-                .candidates
-                .first()
-                .map(|candidate| candidate.text.clone())
-                .unwrap_or_default()
-        };
+        let top = guess
+            .candidates
+            .first()
+            .map(|candidate| candidate.text.clone())
+            .unwrap_or_default();
         diagnostics.push(format!(
                 "redaction_index={index} page_index={} anchored_row=true exact_count={} candidate_count={} top_guess={} left_anchor=[{}] right_anchor=[{}] tol_pt={} anchor_mode={} anchor_width_source={} space_width_source={} candidate_width_source={} width_fallback_reason={}",
                 guess.page_index,
@@ -762,13 +757,31 @@ fn build_guess_for_anchor(
     let redaction_width_pt = (redaction.bbox.width().abs() as f64).max(1.0_f64);
     let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
     let gap_ratio = anchor_gap_pt / redaction_width_pt;
-    let multi_span_mode =
-        matches!(anchor.mode, AnchorMode::TwoSided) && gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD;
-    let (min_char_units, max_char_units) = char_unit_band(
-        redaction_width_pt,
-        fallback_char_width.max(0.1_f64),
-        anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
-    );
+    let has_two_sided_anchor = matches!(anchor.mode, AnchorMode::TwoSided);
+    let anchor_target_guess_width_pt = if has_two_sided_anchor {
+        (anchor.right_x
+            - anchor.left_x
+            - left_width.pt
+            - (space_width.pt * 2.0_f64)
+            - anchor.row_bias_pt)
+            .max(0.1_f64)
+    } else {
+        redaction_width_pt
+    };
+    let target_width_pt_for_units = if has_two_sided_anchor {
+        anchor_target_guess_width_pt.max(fallback_char_width.max(0.1_f64))
+    } else {
+        redaction_width_pt
+    };
+    let (min_char_units, max_char_units) = if has_two_sided_anchor {
+        (1.0_f64, 40.0_f64)
+    } else {
+        char_unit_band(
+            target_width_pt_for_units,
+            fallback_char_width.max(0.1_f64),
+            anchor.epsilon_pt.max(FIXED_TOLERANCE_PT),
+        )
+    };
     let candidate_width_index = build_row_candidate_width_index(
         dictionary_variants,
         min_char_units,
@@ -816,9 +829,6 @@ fn build_guess_for_anchor(
     let mut scored = Vec::new();
     let anchor_filter_limit_pt =
         (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(FIXED_TOLERANCE_PT.max(4.0_f64));
-    let box_filter_limit_pt = (redaction_width_pt * MULTI_SPAN_BOX_ERROR_RATIO
-        + MULTI_SPAN_BOX_ERROR_PAD_PT)
-        .max(anchor.epsilon_pt.max(2.5_f64));
     let list_like_context =
         is_list_like_context(&anchor.left_anchor_text, &anchor.right_anchor_text);
     let raw_left_context = redaction
@@ -832,17 +842,8 @@ fn build_guess_for_anchor(
         .map(|hit| hit.text.as_str())
         .unwrap_or("");
     let raw_list_like_context = is_list_like_context(raw_left_context, raw_right_context);
-    if multi_span_mode {
-        let lower_width = (redaction_width_pt - box_filter_limit_pt).max(0.0_f64);
-        let upper_width = redaction_width_pt + box_filter_limit_pt;
-        let ranged =
-            candidate_width_entries_in_range(&candidate_width_index, lower_width, upper_width);
-        let mut band = if ranged.is_empty() {
-            candidate_width_index.as_slice()
-        } else {
-            ranged
-        };
-        band = trim_width_band_around_target(band, redaction_width_pt, MULTI_SPAN_WIDTH_BAND_LIMIT);
+    if has_two_sided_anchor {
+        let band = candidate_width_index.as_slice();
         for entry in band {
             funnel.scanned += 1;
             let trimmed = entry.text.trim();
@@ -864,53 +865,76 @@ fn build_guess_for_anchor(
             }
             funnel.after_shape += 1;
 
-            let predicted_right = anchor.left_x
+            let predicted_right_with_bias = anchor.left_x
                 + left_width.pt
                 + space_width.pt
                 + entry.width_pt
                 + space_width.pt
                 + anchor.row_bias_pt;
-            let anchor_err = (predicted_right - anchor.right_x).abs();
-            funnel.after_anchor += 1;
-            let box_err = effective_box_error_pt(redaction, entry.width_pt, redaction_width_pt);
-            if box_err > box_filter_limit_pt {
+            let predicted_right_without_bias =
+                anchor.left_x + left_width.pt + space_width.pt + entry.width_pt + space_width.pt;
+            let anchor_err = (predicted_right_with_bias - anchor.right_x)
+                .abs()
+                .min((predicted_right_without_bias - anchor.right_x).abs());
+            if anchor_err > anchor_filter_limit_pt {
                 continue;
             }
+            funnel.after_anchor += 1;
             funnel.after_box += 1;
-            let raw_err = (box_err * MULTI_SPAN_BOX_PRIOR_WEIGHT)
-                + (anchor_err * MULTI_SPAN_ANCHOR_PRIOR_WEIGHT);
+            let raw_err = anchor_err;
             let context_penalty = punctuation_context_penalty(
                 &anchor.left_anchor_text,
                 &anchor.right_anchor_text,
                 trimmed,
             );
+            let candidate_word_count = trimmed.split_whitespace().count();
             let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
                 anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
             } else {
                 0.0_f64
             };
-            let list_shape_penalty = if use_curated_name_prior
-                && raw_list_like_context
-                && trimmed.split_whitespace().count() == 3
-            {
-                0.18_f64
+            let list_shape_penalty =
+                if use_curated_name_prior && raw_list_like_context && candidate_word_count == 3 {
+                    0.18_f64
+                } else {
+                    0.0_f64
+                };
+            let two_sided_shape_penalty = if has_two_sided_anchor {
+                if candidate_word_count <= 1 {
+                    2.5_f64
+                } else if candidate_word_count >= 4 {
+                    0.8_f64
+                } else {
+                    0.0_f64
+                }
             } else {
                 0.0_f64
             };
-            let curated_bonus = if use_curated_name_prior && raw_list_like_context {
-                curated_name_prior_bonus_pt(trimmed)
-            } else {
-                0.0_f64
-            };
-            let effective_err =
-                (raw_err + context_penalty + raw_context_overlap_penalty + list_shape_penalty
-                    - curated_bonus)
-                    .max(0.0_f64);
+            let curated_bonus =
+                if use_curated_name_prior && (has_two_sided_anchor || raw_list_like_context) {
+                    curated_name_prior_bonus_pt(trimmed)
+                } else {
+                    0.0_f64
+                };
+            let non_curated_variant_penalty =
+                if use_curated_name_prior && has_two_sided_anchor && curated_bonus <= 0.0_f64 {
+                    2.0_f64
+                } else {
+                    0.0_f64
+                };
+            let effective_err = (raw_err
+                + context_penalty
+                + raw_context_overlap_penalty
+                + list_shape_penalty
+                + two_sided_shape_penalty
+                + non_curated_variant_penalty
+                - curated_bonus)
+                .max(0.0_f64);
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
                 raw_error_pt: raw_err,
                 effective_error_pt: effective_err,
-                word_count: trimmed.split_whitespace().count() as u32,
+                word_count: candidate_word_count as u32,
                 width_pt: entry.width_pt,
                 width_source: entry.source,
             });
@@ -923,11 +947,7 @@ fn build_guess_for_anchor(
         let upper_width = redaction_width_pt + single_span_width_slack_pt;
         let ranged =
             candidate_width_entries_in_range(&candidate_width_index, lower_width, upper_width);
-        let mut band = if ranged.is_empty() {
-            candidate_width_index.as_slice()
-        } else {
-            ranged
-        };
+        let mut band = ranged;
         band =
             trim_width_band_around_target(band, redaction_width_pt, SINGLE_SPAN_WIDTH_BAND_LIMIT);
         for entry in band {
@@ -952,15 +972,6 @@ fn build_guess_for_anchor(
             funnel.after_shape += 1;
             let box_err = effective_box_error_pt(redaction, entry.width_pt, redaction_width_pt);
             let side_alignment_err = match anchor.mode {
-                AnchorMode::TwoSided => {
-                    let predicted_right = anchor.left_x
-                        + left_width.pt
-                        + space_width.pt
-                        + entry.width_pt
-                        + space_width.pt
-                        + anchor.row_bias_pt;
-                    (predicted_right - anchor.right_x).abs()
-                }
                 AnchorMode::LeftOnly => {
                     let predicted_start =
                         anchor.left_x + left_width.pt + space_width.pt + anchor.row_bias_pt;
@@ -970,56 +981,87 @@ fn build_guess_for_anchor(
                     let predicted_end = anchor.right_x - space_width.pt + anchor.row_bias_pt;
                     (predicted_end - redaction.bbox.x1 as f64).abs()
                 }
+                AnchorMode::TwoSided => {
+                    continue;
+                }
             };
             let side_alignment_limit = match anchor.mode {
-                AnchorMode::TwoSided => anchor_filter_limit_pt,
-                AnchorMode::LeftOnly | AnchorMode::RightOnly => anchor_filter_limit_pt * 2.5_f64,
+                AnchorMode::LeftOnly | AnchorMode::RightOnly => {
+                    let base = anchor_filter_limit_pt * 2.5_f64;
+                    if gap_ratio >= MULTI_SPAN_GAP_RATIO_THRESHOLD {
+                        base.max(anchor_gap_pt * 0.75_f64)
+                            .max(redaction_width_pt * 1.8_f64)
+                            .max(ONE_SIDED_LIST_CONTEXT_SIDE_ALIGNMENT_MIN_PT * 2.0_f64)
+                    } else if list_like_context {
+                        base.max(redaction_width_pt * 1.4_f64)
+                            .max(ONE_SIDED_LIST_CONTEXT_SIDE_ALIGNMENT_MIN_PT)
+                    } else {
+                        base
+                    }
+                }
+                AnchorMode::TwoSided => {
+                    continue;
+                }
             };
             if side_alignment_err > side_alignment_limit {
                 continue;
             }
             funnel.after_anchor += 1;
             funnel.after_box += 1;
-            let raw_err = match anchor.mode {
-                AnchorMode::TwoSided => {
-                    side_alignment_err + (box_err * SINGLE_SPAN_BOX_PRIOR_WEIGHT)
-                }
-                AnchorMode::LeftOnly | AnchorMode::RightOnly => {
-                    box_err + (side_alignment_err * 0.20_f64)
-                }
-            };
+            let raw_err = box_err + (side_alignment_err * 0.20_f64);
             let context_penalty = punctuation_context_penalty(
                 &anchor.left_anchor_text,
                 &anchor.right_anchor_text,
                 trimmed,
             );
+            let candidate_word_count = trimmed.split_whitespace().count();
             let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
                 anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
             } else {
                 0.0_f64
             };
-            let list_shape_penalty = if use_curated_name_prior
-                && raw_list_like_context
-                && trimmed.split_whitespace().count() == 3
-            {
-                0.18_f64
+            let list_shape_penalty =
+                if use_curated_name_prior && raw_list_like_context && candidate_word_count == 3 {
+                    0.18_f64
+                } else {
+                    0.0_f64
+                };
+            let two_sided_shape_penalty = if has_two_sided_anchor {
+                if candidate_word_count <= 1 {
+                    2.5_f64
+                } else if candidate_word_count >= 4 {
+                    0.8_f64
+                } else {
+                    0.0_f64
+                }
             } else {
                 0.0_f64
             };
-            let curated_bonus = if use_curated_name_prior && raw_list_like_context {
-                curated_name_prior_bonus_pt(trimmed)
-            } else {
-                0.0_f64
-            };
-            let effective_err =
-                (raw_err + context_penalty + raw_context_overlap_penalty + list_shape_penalty
-                    - curated_bonus)
-                    .max(0.0_f64);
+            let curated_bonus =
+                if use_curated_name_prior && (has_two_sided_anchor || raw_list_like_context) {
+                    curated_name_prior_bonus_pt(trimmed)
+                } else {
+                    0.0_f64
+                };
+            let non_curated_variant_penalty =
+                if use_curated_name_prior && has_two_sided_anchor && curated_bonus <= 0.0_f64 {
+                    2.0_f64
+                } else {
+                    0.0_f64
+                };
+            let effective_err = (raw_err
+                + context_penalty
+                + raw_context_overlap_penalty
+                + list_shape_penalty
+                + two_sided_shape_penalty
+                + non_curated_variant_penalty
+                - curated_bonus)
+                .max(0.0_f64);
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
                 raw_error_pt: raw_err,
                 effective_error_pt: effective_err,
-                word_count: trimmed.split_whitespace().count() as u32,
+                word_count: candidate_word_count as u32,
                 width_pt: entry.width_pt,
                 width_source: entry.source,
             });
@@ -1036,35 +1078,25 @@ fn build_guess_for_anchor(
     });
 
     let epsilon = anchor.epsilon_pt.max(0.0);
-    let exact_scored = scored
+    let candidate_cap = if has_two_sided_anchor {
+        TWO_SIDED_MAX_CANDIDATES
+    } else if list_like_context || raw_list_like_context {
+        LIST_CONTEXT_MAX_CANDIDATES
+    } else {
+        FIXED_MAX_CANDIDATES
+    };
+    let selected = scored
         .iter()
-        .filter(|candidate| candidate.effective_error_pt <= epsilon)
+        .take(candidate_cap)
         .cloned()
         .collect::<Vec<_>>();
-    let exact_matches = exact_scored
+    let exact_matches = selected
         .iter()
+        .filter(|candidate| candidate.raw_error_pt <= EXACT_MATCH_RAW_ERROR_EPSILON_PT)
         .map(|candidate| candidate.text.clone())
         .collect::<Vec<_>>();
 
-    let selected = if exact_scored.is_empty() {
-        scored
-            .iter()
-            .take(FIXED_MAX_CANDIDATES)
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        exact_scored
-            .iter()
-            .take(FIXED_MAX_CANDIDATES)
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-
-    let denom = if exact_scored.is_empty() {
-        FIXED_TOLERANCE_PT.max(0.0001)
-    } else {
-        epsilon.max(0.0001)
-    };
+    let denom = epsilon.max(FIXED_TOLERANCE_PT).max(0.0001);
     let candidates = selected
         .iter()
         .map(|candidate| GuessCandidate {
@@ -1316,6 +1348,18 @@ fn build_pair_candidates(
                 Some(hint) => u8::from(!text_matches(right_run.text.trim(), hint)),
                 None => 0_u8,
             };
+            let left_straddle_penalty =
+                u8::from(left_end > redaction.bbox.x0 as f64 + ANCHOR_PAIR_STRADDLE_TOLERANCE_PT);
+            let right_straddle_penalty = u8::from(
+                right_start < redaction.bbox.x1 as f64 - ANCHOR_PAIR_STRADDLE_TOLERANCE_PT,
+            );
+            let straddle_penalty = left_straddle_penalty + right_straddle_penalty;
+            let left_overlap =
+                horizontal_overlap_font_rect_with_rect(&left_run.bbox, &redaction.bbox);
+            let right_overlap =
+                horizontal_overlap_font_rect_with_rect(&right_run.bbox, &redaction.bbox);
+            let overlap_penalty = u8::from(left_overlap > ANCHOR_PAIR_MAX_OVERLAP_PT)
+                + u8::from(right_overlap > ANCHOR_PAIR_MAX_OVERLAP_PT);
             let contains_center_penalty =
                 u8::from(red_center_x < left_end || red_center_x > right_start);
             let y_distance = (run_center_y(left_run) - red_center_y).abs()
@@ -1329,6 +1373,8 @@ fn build_pair_candidates(
                 right_idx,
                 font_penalty,
                 hint_penalty: left_hint_penalty + right_hint_penalty,
+                straddle_penalty,
+                overlap_penalty,
                 contains_center_penalty,
                 baseline_distance: baseline_distance as f64,
                 y_distance: y_distance as f64,
@@ -1346,6 +1392,8 @@ fn sort_pair_candidates(pairs: &mut [PairCandidate]) {
             .font_penalty
             .cmp(&right_pair.font_penalty)
             .then_with(|| left_pair.hint_penalty.cmp(&right_pair.hint_penalty))
+            .then_with(|| left_pair.straddle_penalty.cmp(&right_pair.straddle_penalty))
+            .then_with(|| left_pair.overlap_penalty.cmp(&right_pair.overlap_penalty))
             .then_with(|| {
                 left_pair
                     .contains_center_penalty
@@ -1413,6 +1461,11 @@ fn build_two_sided_anchor_from_pair(
     if right_x <= left_x {
         return None;
     }
+    let left_x_bound = redaction.bbox.x0 as f64 + ANCHOR_PAIR_STRADDLE_TOLERANCE_PT;
+    let right_x_bound = redaction.bbox.x1 as f64 - ANCHOR_PAIR_STRADDLE_TOLERANCE_PT;
+    if left_x > left_x_bound || right_x < right_x_bound {
+        return None;
+    }
     let measure_ctx = WidthMeasureContext {
         page_index: redaction.page_index,
         asset,
@@ -1447,7 +1500,7 @@ fn recover_one_sided_anchor(
     let left_only = row_runs
         .iter()
         .copied()
-        .filter(|run| run.bbox.x1 <= redaction.bbox.x0 + 1.5_f32)
+        .filter(|run| run.bbox.x1 <= redaction.bbox.x0 + ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT)
         .min_by(|left_run, right_run| {
             let left_gap = (redaction.bbox.x0 as f64 - left_run.bbox.x1 as f64).max(0.0_f64);
             let right_gap = (redaction.bbox.x0 as f64 - right_run.bbox.x1 as f64).max(0.0_f64);
@@ -1466,7 +1519,7 @@ fn recover_one_sided_anchor(
     let right_only = row_runs
         .iter()
         .copied()
-        .filter(|run| run.bbox.x0 >= redaction.bbox.x1 - 1.5_f32)
+        .filter(|run| run.bbox.x0 >= redaction.bbox.x1 - ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT)
         .min_by(|left_run, right_run| {
             let left_gap = (left_run.bbox.x0 as f64 - redaction.bbox.x1 as f64).max(0.0_f64);
             let right_gap = (right_run.bbox.x0 as f64 - redaction.bbox.x1 as f64).max(0.0_f64);
@@ -1904,6 +1957,10 @@ fn vertical_overlap_run(a: &FontRect, b: &Rect) -> f32 {
     (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0)
 }
 
+fn horizontal_overlap_font_rect_with_rect(a: &FontRect, b: &Rect) -> f64 {
+    (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0) as f64
+}
+
 fn collect_row_runs_for_anchor<'a>(
     redaction: &RedactionOccurrence,
     runs: &[&'a FontTextRun],
@@ -1997,6 +2054,9 @@ fn passes_context_filter(left_anchor_text: &str, right_anchor_text: &str, candid
     }
     if left_lower.contains("including") && right_lower.starts_with("and") {
         let count = candidate.split_whitespace().count();
+        if count < 2 {
+            return false;
+        }
         if count > 3 {
             return false;
         }

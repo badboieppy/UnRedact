@@ -585,15 +585,28 @@ fn best_rank_for_target(guesses: &[RedactionGuess], target: &TargetCandidate) ->
 }
 
 fn rank_in_guess(guess: &RedactionGuess, target: &str) -> Option<usize> {
+    let target_upper = target.trim().to_ascii_uppercase();
+    if target_upper.is_empty() {
+        return None;
+    }
     let mut rank = 1_usize;
-    for exact in &guess.exact_matches {
-        if exact.eq_ignore_ascii_case(target) {
+    let mut seen = std::collections::BTreeSet::<String>::new();
+    for candidate in &guess.candidates {
+        let normalized = candidate.text.trim().to_ascii_uppercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        if normalized == target_upper {
             return Some(rank);
         }
         rank += 1;
     }
-    for candidate in &guess.candidates {
-        if candidate.text.eq_ignore_ascii_case(target) {
+    for exact in &guess.exact_matches {
+        let normalized = exact.trim().to_ascii_uppercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        if normalized == target_upper {
             return Some(rank);
         }
         rank += 1;

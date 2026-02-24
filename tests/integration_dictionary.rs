@@ -67,14 +67,14 @@ fn first_bullet_rows(report: &GuessReport) -> Vec<&RedactionGuess> {
 fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut seen = BTreeSet::<String>::new();
-    for text in &guess.exact_matches {
-        let normalized = text.trim().to_ascii_uppercase();
+    for candidate in &guess.candidates {
+        let normalized = candidate.text.trim().to_ascii_uppercase();
         if !normalized.is_empty() && seen.insert(normalized.clone()) {
             out.push(normalized);
         }
     }
-    for candidate in &guess.candidates {
-        let normalized = candidate.text.trim().to_ascii_uppercase();
+    for text in &guess.exact_matches {
+        let normalized = text.trim().to_ascii_uppercase();
         if !normalized.is_empty() && seen.insert(normalized.clone()) {
             out.push(normalized);
         }

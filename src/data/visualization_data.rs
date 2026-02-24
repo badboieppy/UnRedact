@@ -417,6 +417,36 @@ fn push_anchor_pair_overlays(
         width_map,
     )
     .max(0.1_f32);
+    let left_width = text_width_pt(
+        redaction.page_index,
+        &font_key,
+        font_size_pt,
+        h_scale_pct,
+        left_text,
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
+    let space_width = text_width_pt(
+        redaction.page_index,
+        &font_key,
+        font_size_pt,
+        h_scale_pct,
+        " ",
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
+    let selected_width = text_width_pt(
+        redaction.page_index,
+        &font_key,
+        font_size_pt,
+        h_scale_pct,
+        selected_text,
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
 
     let y0 = left_anchor_run
         .map(|run| run.bbox.y0)
@@ -431,20 +461,45 @@ fn push_anchor_pair_overlays(
         .or_else(|| right_bbox.map(|bbox| bbox.y1))
         .unwrap_or(redaction.bbox.y1);
 
+    let row_right = max_row_right_edge(
+        overlays,
+        redaction.page_index,
+        Rect::new(left_x, y0, left_x + joined_width, y1),
+    );
+    let overlap_guard_pt = 0.25_f32;
+    let joined_overlaps_row = row_right
+        .map(|right_edge| left_x + overlap_guard_pt < right_edge)
+        .unwrap_or(false);
+    let (text, x, width) = if joined_overlaps_row {
+        let guess_x = left_x + left_width + space_width;
+        let fallback_x = row_right
+            .map(|right_edge| {
+                if guess_x + overlap_guard_pt < right_edge {
+                    right_edge + space_width
+                } else {
+                    guess_x
+                }
+            })
+            .unwrap_or(guess_x);
+        (selected_text.to_owned(), fallback_x, selected_width)
+    } else {
+        (joined_text, left_x, joined_width)
+    };
+
     let overlay_bbox = Rect::new(
-        left_x.min(redaction.bbox.x0),
+        x,
         y0.min(redaction.bbox.y0),
-        (left_x + joined_width).max(redaction.bbox.x1),
+        x + width,
         y1.max(redaction.bbox.y1),
     );
     overlays.push(TextOverlay {
         redaction_index: Some(redaction_index),
         page_index: redaction.page_index,
-        text: joined_text,
+        text,
         font_key,
         font_size_pt,
         h_scale_pct,
-        x: left_x,
+        x,
         y: y1,
         bbox: overlay_bbox,
     });
@@ -477,10 +532,35 @@ fn raster_overlay_layout(
 }
 
 fn pick_best_guess(guess: &crate::types::guess_types::RedactionGuess) -> Option<&str> {
-    if let Some(first) = guess.exact_matches.first() {
-        return Some(first);
-    }
     guess.candidates.first().map(|c| c.text.as_str())
+}
+
+fn max_row_right_edge(
+    overlays: &[TextOverlay],
+    page_index: u32,
+    candidate_bbox: Rect,
+) -> Option<f32> {
+    overlays
+        .iter()
+        .filter(|overlay| overlay.page_index == page_index)
+        .filter(|overlay| same_visual_row(overlay.bbox, candidate_bbox))
+        .map(|overlay| overlay.bbox.x1)
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn same_visual_row(left: Rect, right: Rect) -> bool {
+    let overlap = vertical_overlap_rect(left, right);
+    if overlap <= 0.0_f32 {
+        return false;
+    }
+    let left_height = left.height().abs().max(1.0_f32);
+    let right_height = right.height().abs().max(1.0_f32);
+    let min_height = left_height.min(right_height).max(1.0_f32);
+    overlap / min_height >= 0.40_f32
+}
+
+fn vertical_overlap_rect(left: Rect, right: Rect) -> f32 {
+    (left.y1.min(right.y1) - left.y0.max(right.y0)).max(0.0_f32)
 }
 
 fn select_run_by_text<'a>(
@@ -825,6 +905,55 @@ mod tests {
         }
     }
 
+    fn sample_multi_anchor_pair_report() -> RedactionReport {
+        RedactionReport {
+            input: "x.pdf".to_owned(),
+            redactions: vec![
+                RedactionOccurrence {
+                    page_index: 0_u32,
+                    bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
+                    kind: RedactionKind::RasterDarkRegion,
+                    score: 1.0_f32,
+                    meta: std::collections::BTreeMap::new(),
+                    underlying_text: vec![
+                        UnderlyingTextHit {
+                            page_index: 0_u32,
+                            bbox: Rect::new(104.0_f32, 208.0_f32, 150.0_f32, 219.0_f32),
+                            text: "including".to_owned(),
+                        },
+                        UnderlyingTextHit {
+                            page_index: 0_u32,
+                            bbox: Rect::new(214.0_f32, 208.0_f32, 232.0_f32, 219.0_f32),
+                            text: "and".to_owned(),
+                        },
+                    ],
+                },
+                RedactionOccurrence {
+                    page_index: 0_u32,
+                    bbox: Rect::new(176.0_f32, 200.0_f32, 246.0_f32, 214.0_f32),
+                    kind: RedactionKind::RasterDarkRegion,
+                    score: 1.0_f32,
+                    meta: std::collections::BTreeMap::new(),
+                    underlying_text: vec![
+                        UnderlyingTextHit {
+                            page_index: 0_u32,
+                            bbox: Rect::new(150.0_f32, 208.0_f32, 196.0_f32, 219.0_f32),
+                            text: "including".to_owned(),
+                        },
+                        UnderlyingTextHit {
+                            page_index: 0_u32,
+                            bbox: Rect::new(260.0_f32, 208.0_f32, 278.0_f32, 219.0_f32),
+                            text: "and".to_owned(),
+                        },
+                    ],
+                },
+            ],
+            count: 2_u32,
+            page_counts: std::collections::BTreeMap::from([(0_u32, 2_u32)]),
+            diagnostics: vec![],
+        }
+    }
+
     fn sample_guesses() -> GuessReport {
         sample_guesses_with_candidate("SARAH KELLEN")
     }
@@ -872,6 +1001,35 @@ mod tests {
                 visual_reason: None,
                 visual_dropped: false,
             }],
+            diagnostics: vec![],
+        }
+    }
+
+    fn sample_multi_anchor_pair_guesses() -> GuessReport {
+        let mut first = sample_guesses_with_candidate("SARAH KELLEN")
+            .guesses
+            .into_iter()
+            .next()
+            .expect("sample guess should exist");
+        first.context.anchor_left_x = Some(104.0_f32);
+        first.context.anchor_right_x = Some(214.0_f32);
+
+        let mut second = first.clone();
+        second.bbox = Rect::new(176.0_f32, 200.0_f32, 246.0_f32, 214.0_f32);
+        second.candidates = vec![GuessCandidate {
+            text: "ADRIANA MUCINSKA".to_owned(),
+            score: 0.95_f32,
+            error_pt: 0.1_f32,
+            word_count: 2_u32,
+            width_pt: Some(75.0_f32),
+        }];
+        second.context.anchor_left_x = Some(150.0_f32);
+        second.context.anchor_right_x = Some(260.0_f32);
+
+        GuessReport {
+            input_redactions: String::new(),
+            input_fonts: String::new(),
+            guesses: vec![first, second],
             diagnostics: vec![],
         }
     }
@@ -925,6 +1083,10 @@ mod tests {
         let input = std::path::Path::new("test_data/EFTA00101126.pdf");
         std::fs::read(input)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
+    }
+
+    fn horizontal_overlap(a: Rect, b: Rect) -> f32 {
+        (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0_f32)
     }
 
     #[test]
@@ -1053,5 +1215,31 @@ mod tests {
         assert_eq!(overlay.font_key, "F_anchor");
         assert!((overlay.font_size_pt - 11.0_f32).abs() <= 0.001_f32);
         assert!((overlay.h_scale_pct - 96.0_f32).abs() <= 0.001_f32);
+    }
+
+    #[test]
+    fn anchor_pair_multi_redaction_rows_do_not_emit_overlapping_overlay_runs() {
+        let data = VisualizationData::new();
+        let report = sample_multi_anchor_pair_report();
+        let guesses = sample_multi_anchor_pair_guesses();
+        let font_runs = sample_font_runs();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+
+        assert_eq!(inputs.overlays.len(), 2_usize);
+        assert_eq!(inputs.overlays[0].text, "including SARAH KELLEN and");
+        assert_eq!(inputs.overlays[1].text, "ADRIANA MUCINSKA");
+        let overlap = horizontal_overlap(inputs.overlays[0].bbox, inputs.overlays[1].bbox);
+        assert!(
+            overlap <= 0.25_f32,
+            "expected non-overlapping same-row overlays, overlap_pt={overlap:.3}"
+        );
     }
 }

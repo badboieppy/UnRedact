@@ -120,6 +120,9 @@ struct MetricDefinitions {
     quality_width_core_rows: &'static str,
     quality_width_fallback_rows: &'static str,
     quality_width_fallback_reason_rows: &'static str,
+    quality_exact_rows: &'static str,
+    quality_exact_zero_error_rows: &'static str,
+    quality_exact_invalid_rows: &'static str,
     consistency_repeats: &'static str,
     consistency_all_hashes_identical: &'static str,
     consistency_hash_match_ratio: &'static str,
@@ -186,6 +189,9 @@ struct QualitySummary {
     width_core_rows: usize,
     width_fallback_rows: usize,
     width_fallback_reason_rows: usize,
+    exact_rows: usize,
+    exact_zero_error_rows: usize,
+    exact_invalid_rows: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -341,14 +347,14 @@ fn run_report(
 fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut seen = std::collections::BTreeSet::<String>::new();
-    for text in &guess.exact_matches {
-        let normalized = text.trim().to_ascii_uppercase();
+    for candidate in &guess.candidates {
+        let normalized = candidate.text.trim().to_ascii_uppercase();
         if !normalized.is_empty() && seen.insert(normalized.clone()) {
             out.push(normalized);
         }
     }
-    for candidate in &guess.candidates {
-        let normalized = candidate.text.trim().to_ascii_uppercase();
+    for text in &guess.exact_matches {
+        let normalized = text.trim().to_ascii_uppercase();
         if !normalized.is_empty() && seen.insert(normalized.clone()) {
             out.push(normalized);
         }
@@ -428,7 +434,7 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> BenchmarkSummary {
 }
 
 fn has_top_guess(guess: &RedactionGuess) -> bool {
-    !guess.exact_matches.is_empty() || !guess.candidates.is_empty()
+    !guess.candidates.is_empty()
 }
 
 fn percentile_sorted(values: &[f64], q: f64) -> Option<f64> {
@@ -655,6 +661,7 @@ fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
         rows_total: guesses.len(),
         ..QualitySummary::default()
     };
+    let exact_eps = 0.0001_f32;
     for guess in guesses {
         if guess.context.has_anchor_pair {
             out.anchored_rows += 1;
@@ -679,6 +686,22 @@ fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
         if guess.context.width_fallback_reason.is_some() {
             out.width_fallback_reason_rows += 1;
         }
+        if !guess.exact_matches.is_empty() {
+            out.exact_rows += 1;
+            let all_exact_zero = guess.exact_matches.iter().all(|exact| {
+                guess
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.text.eq_ignore_ascii_case(exact))
+                    .map(|candidate| candidate.error_pt.abs() <= exact_eps)
+                    .unwrap_or(false)
+            });
+            if all_exact_zero {
+                out.exact_zero_error_rows += 1;
+            } else {
+                out.exact_invalid_rows += 1;
+            }
+        }
     }
     out
 }
@@ -695,6 +718,9 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
         merged.width_core_rows += summary.width_core_rows;
         merged.width_fallback_rows += summary.width_fallback_rows;
         merged.width_fallback_reason_rows += summary.width_fallback_reason_rows;
+        merged.exact_rows += summary.exact_rows;
+        merged.exact_zero_error_rows += summary.exact_zero_error_rows;
+        merged.exact_invalid_rows += summary.exact_invalid_rows;
     }
     merged
 }
@@ -1197,7 +1223,7 @@ fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
 
 fn print_quality_summary(label: &str, summary: &QualitySummary) {
     println!(
-        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_asset={} width_table={} width_core={} width_fallback={} fallback_reason_rows={}",
+        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_asset={} width_table={} width_core={} width_fallback={} fallback_reason_rows={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
         summary.rows_total,
         summary.anchored_rows,
         summary.anchor_two_sided_rows,
@@ -1206,7 +1232,10 @@ fn print_quality_summary(label: &str, summary: &QualitySummary) {
         summary.width_table_rows,
         summary.width_core_rows,
         summary.width_fallback_rows,
-        summary.width_fallback_reason_rows
+        summary.width_fallback_reason_rows,
+        summary.exact_rows,
+        summary.exact_zero_error_rows,
+        summary.exact_invalid_rows
     );
 }
 
@@ -1224,7 +1253,7 @@ fn metric_definitions() -> MetricDefinitions {
             "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
         visual_rows_total: "Total redaction rows in guesses for the dataset.",
         visual_rows_with_top_guess:
-            "Rows where a top guess exists (either first exact_match or first candidate).",
+            "Rows where a scored top candidate exists (candidate list non-empty).",
         visual_rows_scored:
             "Rows with computed visual score (visual_mean_abs_diff present).",
         visual_rows_dropped:
@@ -1280,6 +1309,11 @@ fn metric_definitions() -> MetricDefinitions {
             "Rows whose primary candidate width source is heuristic fallback.",
         quality_width_fallback_reason_rows:
             "Rows carrying explicit width_fallback_reason diagnostics.",
+        quality_exact_rows: "Rows where exact_matches is non-empty.",
+        quality_exact_zero_error_rows:
+            "Rows where every exact_match exists in candidates with zero raw error.",
+        quality_exact_invalid_rows:
+            "Rows where exact_matches contains any entry missing from candidates or with non-zero raw error.",
         consistency_repeats: "Number of repeated benchmark runs with the same code/config.",
         consistency_all_hashes_identical:
             "True when every repeated run produced the same benchmark hash.",
@@ -1728,6 +1762,18 @@ fn main() {
     println!(
         "  quality_width_fallback_reason_rows: {}",
         payload.definitions.quality_width_fallback_reason_rows
+    );
+    println!(
+        "  quality_exact_rows: {}",
+        payload.definitions.quality_exact_rows
+    );
+    println!(
+        "  quality_exact_zero_error_rows: {}",
+        payload.definitions.quality_exact_zero_error_rows
+    );
+    println!(
+        "  quality_exact_invalid_rows: {}",
+        payload.definitions.quality_exact_invalid_rows
     );
     println!(
         "  consistency_repeats: {}",

@@ -363,9 +363,6 @@ function collectPdfFiles() {
 }
 
 function topGuessText(row) {
-  if (Array.isArray(row?.exact_matches) && row.exact_matches.length > 0) {
-    return String(row.exact_matches[0]);
-  }
   if (Array.isArray(row?.candidates) && row.candidates.length > 0) {
     return String(row.candidates[0].text ?? "(candidate)");
   }

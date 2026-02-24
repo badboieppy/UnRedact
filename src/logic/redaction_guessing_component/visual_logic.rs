@@ -530,9 +530,6 @@ fn build_context_overlays_by_redaction(
 }
 
 fn top_guess_text(guess: &RedactionGuess) -> Option<&str> {
-    if let Some(exact) = guess.exact_matches.first() {
-        return Some(exact.as_str());
-    }
     guess
         .candidates
         .first()
@@ -561,8 +558,8 @@ fn promote_guess_text_to_front(guess: &mut RedactionGuess, selected_text: &str) 
 fn ordered_candidate_texts_top_k(guess: &RedactionGuess, top_k: usize) -> Vec<String> {
     let mut out = Vec::<String>::new();
     let mut seen = BTreeSet::<String>::new();
-    for text in &guess.exact_matches {
-        let trimmed = text.trim();
+    for candidate in &guess.candidates {
+        let trimmed = candidate.text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -574,8 +571,8 @@ fn ordered_candidate_texts_top_k(guess: &RedactionGuess, top_k: usize) -> Vec<St
             return out;
         }
     }
-    for candidate in &guess.candidates {
-        let trimmed = candidate.text.trim();
+    for text in &guess.exact_matches {
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -665,7 +662,7 @@ fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) ->
     if overlays.len() < 3 {
         return false;
     }
-    if guess.exact_matches.len() == 1 {
+    if guess.candidates.len() < 2 {
         return false;
     }
     let mut ordered = overlays.to_vec();
@@ -693,8 +690,7 @@ fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) ->
     if !top.is_finite() || !second.is_finite() {
         return false;
     }
-    let has_ambiguous_exact = guess.exact_matches.len() > 1;
-    if top > VISUAL_RERANK_MAX_TOP_SCORE && !has_ambiguous_exact {
+    if top > VISUAL_RERANK_MAX_TOP_SCORE {
         return false;
     }
     (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP
@@ -727,13 +723,6 @@ fn geometric_score_for_text(guess: &RedactionGuess, text: &str) -> f32 {
         .find(|candidate| candidate.text.eq_ignore_ascii_case(text))
     {
         return candidate.score;
-    }
-    if guess
-        .exact_matches
-        .iter()
-        .any(|value| value.eq_ignore_ascii_case(text))
-    {
-        return 1.0_f32;
     }
     0.0_f32
 }
