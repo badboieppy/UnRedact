@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
 const MAX_NAME_VARIANTS_PER_ENTRY: usize = 24;
+const MAX_TOKEN_VARIANTS_PER_ROLE: usize = 8;
+const MAX_ROLE_SIDE_VARIANTS: usize = 24;
+const MAX_ROLE_COMBINATIONS_PER_ENTRY: usize = 64;
 const NAME_PREFIX_TOKENS: [&str; 24] = [
     "mr",
     "mrs",
@@ -233,6 +236,12 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
         push_unique_variant(&mut template_seen, &mut templates, first.to_owned());
         push_unique_variant(&mut template_seen, &mut templates, last.to_owned());
     }
+    if tokens.len() >= 2 {
+        let parts = parse_name_parts(canonical, &tokens);
+        if should_add_role_aware_aliases(&parts) {
+            add_role_aware_alias_templates(&parts, &mut template_seen, &mut templates);
+        }
+    }
 
     finalize_name_variants(&templates)
 }
@@ -246,6 +255,258 @@ fn has_special_name_structure(canonical: &str, tokens: &[&str]) -> bool {
             .iter()
             .take(tokens.len().saturating_sub(1))
             .any(|token| is_surname_particle_token(token))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameTokenRole {
+    Given,
+    Surname,
+}
+
+fn add_role_aware_alias_templates(
+    parts: &NameParts,
+    template_seen: &mut BTreeSet<String>,
+    templates: &mut Vec<String>,
+) {
+    if parts.given_tokens.is_empty() || parts.surname_tokens.is_empty() {
+        return;
+    }
+    let given_side = expand_role_side_variants(&parts.given_tokens, NameTokenRole::Given);
+    let surname_side = expand_role_side_variants(&parts.surname_tokens, NameTokenRole::Surname);
+    if given_side.is_empty() || surname_side.is_empty() {
+        return;
+    }
+
+    let mut combo_count = 0_usize;
+    for given in &given_side {
+        for surname in &surname_side {
+            if combo_count >= MAX_ROLE_COMBINATIONS_PER_ENTRY {
+                return;
+            }
+            push_unique_variant(template_seen, templates, format!("{given} {surname}"));
+            combo_count += 1;
+            if combo_count >= MAX_ROLE_COMBINATIONS_PER_ENTRY {
+                return;
+            }
+            push_unique_variant(template_seen, templates, format!("{surname}, {given}"));
+            combo_count += 1;
+        }
+    }
+}
+
+fn should_add_role_aware_aliases(parts: &NameParts) -> bool {
+    if parts.given_tokens.is_empty() || parts.surname_tokens.is_empty() {
+        return false;
+    }
+    parts.given_tokens.iter().enumerate().any(|(idx, token)| {
+        let allow_aliases = idx == 0_usize;
+        token_has_role_alias_signal(token, NameTokenRole::Given, allow_aliases)
+    }) || parts
+        .surname_tokens
+        .iter()
+        .any(|token| token_has_role_alias_signal(token, NameTokenRole::Surname, true))
+}
+
+fn token_has_role_alias_signal(token: &str, role: NameTokenRole, allow_aliases: bool) -> bool {
+    let normalized = normalize_dictionary_entry(token);
+    if normalized.is_empty() {
+        return false;
+    }
+    if fold_latin_text(&normalized) != normalized {
+        return true;
+    }
+    if normalized.contains('-') {
+        return true;
+    }
+    allow_aliases && !aliases_for_role_token(role, token).is_empty()
+}
+
+fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<String> {
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut per_token_variants = Vec::<Vec<String>>::with_capacity(tokens.len());
+    for (idx, token) in tokens.iter().enumerate() {
+        let allow_aliases = match role {
+            NameTokenRole::Given => idx == 0_usize,
+            NameTokenRole::Surname => true,
+        };
+        let mut expanded = expand_role_token_variants(token, role, allow_aliases);
+        if expanded.len() > MAX_TOKEN_VARIANTS_PER_ROLE {
+            expanded.truncate(MAX_TOKEN_VARIANTS_PER_ROLE);
+        }
+        if expanded.is_empty() {
+            expanded.push(token.clone());
+        }
+        per_token_variants.push(expanded);
+    }
+
+    let mut states = vec![Vec::<String>::new()];
+    for variants in per_token_variants {
+        let mut next = Vec::<Vec<String>>::new();
+        for state in &states {
+            for variant in &variants {
+                let mut joined = state.clone();
+                joined.push(variant.clone());
+                next.push(joined);
+                if next.len() >= MAX_ROLE_SIDE_VARIANTS {
+                    break;
+                }
+            }
+            if next.len() >= MAX_ROLE_SIDE_VARIANTS {
+                break;
+            }
+        }
+        states = next;
+        if states.is_empty() {
+            break;
+        }
+    }
+
+    let mut seen = BTreeSet::<String>::new();
+    let mut out = Vec::<String>::new();
+    for state in states {
+        let phrase = normalize_dictionary_entry(&state.join(" "));
+        if phrase.is_empty() {
+            continue;
+        }
+        if seen.insert(phrase.clone()) {
+            out.push(phrase);
+        }
+        if out.len() >= MAX_ROLE_SIDE_VARIANTS {
+            break;
+        }
+    }
+    if out.is_empty() {
+        let fallback = join_name_tokens(tokens);
+        if !fallback.is_empty() {
+            out.push(fallback);
+        }
+    }
+    out
+}
+
+fn expand_role_token_variants(
+    token: &str,
+    role: NameTokenRole,
+    allow_aliases: bool,
+) -> Vec<String> {
+    let mut seen = BTreeSet::<String>::new();
+    let mut out = Vec::<String>::new();
+    push_unique_variant(&mut seen, &mut out, token.to_owned());
+    add_orthographic_token_variants(token, &mut seen, &mut out);
+
+    if allow_aliases {
+        for alias in aliases_for_role_token(role, token) {
+            push_unique_variant(&mut seen, &mut out, (*alias).to_owned());
+            add_orthographic_token_variants(alias, &mut seen, &mut out);
+            if out.len() >= MAX_TOKEN_VARIANTS_PER_ROLE {
+                break;
+            }
+        }
+    }
+
+    if out.len() > MAX_TOKEN_VARIANTS_PER_ROLE {
+        out.truncate(MAX_TOKEN_VARIANTS_PER_ROLE);
+    }
+    out
+}
+
+fn add_orthographic_token_variants(
+    token: &str,
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<String>,
+) {
+    let normalized = normalize_dictionary_entry(token);
+    if normalized.is_empty() {
+        return;
+    }
+    let folded = fold_latin_text(&normalized);
+    if folded != normalized {
+        push_unique_variant(seen, out, folded.clone());
+    }
+
+    let candidates = [
+        normalized.replace('-', " "),
+        normalized.replace(' ', "-"),
+        normalized.replace('-', ""),
+        normalized.replace(' ', ""),
+        folded.replace('-', " "),
+        folded.replace(' ', "-"),
+    ];
+    for candidate in candidates {
+        if !candidate.is_empty() {
+            push_unique_variant(seen, out, candidate);
+        }
+    }
+}
+
+fn aliases_for_role_token(role: NameTokenRole, token: &str) -> &'static [&'static str] {
+    let key = alias_lookup_key(token);
+    match role {
+        NameTokenRole::Given => given_name_aliases(&key),
+        NameTokenRole::Surname => surname_aliases(&key),
+    }
+}
+
+fn given_name_aliases(key: &str) -> &'static [&'static str] {
+    match key {
+        "leslie" => &["Leslie", "Lesley", "Les"],
+        "lesley" => &["Lesley", "Leslie", "Les"],
+        "les" => &["Les", "Leslie", "Lesley"],
+        "jeanluc" => &["Jean-Luc", "Jean Luc", "Jeanluc"],
+        _ => &[],
+    }
+}
+
+fn surname_aliases(key: &str) -> &'static [&'static str] {
+    match key {
+        "rodgers" => &["Rodgers", "Rogers"],
+        "rogers" => &["Rogers", "Rodgers"],
+        "mucinska" => &["Mucińska", "Mucinska"],
+        "marcinko" => &["Marcinko", "Marcinkova"],
+        "marcinkova" => &["Marcinkova", "Marcinko"],
+        _ => &[],
+    }
+}
+
+fn alias_lookup_key(value: &str) -> String {
+    fold_latin_text(value)
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect::<String>()
+}
+
+fn fold_latin_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        let folded = fold_latin_char(ch);
+        if ch.is_uppercase() {
+            out.push(folded.to_ascii_uppercase());
+        } else {
+            out.push(folded);
+        }
+    }
+    out
+}
+
+fn fold_latin_char(ch: char) -> char {
+    match ch {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => 'a',
+        'ç' | 'ć' | 'č' | 'Ç' | 'Ć' | 'Č' => 'c',
+        'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+        'ł' | 'Ł' => 'l',
+        'ñ' | 'ń' | 'Ñ' | 'Ń' => 'n',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'o',
+        'ś' | 'Ś' => 's',
+        'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
+        'ý' | 'ÿ' | 'Ý' | 'Ÿ' => 'y',
+        'ż' | 'ź' | 'Ž' | 'ž' | 'Ż' | 'Ź' => 'z',
+        _ => ch,
+    }
 }
 
 fn finalize_name_variants(templates: &[String]) -> Vec<String> {
@@ -458,5 +719,42 @@ mod tests {
         assert!(variants
             .iter()
             .any(|value| value.contains("Jean Luc Brunel")));
+    }
+
+    #[test]
+    fn build_dictionary_variants_adds_role_aware_alias_combinations() {
+        let dictionary = vec![
+            "Leslie Wexner".to_owned(),
+            "David Rogers".to_owned(),
+            "Jean-Luc Brunel".to_owned(),
+            "Adriana Ross Mucińska".to_owned(),
+        ];
+        let variants = build_dictionary_variants(&dictionary);
+
+        assert!(variants.iter().any(|value| value == "Les Wexner"));
+        assert!(variants.iter().any(|value| value == "Lesley Wexner"));
+        assert!(variants.iter().any(|value| value == "David Rodgers"));
+        assert!(variants.iter().any(|value| value == "Jean Luc Brunel"));
+        assert!(variants
+            .iter()
+            .any(|value| value == "Adriana Ross Mucinska"));
+    }
+
+    #[test]
+    fn build_dictionary_variants_does_not_mix_first_with_first_or_last_with_last() {
+        let dictionary = vec!["Leslie Wexner".to_owned()];
+        let variants = build_dictionary_variants(&dictionary);
+
+        assert!(!variants.iter().any(|value| value == "Lesley Leslie"));
+        assert!(!variants.iter().any(|value| value == "Wexner Wexner"));
+    }
+
+    #[test]
+    fn build_dictionary_variants_does_not_cross_combine_between_entries() {
+        let dictionary = vec!["Leslie Wexner".to_owned(), "Sarah Kellen".to_owned()];
+        let variants = build_dictionary_variants(&dictionary);
+
+        assert!(!variants.iter().any(|value| value == "Les Kellen"));
+        assert!(!variants.iter().any(|value| value == "Sarah Wexner"));
     }
 }
