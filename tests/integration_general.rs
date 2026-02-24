@@ -41,12 +41,6 @@ fn additional_epstein_files_run_without_file_specific_tuning() {
         Path::new("test_data/EFTA02238592.pdf"),
         Path::new("test_data/EFTA02717423.pdf"),
     ];
-    let dictionary_path = Path::new("assets/names.txt");
-    assert!(
-        dictionary_path.exists(),
-        "missing dictionary input: {}",
-        dictionary_path.display()
-    );
 
     let output_dir = test_output_dir("general_baseline");
     std::fs::create_dir_all(&output_dir)
@@ -54,7 +48,7 @@ fn additional_epstein_files_run_without_file_specific_tuning() {
 
     for input in inputs {
         assert!(input.exists(), "missing test input: {}", input.display());
-        let outputs = run_from_paths(input, &output_dir, Some(dictionary_path), smoke_cfg())
+        let outputs = run_from_paths(input, &output_dir, None, smoke_cfg())
             .unwrap_or_else(|error| panic!("pipeline run failed for {}: {error}", input.display()));
         let report = load_guess_report(&outputs.guesses_path);
         assert!(

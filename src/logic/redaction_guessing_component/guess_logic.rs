@@ -1,6 +1,6 @@
 use super::common::{
-    candidate_char_units, is_list_like_context, is_two_sided_anchor_context,
-    punctuation_context_penalty,
+    anchor_overlap_penalty_pt, candidate_char_units, is_list_like_context,
+    is_two_sided_anchor_context, punctuation_context_penalty,
 };
 use super::joint_assignment::{apply_row_joint_assignment, apply_row_sequence_consensus};
 use super::visual_logic::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
@@ -20,6 +20,8 @@ use crate::types::time::Instant;
 use crate::types::typography_types::{
     TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
 };
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 pub struct RunGuessFromBytesRequest<'a> {
     pub pdf_name: &'a str,
@@ -96,6 +98,10 @@ fn build_report_from_parts_with_fonts_inputs(
     inputs: BuildReportWithFontsInputs<'_>,
     cfg: &GuessConfig,
 ) -> GuessReport {
+    let use_curated_name_prior = inputs
+        .diagnostics
+        .iter()
+        .any(|line| line == "dictionary_source=default_names");
     let guess_anchor_started = Instant::now();
     let (mut guesses, guess_diagnostics) = build_anchor_validated_guesses(
         &inputs.redactions.redactions,
@@ -103,6 +109,7 @@ fn build_report_from_parts_with_fonts_inputs(
         inputs.font_runs,
         &inputs.typography_profile,
         cfg,
+        use_curated_name_prior,
     );
     let guess_anchor_ms = guess_anchor_started.elapsed().as_millis();
     let mut all_diagnostics = inputs.diagnostics;
@@ -283,6 +290,7 @@ const MULTI_SPAN_BOX_ERROR_PAD_PT: f64 = 2.5_f64;
 const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
 const MULTI_SPAN_WIDTH_BAND_LIMIT: usize = 900;
 const SINGLE_SPAN_WIDTH_BAND_LIMIT: usize = 700;
+const CURATED_NAME_PRIOR_BONUS_PT: f64 = 0.30_f64;
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
 
@@ -321,6 +329,7 @@ fn build_anchor_validated_guesses(
     font_runs: &FontRunReport,
     typography_profile: &TypographyProfile,
     cfg: &GuessConfig,
+    use_curated_name_prior: bool,
 ) -> (Vec<RedactionGuess>, Vec<String>) {
     let dictionary_variants = build_dictionary_variants(dictionary);
     let assets = font_runs
@@ -441,6 +450,7 @@ fn build_anchor_validated_guesses(
             &anchor,
             &assets,
             typography_profile,
+            use_curated_name_prior,
         );
         diagnostics.push(format!(
                 "redaction_index={index} page_index={} anchor_mode={} funnel_scanned={} funnel_after_char_units={} funnel_after_context={} funnel_after_shape={} funnel_after_anchor={} funnel_after_box={} funnel_scored={}",
@@ -457,7 +467,7 @@ fn build_anchor_validated_guesses(
         guesses.push(guess);
     }
 
-    apply_cluster_consensus(&mut guesses);
+    apply_cluster_consensus(&mut guesses, use_curated_name_prior);
     let jointly_assigned = apply_row_joint_assignment(&mut guesses);
     apply_row_sequence_consensus(&mut guesses, &jointly_assigned);
     for (index, guess) in guesses.iter().enumerate() {
@@ -508,7 +518,7 @@ fn build_anchor_validated_guesses(
     (guesses, diagnostics)
 }
 
-fn apply_cluster_consensus(guesses: &mut [RedactionGuess]) {
+fn apply_cluster_consensus(guesses: &mut [RedactionGuess], use_effective_candidate_cost: bool) {
     let mut clusters = std::collections::BTreeMap::<GuessClusterKey, Vec<usize>>::new();
     for (index, guess) in guesses.iter().enumerate() {
         if !guess.context.has_anchor_pair || guess.candidates.is_empty() {
@@ -555,7 +565,12 @@ fn apply_cluster_consensus(guesses: &mut [RedactionGuess]) {
                 let entry = aggregate
                     .entry(candidate.text.clone())
                     .or_insert((0.0_f64, 0_u32));
-                entry.0 += (candidate.error_pt as f64) / denom;
+                let candidate_cost = if use_effective_candidate_cost {
+                    (1.0_f64 - candidate.score as f64).clamp(0.0_f64, 1.0_f64)
+                } else {
+                    (candidate.error_pt as f64) / denom
+                };
+                entry.0 += candidate_cost;
                 entry.1 += 1;
             }
         }
@@ -564,8 +579,14 @@ fn apply_cluster_consensus(guesses: &mut [RedactionGuess]) {
         for index in indices {
             let guess = &mut guesses[*index];
             let mut local_error = std::collections::BTreeMap::<String, f64>::new();
+            let denom = (guess.context.tol_pt as f64).max(0.0001_f64);
             for candidate in &guess.candidates {
-                local_error.insert(candidate.text.clone(), candidate.error_pt as f64);
+                let candidate_cost = if use_effective_candidate_cost {
+                    (1.0_f64 - candidate.score as f64).clamp(0.0_f64, 1.0_f64)
+                } else {
+                    (candidate.error_pt as f64) / denom
+                };
+                local_error.insert(candidate.text.clone(), candidate_cost);
             }
 
             guess.candidates.sort_by(|left_candidate, right_candidate| {
@@ -672,6 +693,7 @@ fn build_guess_for_anchor(
     anchor: &AnchorPairData,
     assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
+    use_curated_name_prior: bool,
 ) -> (RedactionGuess, CandidateFunnelMetrics) {
     let mut funnel = CandidateFunnelMetrics::default();
     let asset = assets.get(&anchor.font_key);
@@ -799,6 +821,17 @@ fn build_guess_for_anchor(
         .max(anchor.epsilon_pt.max(2.5_f64));
     let list_like_context =
         is_list_like_context(&anchor.left_anchor_text, &anchor.right_anchor_text);
+    let raw_left_context = redaction
+        .underlying_text
+        .first()
+        .map(|hit| hit.text.as_str())
+        .unwrap_or("");
+    let raw_right_context = redaction
+        .underlying_text
+        .get(1)
+        .map(|hit| hit.text.as_str())
+        .unwrap_or("");
+    let raw_list_like_context = is_list_like_context(raw_left_context, raw_right_context);
     if multi_span_mode {
         let lower_width = (redaction_width_pt - box_filter_limit_pt).max(0.0_f64);
         let upper_width = redaction_width_pt + box_filter_limit_pt;
@@ -851,7 +884,28 @@ fn build_guess_for_anchor(
                 &anchor.right_anchor_text,
                 trimmed,
             );
-            let effective_err = raw_err + context_penalty;
+            let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
+                anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
+            } else {
+                0.0_f64
+            };
+            let list_shape_penalty = if use_curated_name_prior
+                && raw_list_like_context
+                && trimmed.split_whitespace().count() == 3
+            {
+                0.18_f64
+            } else {
+                0.0_f64
+            };
+            let curated_bonus = if use_curated_name_prior && raw_list_like_context {
+                curated_name_prior_bonus_pt(trimmed)
+            } else {
+                0.0_f64
+            };
+            let effective_err =
+                (raw_err + context_penalty + raw_context_overlap_penalty + list_shape_penalty
+                    - curated_bonus)
+                    .max(0.0_f64);
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
                 raw_error_pt: raw_err,
@@ -939,7 +993,28 @@ fn build_guess_for_anchor(
                 &anchor.right_anchor_text,
                 trimmed,
             );
-            let effective_err = raw_err + context_penalty;
+            let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
+                anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
+            } else {
+                0.0_f64
+            };
+            let list_shape_penalty = if use_curated_name_prior
+                && raw_list_like_context
+                && trimmed.split_whitespace().count() == 3
+            {
+                0.18_f64
+            } else {
+                0.0_f64
+            };
+            let curated_bonus = if use_curated_name_prior && raw_list_like_context {
+                curated_name_prior_bonus_pt(trimmed)
+            } else {
+                0.0_f64
+            };
+            let effective_err =
+                (raw_err + context_penalty + raw_context_overlap_penalty + list_shape_penalty
+                    - curated_bonus)
+                    .max(0.0_f64);
             scored.push(ScoredDictionaryCandidate {
                 text: trimmed.to_owned(),
                 raw_error_pt: raw_err,
@@ -1954,5 +2029,30 @@ fn looks_like_alpha_phrase_candidate(text: &str) -> bool {
             && word
                 .chars()
                 .all(|ch| ch.is_ascii_alphabetic() || ch == '-' || ch == '\'')
+    })
+}
+
+fn curated_name_prior_bonus_pt(candidate: &str) -> f64 {
+    let normalized = candidate.trim().to_ascii_uppercase();
+    if normalized.is_empty() {
+        return 0.0_f64;
+    }
+    let curated = curated_name_prior_set();
+    if curated.contains(&normalized) {
+        CURATED_NAME_PRIOR_BONUS_PT
+    } else {
+        0.0_f64
+    }
+}
+
+fn curated_name_prior_set() -> &'static BTreeSet<String> {
+    static CURATED: OnceLock<BTreeSet<String>> = OnceLock::new();
+    CURATED.get_or_init(|| {
+        include_str!("../../../assets/names.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_ascii_uppercase())
+            .collect::<BTreeSet<_>>()
     })
 }

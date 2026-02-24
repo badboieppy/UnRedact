@@ -146,8 +146,16 @@ fn extract_text_runs(page_index: u32, ops: &[lopdf::content::Operation]) -> Vec<
                     .unwrap_or(st.font_size);
             }
             "Tm" => {
-                st.tm_e = op.operands.get(4).and_then(object_to_f32).unwrap_or(st.tm_e);
-                st.tm_f = op.operands.get(5).and_then(object_to_f32).unwrap_or(st.tm_f);
+                st.tm_e = op
+                    .operands
+                    .get(4)
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.tm_e);
+                st.tm_f = op
+                    .operands
+                    .get(5)
+                    .and_then(object_to_f32)
+                    .unwrap_or(st.tm_f);
             }
             "Td" | "TD" => {
                 let dx = op.operands.first().and_then(object_to_f32).unwrap_or(0.0);

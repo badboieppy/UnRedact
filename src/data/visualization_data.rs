@@ -355,108 +355,96 @@ fn push_anchor_pair_overlays(
     } = input;
     let context_left = guess.context.left_anchor_text.trim();
     let context_right = guess.context.right_anchor_text.trim();
-    if context_left.is_empty() || context_right.is_empty() {
+    let selected_text = selected_text.trim();
+    if selected_text.is_empty() {
         return false;
     }
+    let left_text = redaction
+        .underlying_text
+        .first()
+        .map(|hit| hit.text.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(context_left);
+    let right_text = redaction
+        .underlying_text
+        .get(1)
+        .map(|hit| hit.text.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(context_right);
+    if left_text.is_empty() || right_text.is_empty() {
+        return false;
+    }
+
+    // Contract: anchor-pair visualization must be one joined text run that reuses
+    // left-anchor typography and origin when available. Split overlays or inferred
+    // x/style drift can cause the blue overlay text to overlap itself.
+    let left_anchor_run = select_run_by_text(runs, redaction.page_index, left_text, left_bbox)
+        .or_else(|| select_run_by_bbox(runs, redaction.page_index, left_bbox));
+    let right_anchor_run = select_run_by_text(runs, redaction.page_index, right_text, right_bbox)
+        .or_else(|| select_run_by_bbox(runs, redaction.page_index, right_bbox));
+
     let anchor_left_x = guess.context.anchor_left_x;
-    let anchor_right_x = guess.context.anchor_right_x;
     let anchor_font_key = guess.context.anchor_font_key.as_deref();
     let anchor_font_size = guess.context.anchor_font_size_pt;
     let anchor_h_scale = guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32);
-    let anchor_row_bias = guess.context.anchor_row_bias_pt.unwrap_or(0.0_f32);
-    let (Some(left_x), Some(font_key), Some(font_size_pt)) =
-        (anchor_left_x, anchor_font_key, anchor_font_size)
+    let fallback_style = match (anchor_font_key, anchor_font_size) {
+        (Some(font_key), Some(font_size_pt))
+            if font_size_pt.is_finite() && font_size_pt > 0.0_f32 =>
+        {
+            Some((font_key.to_owned(), font_size_pt, anchor_h_scale))
+        }
+        _ => None,
+    };
+    let Some((font_key, font_size_pt, h_scale_pct)) = left_anchor_run
+        .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct))
+        .or(fallback_style)
     else {
         return false;
     };
-    if !font_size_pt.is_finite() || font_size_pt <= 0.0_f32 {
+    let left_x = left_anchor_run.map(|run| run.bbox.x0).or(anchor_left_x);
+    let Some(left_x) = left_x else {
         return false;
-    }
-
-    let left_width = text_width_pt(
-        redaction.page_index,
-        font_key,
-        font_size_pt,
-        anchor_h_scale,
-        context_left,
-        assets,
-        width_map,
-    );
-    let space_width = text_width_pt(
-        redaction.page_index,
-        font_key,
-        font_size_pt,
-        anchor_h_scale,
-        " ",
-        assets,
-        width_map,
-    );
-    let guess_width = text_width_pt(
-        redaction.page_index,
-        font_key,
-        font_size_pt,
-        anchor_h_scale,
-        selected_text,
-        assets,
-        width_map,
-    );
-    let nominal_guess_x = left_x + left_width + space_width + anchor_row_bias;
-    let nominal_right_x = nominal_guess_x + guess_width + space_width;
-    let (guess_x, right_x) = match anchor_right_x {
-        Some(x) if x.is_finite() => {
-            let delta = x - nominal_right_x;
-            (nominal_guess_x + delta, x)
-        }
-        _ => (nominal_guess_x, nominal_right_x),
     };
 
-    let anchor_run = select_run_by_text(runs, redaction.page_index, context_left, left_bbox)
-        .or_else(|| select_run_by_text(runs, redaction.page_index, context_right, right_bbox))
-        .or_else(|| select_run_by_bbox(runs, redaction.page_index, left_bbox))
-        .or_else(|| select_run_by_bbox(runs, redaction.page_index, right_bbox));
-    let y0 = anchor_run
+    let joined_text = format!("{left_text} {selected_text} {right_text}");
+    let joined_width = text_width_pt(
+        redaction.page_index,
+        &font_key,
+        font_size_pt,
+        h_scale_pct,
+        &joined_text,
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
+
+    let y0 = left_anchor_run
         .map(|run| run.bbox.y0)
+        .or_else(|| right_anchor_run.map(|run| run.bbox.y0))
+        .or_else(|| left_bbox.map(|bbox| bbox.y0))
+        .or_else(|| right_bbox.map(|bbox| bbox.y0))
         .unwrap_or(redaction.bbox.y0);
-    let y1 = anchor_run
+    let y1 = left_anchor_run
         .map(|run| run.bbox.y1)
+        .or_else(|| right_anchor_run.map(|run| run.bbox.y1))
+        .or_else(|| left_bbox.map(|bbox| bbox.y1))
+        .or_else(|| right_bbox.map(|bbox| bbox.y1))
         .unwrap_or(redaction.bbox.y1);
 
     let overlay_bbox = Rect::new(
         left_x.min(redaction.bbox.x0),
         y0.min(redaction.bbox.y0),
-        right_x.max(redaction.bbox.x1),
+        (left_x + joined_width).max(redaction.bbox.x1),
         y1.max(redaction.bbox.y1),
     );
     overlays.push(TextOverlay {
         redaction_index: Some(redaction_index),
         page_index: redaction.page_index,
-        text: context_left.to_owned(),
-        font_key: font_key.to_owned(),
+        text: joined_text,
+        font_key,
         font_size_pt,
-        h_scale_pct: anchor_h_scale,
+        h_scale_pct,
         x: left_x,
-        y: y1,
-        bbox: overlay_bbox,
-    });
-    overlays.push(TextOverlay {
-        redaction_index: Some(redaction_index),
-        page_index: redaction.page_index,
-        text: selected_text.to_owned(),
-        font_key: font_key.to_owned(),
-        font_size_pt,
-        h_scale_pct: anchor_h_scale,
-        x: guess_x,
-        y: y1,
-        bbox: overlay_bbox,
-    });
-    overlays.push(TextOverlay {
-        redaction_index: Some(redaction_index),
-        page_index: redaction.page_index,
-        text: context_right.to_owned(),
-        font_key: font_key.to_owned(),
-        font_size_pt,
-        h_scale_pct: anchor_h_scale,
-        x: right_x,
         y: y1,
         bbox: overlay_bbox,
     });
@@ -784,11 +772,11 @@ fn deref_to_dict<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'do
 
 #[cfg(test)]
 mod tests {
-    use super::VisualizationData;
-    use crate::types::file_types::FontRunReport;
+    use super::{build_font_width_map, text_width_pt, VisualizationData};
+    use crate::types::file_types::{FontRunReport, FontTextRun, Rect as FontRect};
     use crate::types::guess_types::{GuessCandidate, GuessContext, GuessReport, RedactionGuess};
     use crate::types::redaction_types::{
-        Rect, RedactionKind, RedactionOccurrence, RedactionReport,
+        Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,
     };
     use crate::types::visualizer_config::VisualizerConfig;
 
@@ -809,7 +797,39 @@ mod tests {
         }
     }
 
+    fn sample_anchor_pair_report() -> RedactionReport {
+        RedactionReport {
+            input: "x.pdf".to_owned(),
+            redactions: vec![RedactionOccurrence {
+                page_index: 0_u32,
+                bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
+                kind: RedactionKind::RasterDarkRegion,
+                score: 1.0_f32,
+                meta: std::collections::BTreeMap::new(),
+                underlying_text: vec![
+                    UnderlyingTextHit {
+                        page_index: 0_u32,
+                        bbox: Rect::new(104.0_f32, 208.0_f32, 150.0_f32, 219.0_f32),
+                        text: "including".to_owned(),
+                    },
+                    UnderlyingTextHit {
+                        page_index: 0_u32,
+                        bbox: Rect::new(214.0_f32, 208.0_f32, 232.0_f32, 219.0_f32),
+                        text: "and".to_owned(),
+                    },
+                ],
+            }],
+            count: 1_u32,
+            page_counts: std::collections::BTreeMap::from([(0_u32, 1_u32)]),
+            diagnostics: vec![],
+        }
+    }
+
     fn sample_guesses() -> GuessReport {
+        sample_guesses_with_candidate("SARAH KELLEN")
+    }
+
+    fn sample_guesses_with_candidate(top_text: &str) -> GuessReport {
         GuessReport {
             input_redactions: String::new(),
             input_fonts: String::new(),
@@ -817,7 +837,7 @@ mod tests {
                 page_index: 0_u32,
                 bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
                 candidates: vec![GuessCandidate {
-                    text: "SARAH KELLEN".to_owned(),
+                    text: top_text.to_owned(),
                     score: 1.0_f32,
                     error_pt: 0.0_f32,
                     word_count: 2_u32,
@@ -864,6 +884,43 @@ mod tests {
         }
     }
 
+    fn sample_font_runs_with_anchor_row() -> FontRunReport {
+        FontRunReport {
+            input: "x.pdf".to_owned(),
+            runs: vec![
+                FontTextRun {
+                    page_index: 0_u32,
+                    text: "including".to_owned(),
+                    bbox: FontRect::new(104.0_f32, 208.0_f32, 150.0_f32, 219.0_f32),
+                    font_key: "F_anchor".to_owned(),
+                    font_name: "AnchorFont".to_owned(),
+                    font_size_pt: 11.0_f32,
+                    h_scale_pct: 96.0_f32,
+                    measured_width_pt: None,
+                    measured_width_px: None,
+                    measured_dpi: None,
+                    char_advances_pt: vec![],
+                    char_advances_px: vec![],
+                },
+                FontTextRun {
+                    page_index: 0_u32,
+                    text: "and".to_owned(),
+                    bbox: FontRect::new(214.0_f32, 208.0_f32, 232.0_f32, 219.0_f32),
+                    font_key: "F_anchor".to_owned(),
+                    font_name: "AnchorFont".to_owned(),
+                    font_size_pt: 11.0_f32,
+                    h_scale_pct: 96.0_f32,
+                    measured_width_pt: None,
+                    measured_width_px: None,
+                    measured_dpi: None,
+                    char_advances_pt: vec![],
+                    char_advances_px: vec![],
+                },
+            ],
+            assets: vec![],
+        }
+    }
+
     fn sample_pdf_bytes() -> Vec<u8> {
         let input = std::path::Path::new("test_data/EFTA00101126.pdf");
         std::fs::read(input)
@@ -887,13 +944,13 @@ mod tests {
             .expect("visualization inputs should load");
 
         assert_eq!(inputs.rects.len(), 1_usize);
-        assert_eq!(inputs.overlays.len(), 3_usize);
+        assert_eq!(inputs.overlays.len(), 1_usize);
         let text = inputs
             .overlays
             .iter()
             .map(|overlay| overlay.text.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(text, vec!["including", "SARAH KELLEN", "and"]);
+        assert_eq!(text, vec!["including SARAH KELLEN and"]);
     }
 
     #[test]
@@ -926,5 +983,75 @@ mod tests {
             .expect("visualization inputs should load");
         assert_eq!(inputs.rects.len(), 1_usize);
         assert!(inputs.overlays.is_empty());
+    }
+
+    #[test]
+    fn anchor_pair_overlay_uses_joined_text_with_anchor_typography() {
+        let data = VisualizationData::new();
+        let report = sample_report();
+        let guesses = sample_guesses_with_candidate("EDWARD JAY EPSTEIN EDWARD JAY EPSTEIN");
+        let font_runs = sample_font_runs();
+        let pdf_bytes = sample_pdf_bytes();
+
+        let inputs = data
+            .load_inputs_from_bytes(&pdf_bytes, &report, Some(&guesses), Some(&font_runs))
+            .expect("visualization inputs should load");
+        assert_eq!(inputs.overlays.len(), 1_usize);
+        let overlay = &inputs.overlays[0];
+        assert_eq!(
+            overlay.text,
+            "including EDWARD JAY EPSTEIN EDWARD JAY EPSTEIN and"
+        );
+
+        let width_map = build_font_width_map(&pdf_bytes).expect("width map should load");
+        let assets =
+            std::collections::BTreeMap::<String, crate::types::file_types::FontAsset>::new();
+        let joined_width = text_width_pt(
+            overlay.page_index,
+            &overlay.font_key,
+            overlay.font_size_pt,
+            overlay.h_scale_pct,
+            &overlay.text,
+            &assets,
+            &width_map,
+        );
+        assert!(
+            joined_width > 0.0_f32,
+            "joined anchor overlay width should be measurable"
+        );
+        assert!(
+            (overlay.h_scale_pct - 100.0_f32).abs() <= 0.001_f32,
+            "joined anchor overlay should preserve anchor h-scale"
+        );
+    }
+
+    #[test]
+    fn anchor_pair_overlay_prefers_left_anchor_run_origin_and_style() {
+        let data = VisualizationData::new();
+        let report = sample_anchor_pair_report();
+        let mut guesses = sample_guesses();
+        guesses.guesses[0].context.anchor_left_x = Some(80.0_f32);
+        guesses.guesses[0].context.anchor_font_key = Some("F_wrong".to_owned());
+        guesses.guesses[0].context.anchor_font_size_pt = Some(17.0_f32);
+        guesses.guesses[0].context.anchor_h_scale_pct = Some(82.0_f32);
+        let font_runs = sample_font_runs_with_anchor_row();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+
+        assert_eq!(inputs.overlays.len(), 1_usize);
+        let overlay = &inputs.overlays[0];
+        assert_eq!(overlay.text, "including SARAH KELLEN and");
+        assert!((overlay.x - 104.0_f32).abs() <= 0.001_f32);
+        assert!((overlay.y - 219.0_f32).abs() <= 0.001_f32);
+        assert_eq!(overlay.font_key, "F_anchor");
+        assert!((overlay.font_size_pt - 11.0_f32).abs() <= 0.001_f32);
+        assert!((overlay.h_scale_pct - 96.0_f32).abs() <= 0.001_f32);
     }
 }

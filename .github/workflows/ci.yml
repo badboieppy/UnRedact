@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Benchmark smoke - guess accuracy
+        run: >
+          cargo run --features cli-entry --bin guess_accuracy_benchmark --
+          --out benchmark/ci_guess_accuracy.json
+          --repeats 1
+
+      - name: Benchmark smoke - visual score impact
+        run: >
+          cargo run --features cli-entry --bin visual_score_impact_benchmark --
+          --input test_data/EFTA00038617.pdf
+          --page 2
+          --trials 1
+          --targets-per-trial 2
+          --dictionary-size 256
+          --out benchmark/ci_visual_score_impact.json
+
+  wasm-warning-free:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check wasm build with warnings denied
+        env:
+          RUSTFLAGS: -D warnings
+        run: >
+          cargo check
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features shared-bytes-workflow,web-entry

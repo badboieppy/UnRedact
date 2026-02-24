@@ -311,14 +311,7 @@ fn efta00101126_last_two_redactions_include_sarah_kellen_uppercase() {
         visualizer: VisualizerConfig::default(),
     };
 
-    let dictionary_path = Path::new("assets/names.txt");
-    assert!(
-        dictionary_path.exists(),
-        "missing dictionary input: {}",
-        dictionary_path.display()
-    );
-
-    let run_result = run_from_paths(input, &output_dir, Some(dictionary_path), cfg);
+    let run_result = run_from_paths(input, &output_dir, None, cfg);
     assert!(
         run_result.is_ok(),
         "pipeline run failed: {:?}",
@@ -357,5 +350,67 @@ fn efta00101126_last_two_redactions_include_sarah_kellen_uppercase() {
         last_top_exact,
         Some("SARAH KELLEN"),
         "last top exact mismatch"
+    );
+}
+
+#[test]
+fn efta00101126_anchor_pair_visualization_contract_uses_single_overlay_run() {
+    let input = Path::new("test_data/EFTA00101126.pdf");
+    assert!(input.exists(), "missing test input: {}", input.display());
+
+    let output_dir = test_output_dir("efta00101126_visual_contract");
+    if output_dir.exists() {
+        let remove_result = std::fs::remove_dir_all(&output_dir);
+        assert!(
+            remove_result.is_ok(),
+            "failed to clean output dir {}: {:?}",
+            output_dir.display(),
+            remove_result.err()
+        );
+    }
+
+    let cfg = UnredactServiceConfig {
+        include_details: false,
+        enable_image_analysis: true,
+        guess: GuessConfig {
+            visual_score: true,
+            ..GuessConfig::default()
+        },
+        visualize: true,
+        visualizer: VisualizerConfig::default(),
+    };
+    let run_result = run_from_paths(input, &output_dir, None, cfg);
+    assert!(
+        run_result.is_ok(),
+        "pipeline run failed: {:?}",
+        run_result.err()
+    );
+    let outputs = run_result.expect("pipeline run should succeed in test");
+    let guesses = load_guess_report(&outputs.guesses_path);
+    assert!(guesses.guesses.len() >= 2, "expected at least 2 guesses");
+    let second_last = &guesses.guesses[guesses.guesses.len() - 2];
+    let last = &guesses.guesses[guesses.guesses.len() - 1];
+    assert!(second_last.context.has_anchor_pair);
+    assert!(last.context.has_anchor_pair);
+
+    let visualized_path = outputs
+        .visualized_pdf_path
+        .as_ref()
+        .expect("visualized path should exist when visualize=true");
+    let visualized_bytes = std::fs::read(visualized_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read visualized pdf {}: {error}",
+            visualized_path.display()
+        )
+    });
+    let joined = b"including SARAH KELLEN and";
+    let joined_count = visualized_bytes
+        .windows(joined.len())
+        .filter(|window| *window == joined)
+        .count();
+    assert!(
+        joined_count >= 2,
+        "expected at least two joined anchor-pair overlays, found {}",
+        joined_count
     );
 }

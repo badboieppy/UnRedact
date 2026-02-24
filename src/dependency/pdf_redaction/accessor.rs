@@ -92,7 +92,8 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
         config: RedactionFinderConfig,
     ) -> Result<Vec<RedactionOccurrence>, String> {
         let pid = self.page_id(page_index)?;
-        let opts = DrawScanOptions::page_level(config.include_details, config.include_full_page_rects);
+        let opts =
+            DrawScanOptions::page_level(config.include_details, config.include_full_page_rects);
         extract_page_drawn_redactions(&self.doc, pid, page_index, opts)
     }
 
@@ -110,10 +111,9 @@ impl<'renderer> RedactionDataRetriever for PdfFileRetriever<'renderer> {
         };
 
         let pid = self.page_id(page_index)?;
-        let page_box =
-            page_render_box_from_page(&self.doc, pid).unwrap_or(crate::types::redaction_types::Rect::new(
-                0.0, 0.0, 612.0, 792.0,
-            ));
+        let page_box = page_render_box_from_page(&self.doc, pid).unwrap_or(
+            crate::types::redaction_types::Rect::new(0.0, 0.0, 612.0, 792.0),
+        );
         extract_raster_page_redactions(renderer, page_index, page_box, &config)
     }
 
@@ -138,7 +138,11 @@ mod tests {
         fn page_count(&self) -> usize {
             self.page_count
         }
-        fn render_page_to_rgba(&self, _page_index: usize, dpi: f32) -> Result<RenderedPage, String> {
+        fn render_page_to_rgba(
+            &self,
+            _page_index: usize,
+            dpi: f32,
+        ) -> Result<RenderedPage, String> {
             let mut p = self.page.clone();
             p.dpi = dpi;
             Ok(p)

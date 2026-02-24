@@ -200,7 +200,10 @@ fn extract_drawn_from_ops(
                         options.detail.insert_owned(
                             &mut meta,
                             "fill_rgb",
-                            format!("{:.3},{:.3},{:.3}", state.fill_r, state.fill_g, state.fill_b),
+                            format!(
+                                "{:.3},{:.3},{:.3}",
+                                state.fill_r, state.fill_g, state.fill_b
+                            ),
                         );
                         options
                             .detail
@@ -238,7 +241,10 @@ fn extract_drawn_from_ops(
                         options.detail.insert_owned(
                             &mut meta,
                             "fill_rgb",
-                            format!("{:.3},{:.3},{:.3}", state.fill_r, state.fill_g, state.fill_b),
+                            format!(
+                                "{:.3},{:.3},{:.3}",
+                                state.fill_r, state.fill_g, state.fill_b
+                            ),
                         );
                         out.push(RedactionOccurrence {
                             page_index,
@@ -328,9 +334,18 @@ impl DrawState {
     }
 
     fn set_fill_rgb(mut self, operands: &[Object]) -> Self {
-        let r = operands.first().and_then(object_to_f32).unwrap_or(self.fill_r);
-        let g = operands.get(1).and_then(object_to_f32).unwrap_or(self.fill_g);
-        let b = operands.get(2).and_then(object_to_f32).unwrap_or(self.fill_b);
+        let r = operands
+            .first()
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_r);
+        let g = operands
+            .get(1)
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_g);
+        let b = operands
+            .get(2)
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_b);
         self.fill_r = r;
         self.fill_g = g;
         self.fill_b = b;
@@ -350,10 +365,22 @@ impl DrawState {
     }
 
     fn set_fill_cmyk(mut self, operands: &[Object]) -> Self {
-        let c = operands.first().and_then(object_to_f32).unwrap_or(self.fill_c);
-        let m = operands.get(1).and_then(object_to_f32).unwrap_or(self.fill_m);
-        let y = operands.get(2).and_then(object_to_f32).unwrap_or(self.fill_y);
-        let k = operands.get(3).and_then(object_to_f32).unwrap_or(self.fill_k);
+        let c = operands
+            .first()
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_c);
+        let m = operands
+            .get(1)
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_m);
+        let y = operands
+            .get(2)
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_y);
+        let k = operands
+            .get(3)
+            .and_then(object_to_f32)
+            .unwrap_or(self.fill_k);
         self.fill_c = c;
         self.fill_m = m;
         self.fill_y = y;

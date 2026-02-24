@@ -594,5 +594,3 @@ fn build_phrase_hit(
         text: words.join(" "),
     }
 }
-
-

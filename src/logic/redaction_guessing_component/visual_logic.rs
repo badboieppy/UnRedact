@@ -20,7 +20,7 @@ const MAX_VISUAL_SCORE_DPI: f32 = 72.0_f32;
 const VISUAL_TILE_PAGE_PADDING_PT: f32 = 8.0_f32;
 const VISUAL_TILE_MAX_COVERAGE_FOR_CROP: f32 = 0.92_f32;
 const VISUAL_RERANK_TOP_K: usize = 3;
-const VISUAL_RERANK_MAX_EVAL_CANDIDATES: usize = 8;
+const VISUAL_RERANK_MAX_EVAL_CANDIDATES: usize = 32;
 const VISUAL_RERANK_BLEND_WEIGHT: f32 = 0.92_f32;
 const VISUAL_RERANK_MAX_BASE_GAP: f32 = 0.10_f32;
 const VISUAL_RERANK_MAX_TOP_SCORE: f32 = 0.90_f32;
@@ -176,18 +176,31 @@ fn apply_visual_scores_with_inputs(
     };
     let annotate_context_ms = 0_u128;
     let page_crop_boxes = build_visual_page_crop_boxes(&overlays_by_redaction, &page_boxes);
+    let mut crop_fallback_reason: Option<String> = None;
     let (base_pdf_bytes_for_visual, overlay_pdf_bytes_for_visual, crop_apply_ms) =
         if page_crop_boxes.is_empty() {
             (inputs.pdf_bytes.clone(), annotated_bytes.clone(), 0_u128)
         } else {
             let crop_started = Instant::now();
-            let base_cropped = apply_page_crop_boxes(&inputs.pdf_bytes, &page_crop_boxes)?;
-            let overlay_cropped = apply_page_crop_boxes(&annotated_bytes, &page_crop_boxes)?;
-            (
-                base_cropped,
-                overlay_cropped,
-                crop_started.elapsed().as_millis(),
-            )
+            let base_cropped = apply_page_crop_boxes(&inputs.pdf_bytes, &page_crop_boxes);
+            let overlay_cropped = apply_page_crop_boxes(&annotated_bytes, &page_crop_boxes);
+            match (base_cropped, overlay_cropped) {
+                (Ok(base_pdf), Ok(overlay_pdf)) => {
+                    (base_pdf, overlay_pdf, crop_started.elapsed().as_millis())
+                }
+                (base_result, overlay_result) => {
+                    let base_error = base_result.err().unwrap_or_else(|| "none".to_owned());
+                    let overlay_error = overlay_result.err().unwrap_or_else(|| "none".to_owned());
+                    crop_fallback_reason = Some(format!(
+                        "visual_crop_fallback base_error={base_error} overlay_error={overlay_error}"
+                    ));
+                    (
+                        inputs.pdf_bytes.clone(),
+                        annotated_bytes.clone(),
+                        crop_started.elapsed().as_millis(),
+                    )
+                }
+            }
         };
     let mut scoring_page_boxes = page_boxes.clone();
     for (page_index, crop_box) in &page_crop_boxes {
@@ -425,6 +438,9 @@ fn apply_visual_scores_with_inputs(
             .unwrap_or_else(|| "none".to_owned()),
         CONTEXT_ALIGNMENT_MAX_DIFF
     ));
+    if let Some(reason) = crop_fallback_reason {
+        diagnostics.push(reason);
+    }
     let rerank_changed_ratio = if rerank_rows_scored == 0 {
         0.0_f64
     } else {
@@ -649,7 +665,7 @@ fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) ->
     if overlays.len() < 3 {
         return false;
     }
-    if !guess.exact_matches.is_empty() {
+    if guess.exact_matches.len() == 1 {
         return false;
     }
     let mut ordered = overlays.to_vec();
@@ -677,7 +693,8 @@ fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) ->
     if !top.is_finite() || !second.is_finite() {
         return false;
     }
-    if top > VISUAL_RERANK_MAX_TOP_SCORE {
+    let has_ambiguous_exact = guess.exact_matches.len() > 1;
+    if top > VISUAL_RERANK_MAX_TOP_SCORE && !has_ambiguous_exact {
         return false;
     }
     (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP

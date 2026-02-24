@@ -319,7 +319,7 @@ mod tests {
         let outputs = run_batch_from_paths(
             &input_dir,
             &output_dir,
-            Some(Path::new("assets/names.txt")),
+            None,
             UnredactServiceConfig::default(),
         )
         .expect("batch run should succeed");
