@@ -1,5 +1,7 @@
 use lopdf::{Dictionary, Document, Object};
+use serde::Deserialize;
 
+use crate::data::redaction_scan_data::CONTEXT_SPANS_META_KEY;
 use crate::dependency::pdf_annotator::PdfAnnotator;
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::{GuessReport, RedactionGuess};
@@ -13,6 +15,11 @@ const RASTER_TEXT_PADDING_PT: f32 = 1.0_f32;
 const RASTER_MAX_FONT_TO_BOX_HEIGHT: f32 = 0.72_f32;
 const RASTER_MIN_FONT_SIZE_PT: f32 = 4.5_f32;
 const RASTER_BASELINE_ASCENT_RATIO: f32 = 0.70_f32;
+const OVERLAY_MULTILINE_LEADING_RATIO: f32 = 1.15_f32;
+const OVERLAY_CONTEXT_LINE_BUCKET_PT: f32 = 2.0_f32;
+const OVERLAY_ANCHOR_LINE_TOLERANCE_PT: f32 = 8.0_f32;
+const OVERLAY_ANCHOR_MAX_GAP_PT: f32 = 260.0_f32;
+const OVERLAY_ANCHOR_EDGE_WINDOW_PT: f32 = 24.0_f32;
 
 #[derive(Debug, Clone)]
 pub struct VisualizationInputs {
@@ -41,6 +48,50 @@ struct AnchorPairOverlayInput<'a> {
     runs: &'a [FontTextRun],
     assets: &'a std::collections::BTreeMap<String, FontAsset>,
     width_map: &'a std::collections::BTreeMap<FontWidthKey, FontWidthTable>,
+    force_selected_only: bool,
+}
+
+struct AnchorSelectedOverlayInput<'a> {
+    redaction_index: usize,
+    redaction: &'a crate::types::redaction_types::RedactionOccurrence,
+    selected_text: &'a str,
+    font_key: &'a str,
+    font_size_pt: f32,
+    h_scale_pct: f32,
+    y0: f32,
+    y1: f32,
+    anchor_mode: Option<&'a str>,
+    anchor_left_x: Option<f32>,
+    anchor_right_x: Option<f32>,
+    left_anchor_text: &'a str,
+    right_anchor_text: &'a str,
+    prefer_anchor_placement: bool,
+    assets: &'a std::collections::BTreeMap<String, crate::types::file_types::FontAsset>,
+    width_map: &'a std::collections::BTreeMap<FontWidthKey, FontWidthTable>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorRenderDirection {
+    Prefix,
+    Suffix,
+}
+
+#[derive(Debug, Clone)]
+struct OverlayAnchorCandidate {
+    text: String,
+    bbox: Rect,
+    line_bucket: i32,
+    role_hint: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OverlayContextSpanRecord {
+    text: String,
+    bbox: Rect,
+    #[serde(default)]
+    line_bucket: i32,
+    #[serde(default)]
+    role_hint: String,
 }
 
 impl VisualizationData {
@@ -121,6 +172,8 @@ fn build_overlays(
         .iter()
         .map(|a| (a.font_key.clone(), a.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
+    let dense_anchor_rows = build_dense_anchor_row_flags(report);
+    let dense_row_max_heights = build_dense_row_max_heights(report);
     for idx in 0..max {
         let redaction = &report.redactions[idx];
         let guess = &guesses.guesses[idx];
@@ -129,26 +182,34 @@ fn build_overlays(
             Some(text) => text,
             None => continue,
         };
+        let selected_text = normalize_overlay_line_breaks(selected.trim());
+        if selected_text.is_empty() {
+            continue;
+        }
         let left_hit = redaction.underlying_text.first();
         let right_hit = redaction.underlying_text.get(1);
         let context_left = guess.context.left_anchor_text.trim();
         let context_right = guess.context.right_anchor_text.trim();
 
+        let has_any_anchor_hint = !context_left.is_empty()
+            || !context_right.is_empty()
+            || guess.context.anchor_left_x.is_some()
+            || guess.context.anchor_right_x.is_some();
         if guess.context.has_anchor_pair
-            && !context_left.is_empty()
-            && !context_right.is_empty()
+            && has_any_anchor_hint
             && push_anchor_pair_overlays(
                 &mut out,
                 AnchorPairOverlayInput {
                     redaction_index: idx,
                     redaction,
                     guess,
-                    selected_text: selected.trim(),
+                    selected_text: selected_text.as_str(),
                     left_bbox: left_hit.map(|hit| hit.bbox),
                     right_bbox: right_hit.map(|hit| hit.bbox),
                     runs: &font_runs.runs,
                     assets: &assets,
                     width_map,
+                    force_selected_only: dense_anchor_rows.get(idx).copied().unwrap_or(false),
                 },
             )
         {
@@ -156,6 +217,7 @@ fn build_overlays(
         }
 
         if matches!(redaction.kind, RedactionKind::RasterDarkRegion) {
+            let dense_row = dense_anchor_rows.get(idx).copied().unwrap_or(false);
             let anchor_font = guess.context.anchor_font_key.as_ref().and_then(|font_key| {
                 guess.context.anchor_font_size_pt.map(|font_size_pt| {
                     (
@@ -175,29 +237,54 @@ fn build_overlays(
                 ("F1".to_owned(), 11.0_f32, 100.0_f32)
             };
             let box_height = redaction.bbox.height().abs().max(1.0_f32);
-            let fitted_font_size_pt = requested_font_size_pt
-                .min(box_height * RASTER_MAX_FONT_TO_BOX_HEIGHT)
-                .max(RASTER_MIN_FONT_SIZE_PT);
-            let guess_width = text_width_pt(
+            let effective_box_height = if dense_row {
+                dense_row_max_heights
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(box_height)
+                    .max(box_height)
+            } else {
+                box_height
+            };
+            let fitted_font_size_pt = if dense_row {
+                requested_font_size_pt.max(RASTER_MIN_FONT_SIZE_PT)
+            } else {
+                requested_font_size_pt
+                    .min(effective_box_height * RASTER_MAX_FONT_TO_BOX_HEIGHT)
+                    .max(RASTER_MIN_FONT_SIZE_PT)
+            };
+            let guess_line_count = overlay_line_count(&selected_text);
+            let guess_width = multiline_text_width_pt(
                 redaction.page_index,
                 &font_key,
                 fitted_font_size_pt,
                 h_scale_pct,
-                selected.trim(),
+                &selected_text,
                 &assets,
                 width_map,
             );
-            let layout = raster_overlay_layout(redaction.bbox, fitted_font_size_pt, guess_width);
+            let layout = raster_overlay_layout(
+                redaction.bbox,
+                fitted_font_size_pt,
+                guess_width,
+                guess_line_count,
+            );
+            let line_drop_pt = multiline_extra_line_drop_pt(layout.font_size_pt, guess_line_count);
             out.push(TextOverlay {
                 redaction_index: Some(idx),
                 page_index: redaction.page_index,
-                text: selected.trim().to_owned(),
+                text: selected_text.clone(),
                 font_key,
                 font_size_pt: layout.font_size_pt,
                 h_scale_pct,
                 x: layout.x,
                 y: layout.y,
-                bbox: redaction.bbox,
+                bbox: Rect::new(
+                    redaction.bbox.x0,
+                    (redaction.bbox.y0 - line_drop_pt).min(redaction.bbox.y0),
+                    redaction.bbox.x1,
+                    redaction.bbox.y1,
+                ),
             });
             continue;
         }
@@ -272,12 +359,13 @@ fn build_overlays(
         } else {
             right_run
         };
-        let guess_width = text_width_pt(
+        let guess_line_count = overlay_line_count(&selected_text);
+        let guess_width = multiline_text_width_pt(
             redaction.page_index,
             &guess_font.font_key,
             guess_font.font_size_pt,
             guess_font.h_scale_pct,
-            selected.trim(),
+            &selected_text,
             &assets,
             width_map,
         );
@@ -285,6 +373,8 @@ fn build_overlays(
         let left_x = left_run.bbox.x0;
         let guess_x = left_x + left_width + left_space;
         let right_x = guess_x + guess_width + right_space;
+        let guess_line_drop_pt =
+            multiline_extra_line_drop_pt(guess_font.font_size_pt, guess_line_count);
 
         let overlay_bbox = Rect::new(
             left_x.min(redaction.bbox.x0),
@@ -299,6 +389,12 @@ fn build_overlays(
                 .y1
                 .max(right_run.bbox.y1)
                 .max(redaction.bbox.y1),
+        );
+        let overlay_bbox = Rect::new(
+            overlay_bbox.x0,
+            (overlay_bbox.y0 - guess_line_drop_pt).min(overlay_bbox.y0),
+            right_x.max(redaction.bbox.x1),
+            overlay_bbox.y1,
         );
 
         out.push(TextOverlay {
@@ -315,7 +411,7 @@ fn build_overlays(
         out.push(TextOverlay {
             redaction_index: Some(idx),
             page_index: redaction.page_index,
-            text: selected.trim().to_owned(),
+            text: selected_text.clone(),
             font_key: guess_font.font_key.clone(),
             font_size_pt: guess_font.font_size_pt,
             h_scale_pct: guess_font.h_scale_pct,
@@ -352,10 +448,11 @@ fn push_anchor_pair_overlays(
         runs,
         assets,
         width_map,
+        force_selected_only,
     } = input;
     let context_left = guess.context.left_anchor_text.trim();
     let context_right = guess.context.right_anchor_text.trim();
-    let selected_text = selected_text.trim();
+    let selected_text = normalize_overlay_line_breaks(selected_text.trim());
     if selected_text.is_empty() {
         return false;
     }
@@ -371,17 +468,22 @@ fn push_anchor_pair_overlays(
         .map(|hit| hit.text.trim())
         .filter(|value| !value.is_empty())
         .unwrap_or(context_right);
-    if left_text.is_empty() || right_text.is_empty() {
+    if left_text.is_empty() && right_text.is_empty() {
         return false;
     }
 
-    // Contract: anchor-pair visualization must be one joined text run that reuses
-    // left-anchor typography and origin when available. Split overlays or inferred
-    // x/style drift can cause the blue overlay text to overlap itself.
-    let left_anchor_run = select_run_by_text(runs, redaction.page_index, left_text, left_bbox)
-        .or_else(|| select_run_by_bbox(runs, redaction.page_index, left_bbox));
-    let right_anchor_run = select_run_by_text(runs, redaction.page_index, right_text, right_bbox)
-        .or_else(|| select_run_by_bbox(runs, redaction.page_index, right_bbox));
+    let left_anchor_run = if left_text.is_empty() {
+        None
+    } else {
+        select_run_by_text(runs, redaction.page_index, left_text, left_bbox)
+            .or_else(|| select_run_by_bbox(runs, redaction.page_index, left_bbox))
+    };
+    let right_anchor_run = if right_text.is_empty() {
+        None
+    } else {
+        select_run_by_text(runs, redaction.page_index, right_text, right_bbox)
+            .or_else(|| select_run_by_bbox(runs, redaction.page_index, right_bbox))
+    };
 
     let anchor_left_x = guess.context.anchor_left_x;
     let anchor_font_key = guess.context.anchor_font_key.as_deref();
@@ -395,59 +497,17 @@ fn push_anchor_pair_overlays(
         }
         _ => None,
     };
-    let Some((font_key, font_size_pt, h_scale_pct)) = left_anchor_run
-        .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct))
-        .or(fallback_style)
-    else {
+    let style_from_run = left_anchor_run
+        .or(right_anchor_run)
+        .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
+    let chosen_style = if force_selected_only {
+        fallback_style.or(style_from_run)
+    } else {
+        style_from_run.or(fallback_style)
+    };
+    let Some((font_key, font_size_pt, h_scale_pct)) = chosen_style else {
         return false;
     };
-    let left_x = left_anchor_run.map(|run| run.bbox.x0).or(anchor_left_x);
-    let Some(left_x) = left_x else {
-        return false;
-    };
-
-    let joined_text = format!("{left_text} {selected_text} {right_text}");
-    let joined_width = text_width_pt(
-        redaction.page_index,
-        &font_key,
-        font_size_pt,
-        h_scale_pct,
-        &joined_text,
-        assets,
-        width_map,
-    )
-    .max(0.1_f32);
-    let left_width = text_width_pt(
-        redaction.page_index,
-        &font_key,
-        font_size_pt,
-        h_scale_pct,
-        left_text,
-        assets,
-        width_map,
-    )
-    .max(0.1_f32);
-    let space_width = text_width_pt(
-        redaction.page_index,
-        &font_key,
-        font_size_pt,
-        h_scale_pct,
-        " ",
-        assets,
-        width_map,
-    )
-    .max(0.1_f32);
-    let selected_width = text_width_pt(
-        redaction.page_index,
-        &font_key,
-        font_size_pt,
-        h_scale_pct,
-        selected_text,
-        assets,
-        width_map,
-    )
-    .max(0.1_f32);
-
     let y0 = left_anchor_run
         .map(|run| run.bbox.y0)
         .or_else(|| right_anchor_run.map(|run| run.bbox.y0))
@@ -461,34 +521,112 @@ fn push_anchor_pair_overlays(
         .or_else(|| right_bbox.map(|bbox| bbox.y1))
         .unwrap_or(redaction.bbox.y1);
 
-    let row_right = max_row_right_edge(
-        overlays,
+    let use_joined_pair_overlay = !force_selected_only
+        && !selected_text.contains('\n')
+        && !left_text.is_empty()
+        && !right_text.is_empty()
+        && anchor_context_is_joinable(left_text, right_text);
+    if !use_joined_pair_overlay {
+        return push_anchor_selected_only_overlay(
+            overlays,
+            AnchorSelectedOverlayInput {
+                redaction_index,
+                redaction,
+                selected_text: &selected_text,
+                font_key: &font_key,
+                font_size_pt,
+                h_scale_pct,
+                y0,
+                y1,
+                anchor_mode: guess.context.anchor_mode.as_deref(),
+                anchor_left_x: guess.context.anchor_left_x,
+                anchor_right_x: guess.context.anchor_right_x,
+                left_anchor_text: left_text,
+                right_anchor_text: right_text,
+                prefer_anchor_placement: true,
+                assets,
+                width_map,
+            },
+        );
+    }
+
+    let left_x = left_anchor_run
+        .map(|run| run.bbox.x0)
+        .or(anchor_left_x)
+        .or(guess.context.anchor_right_x);
+    let Some(left_x) = left_x else {
+        return push_anchor_selected_only_overlay(
+            overlays,
+            AnchorSelectedOverlayInput {
+                redaction_index,
+                redaction,
+                selected_text: &selected_text,
+                font_key: &font_key,
+                font_size_pt,
+                h_scale_pct,
+                y0,
+                y1,
+                anchor_mode: guess.context.anchor_mode.as_deref(),
+                anchor_left_x: guess.context.anchor_left_x,
+                anchor_right_x: guess.context.anchor_right_x,
+                left_anchor_text: left_text,
+                right_anchor_text: right_text,
+                prefer_anchor_placement: true,
+                assets,
+                width_map,
+            },
+        );
+    };
+
+    let joined_text =
+        normalize_overlay_line_breaks(&format!("{left_text} {selected_text} {right_text}"));
+    let joined_width = multiline_text_width_pt(
         redaction.page_index,
-        Rect::new(left_x, y0, left_x + joined_width, y1),
-    );
+        &font_key,
+        font_size_pt,
+        h_scale_pct,
+        &joined_text,
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
+
+    let joined_line_count = overlay_line_count(&joined_text);
+    let first_line_bbox = Rect::new(left_x, y0, left_x + joined_width, y1);
+    let row_right = max_row_right_edge(overlays, redaction.page_index, first_line_bbox);
     let overlap_guard_pt = 0.25_f32;
     let joined_overlaps_row = row_right
         .map(|right_edge| left_x + overlap_guard_pt < right_edge)
         .unwrap_or(false);
-    let (text, x, width) = if joined_overlaps_row {
-        let guess_x = left_x + left_width + space_width;
-        let fallback_x = row_right
-            .map(|right_edge| {
-                if guess_x + overlap_guard_pt < right_edge {
-                    right_edge + space_width
-                } else {
-                    guess_x
-                }
-            })
-            .unwrap_or(guess_x);
-        (selected_text.to_owned(), fallback_x, selected_width)
-    } else {
-        (joined_text, left_x, joined_width)
-    };
+    if joined_overlaps_row {
+        return push_anchor_selected_only_overlay(
+            overlays,
+            AnchorSelectedOverlayInput {
+                redaction_index,
+                redaction,
+                selected_text: &selected_text,
+                font_key: &font_key,
+                font_size_pt,
+                h_scale_pct,
+                y0,
+                y1,
+                anchor_mode: guess.context.anchor_mode.as_deref(),
+                anchor_left_x: guess.context.anchor_left_x,
+                anchor_right_x: guess.context.anchor_right_x,
+                left_anchor_text: left_text,
+                right_anchor_text: right_text,
+                prefer_anchor_placement: true,
+                assets,
+                width_map,
+            },
+        );
+    }
+    let (text, x, width, line_count) = (joined_text, left_x, joined_width, joined_line_count);
+    let line_drop_pt = multiline_extra_line_drop_pt(font_size_pt, line_count);
 
     let overlay_bbox = Rect::new(
         x,
-        y0.min(redaction.bbox.y0),
+        (y0 - line_drop_pt).min(redaction.bbox.y0),
         x + width,
         y1.max(redaction.bbox.y1),
     );
@@ -506,33 +644,556 @@ fn push_anchor_pair_overlays(
     true
 }
 
+fn push_anchor_selected_only_overlay(
+    overlays: &mut Vec<TextOverlay>,
+    input: AnchorSelectedOverlayInput<'_>,
+) -> bool {
+    let AnchorSelectedOverlayInput {
+        redaction_index,
+        redaction,
+        selected_text,
+        font_key,
+        font_size_pt,
+        h_scale_pct,
+        y0,
+        y1,
+        anchor_mode,
+        anchor_left_x,
+        anchor_right_x,
+        left_anchor_text,
+        right_anchor_text,
+        prefer_anchor_placement,
+        assets,
+        width_map,
+    } = input;
+    let selected_text = normalize_overlay_line_breaks(selected_text.trim());
+    if selected_text.is_empty() {
+        return false;
+    }
+    let anchor_mode = anchor_mode.unwrap_or_default();
+    let direction = if anchor_mode == "right_only" {
+        AnchorRenderDirection::Suffix
+    } else {
+        AnchorRenderDirection::Prefix
+    };
+    let left_anchor_text = left_anchor_text.trim();
+    let right_anchor_text = right_anchor_text.trim();
+    let space_width = text_width_pt(
+        redaction.page_index,
+        font_key,
+        font_size_pt,
+        h_scale_pct,
+        " ",
+        assets,
+        width_map,
+    )
+    .max(0.1_f32);
+    let line_step_pt = font_size_pt.max(1.0_f32) * OVERLAY_MULTILINE_LEADING_RATIO;
+    let anchor_candidates = if prefer_anchor_placement {
+        collect_overlay_anchor_candidates(redaction)
+    } else {
+        Vec::new()
+    };
+    let one_anchor_mode = matches!(anchor_mode, "left_only" | "right_only");
+    let fallback_anchor = match direction {
+        AnchorRenderDirection::Prefix => (
+            anchor_left_x.or(anchor_right_x),
+            if !left_anchor_text.is_empty() {
+                left_anchor_text
+            } else {
+                right_anchor_text
+            },
+        ),
+        AnchorRenderDirection::Suffix => (
+            anchor_right_x.or(anchor_left_x),
+            if !right_anchor_text.is_empty() {
+                right_anchor_text
+            } else {
+                left_anchor_text
+            },
+        ),
+    };
+    let mut previous_anchor_x = fallback_anchor
+        .0
+        .unwrap_or_else(|| redaction.bbox.x0.max(0.0_f32));
+    let mut previous_anchor_center_y: Option<f32> = None;
+    let mut wrote_overlay = false;
+
+    for (line_index, raw_line) in selected_text.split('\n').enumerate() {
+        let guess_line = raw_line.trim();
+        if guess_line.is_empty() {
+            continue;
+        }
+        let line_index_f = line_index as f32;
+        let target_y = y1 - (line_index_f * line_step_pt);
+        let mut chosen_anchor_x: Option<f32> = None;
+        let mut chosen_anchor_text = String::new();
+        let mut chosen_anchor_bbox: Option<Rect> = None;
+        let mut chosen_anchor_center_y: Option<f32> = None;
+
+        if one_anchor_mode {
+            if line_index == 0 {
+                chosen_anchor_x = fallback_anchor.0;
+                chosen_anchor_text = fallback_anchor.1.to_owned();
+            }
+        } else if prefer_anchor_placement {
+            if let Some(candidate) =
+                select_anchor_candidate_for_line(&anchor_candidates, redaction, target_y, direction)
+            {
+                chosen_anchor_x = Some(candidate.bbox.x0);
+                chosen_anchor_text = candidate.text;
+                chosen_anchor_bbox = Some(candidate.bbox);
+                chosen_anchor_center_y = Some((candidate.bbox.y0 + candidate.bbox.y1) * 0.5_f32);
+            } else if line_index == 0 {
+                chosen_anchor_x = fallback_anchor.0;
+                chosen_anchor_text = fallback_anchor.1.to_owned();
+            }
+        }
+        if line_index > 0 {
+            if let (Some(prev_center_y), Some(candidate_center_y)) =
+                (previous_anchor_center_y, chosen_anchor_center_y)
+            {
+                let min_drop = line_step_pt * 0.70_f32;
+                if candidate_center_y > prev_center_y - min_drop {
+                    chosen_anchor_x = None;
+                    chosen_anchor_text.clear();
+                    chosen_anchor_bbox = None;
+                    chosen_anchor_center_y = None;
+                }
+            }
+        }
+
+        if chosen_anchor_x.is_none() && line_index > 0 {
+            chosen_anchor_x = Some(previous_anchor_x);
+        }
+        let guess_width = text_width_pt(
+            redaction.page_index,
+            font_key,
+            font_size_pt,
+            h_scale_pct,
+            guess_line,
+            assets,
+            width_map,
+        )
+        .max(0.1_f32);
+        if chosen_anchor_x.is_none() {
+            let box_width = redaction.bbox.width().abs().max(1.0_f32);
+            chosen_anchor_x = Some(redaction.bbox.x0 + ((box_width - guess_width) * 0.5_f32));
+        }
+        let anchor_x = chosen_anchor_x.unwrap_or(redaction.bbox.x0);
+        let anchor_text = chosen_anchor_text.trim();
+        let use_anchor_text = !anchor_text.is_empty();
+
+        let (line_text, mut x) = match direction {
+            AnchorRenderDirection::Prefix => {
+                if use_anchor_text {
+                    (format!("{anchor_text} {guess_line}"), anchor_x)
+                } else {
+                    (guess_line.to_owned(), anchor_x)
+                }
+            }
+            AnchorRenderDirection::Suffix => {
+                if use_anchor_text {
+                    let guess_with_space_width = guess_width + space_width;
+                    (
+                        format!("{guess_line} {anchor_text}"),
+                        anchor_x - guess_with_space_width,
+                    )
+                } else {
+                    (guess_line.to_owned(), anchor_x)
+                }
+            }
+        };
+        let rendered_width = text_width_pt(
+            redaction.page_index,
+            font_key,
+            font_size_pt,
+            h_scale_pct,
+            &line_text,
+            assets,
+            width_map,
+        )
+        .max(0.1_f32);
+        let mut line_y0 = y0 - (line_index_f * line_step_pt);
+        let mut line_y1 = y1 - (line_index_f * line_step_pt);
+        if let Some(anchor_bbox) = chosen_anchor_bbox {
+            line_y0 = anchor_bbox.y0;
+            line_y1 = anchor_bbox.y1;
+        }
+
+        if !use_anchor_text && line_index == 0 {
+            let candidate_bbox = Rect::new(x, line_y0, x + rendered_width, line_y1);
+            let row_right = max_row_right_edge(overlays, redaction.page_index, candidate_bbox);
+            let overlap_guard_pt = 0.25_f32;
+            if let Some(right_edge) = row_right {
+                if x + overlap_guard_pt < right_edge {
+                    x = right_edge + space_width;
+                }
+            }
+        }
+
+        let mut bbox_left = x.min(redaction.bbox.x0);
+        let mut bbox_right = (x + rendered_width).max(redaction.bbox.x1);
+        if let Some(anchor_bbox) = chosen_anchor_bbox {
+            bbox_left = bbox_left.min(anchor_bbox.x0);
+            bbox_right = bbox_right.max(anchor_bbox.x1);
+        }
+        let overlay_bbox = Rect::new(
+            bbox_left,
+            line_y0.min(redaction.bbox.y0),
+            bbox_right,
+            line_y1.max(redaction.bbox.y1),
+        );
+        overlays.push(TextOverlay {
+            redaction_index: Some(redaction_index),
+            page_index: redaction.page_index,
+            text: line_text,
+            font_key: font_key.to_owned(),
+            font_size_pt,
+            h_scale_pct,
+            x,
+            y: line_y1,
+            bbox: overlay_bbox,
+        });
+        previous_anchor_x = anchor_x;
+        previous_anchor_center_y = Some(chosen_anchor_center_y.unwrap_or(target_y));
+        wrote_overlay = true;
+    }
+    wrote_overlay
+}
+
+fn collect_overlay_anchor_candidates(
+    redaction: &crate::types::redaction_types::RedactionOccurrence,
+) -> Vec<OverlayAnchorCandidate> {
+    let mut out = Vec::<OverlayAnchorCandidate>::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+
+    for span in parse_overlay_context_spans(redaction) {
+        let text = span.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let line_bucket = if span.line_bucket == 0_i32 {
+            overlay_context_line_bucket(span.bbox)
+        } else {
+            span.line_bucket
+        };
+        let key = format!(
+            "{line_bucket}:{:.1}:{:.1}:{:.1}:{:.1}:{}",
+            span.bbox.x0, span.bbox.y0, span.bbox.x1, span.bbox.y1, text
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(OverlayAnchorCandidate {
+            text: text.to_owned(),
+            bbox: span.bbox,
+            line_bucket,
+            role_hint: span.role_hint,
+        });
+    }
+
+    for hit in &redaction.underlying_text {
+        let text = hit.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let line_bucket = overlay_context_line_bucket(hit.bbox);
+        let role_hint = if hit.bbox.x1 <= redaction.bbox.x0 + 0.5_f32 {
+            "left".to_owned()
+        } else if hit.bbox.x0 >= redaction.bbox.x1 - 0.5_f32 {
+            "right".to_owned()
+        } else {
+            "center".to_owned()
+        };
+        let key = format!(
+            "{line_bucket}:{:.1}:{:.1}:{:.1}:{:.1}:{}",
+            hit.bbox.x0, hit.bbox.y0, hit.bbox.x1, hit.bbox.y1, text
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(OverlayAnchorCandidate {
+            text: text.to_owned(),
+            bbox: hit.bbox,
+            line_bucket,
+            role_hint,
+        });
+    }
+
+    out.sort_by(|left, right| {
+        left.line_bucket
+            .cmp(&right.line_bucket)
+            .then_with(|| {
+                left.bbox
+                    .x0
+                    .partial_cmp(&right.bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.text.cmp(&right.text))
+    });
+    out
+}
+
+fn parse_overlay_context_spans(
+    redaction: &crate::types::redaction_types::RedactionOccurrence,
+) -> Vec<OverlayContextSpanRecord> {
+    let Some(raw) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<OverlayContextSpanRecord>>(raw).unwrap_or_default()
+}
+
+fn overlay_context_line_bucket(rect: Rect) -> i32 {
+    let center_y = (rect.y0 + rect.y1) * 0.5_f32;
+    (center_y / OVERLAY_CONTEXT_LINE_BUCKET_PT).round() as i32
+}
+
+fn select_anchor_candidate_for_line(
+    candidates: &[OverlayAnchorCandidate],
+    redaction: &crate::types::redaction_types::RedactionOccurrence,
+    target_y: f32,
+    direction: AnchorRenderDirection,
+) -> Option<OverlayAnchorCandidate> {
+    let target_bucket = (target_y / OVERLAY_CONTEXT_LINE_BUCKET_PT).round() as i32;
+    let mut filtered = candidates
+        .iter()
+        .filter(|candidate| {
+            let text = candidate.text.trim();
+            if text.is_empty() {
+                return false;
+            }
+            let center_y = (candidate.bbox.y0 + candidate.bbox.y1) * 0.5_f32;
+            let y_delta = (center_y - target_y).abs();
+            let bucket_delta = (candidate.line_bucket - target_bucket).abs();
+            if bucket_delta > 1_i32 && y_delta > OVERLAY_ANCHOR_LINE_TOLERANCE_PT {
+                return false;
+            }
+            match direction {
+                AnchorRenderDirection::Prefix => {
+                    if candidate.role_hint == "right" {
+                        return false;
+                    }
+                    let gap = redaction.bbox.x0 - candidate.bbox.x1;
+                    if gap > OVERLAY_ANCHOR_MAX_GAP_PT {
+                        return false;
+                    }
+                    if gap > OVERLAY_ANCHOR_EDGE_WINDOW_PT {
+                        return false;
+                    }
+                    candidate.bbox.x0 <= redaction.bbox.x1 + OVERLAY_ANCHOR_MAX_GAP_PT * 0.2_f32
+                }
+                AnchorRenderDirection::Suffix => {
+                    if candidate.role_hint == "left" {
+                        return false;
+                    }
+                    let gap = candidate.bbox.x0 - redaction.bbox.x1;
+                    if gap > OVERLAY_ANCHOR_MAX_GAP_PT {
+                        return false;
+                    }
+                    if gap > OVERLAY_ANCHOR_EDGE_WINDOW_PT {
+                        return false;
+                    }
+                    candidate.bbox.x1 + OVERLAY_ANCHOR_MAX_GAP_PT * 0.2_f32 >= redaction.bbox.x0
+                }
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    filtered.sort_by(|left, right| {
+        let left_center_y = (left.bbox.y0 + left.bbox.y1) * 0.5_f32;
+        let right_center_y = (right.bbox.y0 + right.bbox.y1) * 0.5_f32;
+        let left_y_delta = (left_center_y - target_y).abs();
+        let right_y_delta = (right_center_y - target_y).abs();
+        match direction {
+            AnchorRenderDirection::Prefix => left
+                .bbox
+                .x0
+                .partial_cmp(&right.bbox.x0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left_y_delta
+                        .partial_cmp(&right_y_delta)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+            AnchorRenderDirection::Suffix => right
+                .bbox
+                .x0
+                .partial_cmp(&left.bbox.x0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left_y_delta
+                        .partial_cmp(&right_y_delta)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+        }
+    });
+    filtered.into_iter().next()
+}
+
 fn raster_overlay_layout(
     rect: Rect,
     requested_font_size_pt: f32,
     text_width_pt: f32,
+    line_count: usize,
 ) -> RasterOverlayLayout {
     let box_width = rect.width().abs().max(1.0_f32);
     let box_height = rect.height().abs().max(1.0_f32);
-    let font_size_pt = requested_font_size_pt
-        .min(box_height * RASTER_MAX_FONT_TO_BOX_HEIGHT)
-        .max(RASTER_MIN_FONT_SIZE_PT);
+    let font_size_pt = requested_font_size_pt.max(RASTER_MIN_FONT_SIZE_PT);
 
     let x_min = rect.x0 + RASTER_TEXT_PADDING_PT;
     let x_max = (rect.x1 - RASTER_TEXT_PADDING_PT - text_width_pt).max(x_min);
     let centered_x = rect.x0 + ((box_width - text_width_pt) * 0.5_f32);
     let x = centered_x.clamp(x_min, x_max);
 
+    let line_drop_pt = multiline_extra_line_drop_pt(font_size_pt, line_count);
     let text_bottom = rect.y0 + ((box_height - font_size_pt) * 0.5_f32);
-    let baseline = text_bottom + (font_size_pt * RASTER_BASELINE_ASCENT_RATIO);
-    let y_min = rect.y0 + RASTER_TEXT_PADDING_PT;
+    let baseline =
+        text_bottom + (font_size_pt * RASTER_BASELINE_ASCENT_RATIO) + (line_drop_pt * 0.5_f32);
+    let y_min = rect.y0 + RASTER_TEXT_PADDING_PT + line_drop_pt;
     let y_max = rect.y1 - RASTER_TEXT_PADDING_PT;
-    let y = baseline.clamp(y_min, y_max);
+    let y = baseline.clamp(y_min.min(y_max), y_max);
 
     RasterOverlayLayout { x, y, font_size_pt }
 }
 
 fn pick_best_guess(guess: &crate::types::guess_types::RedactionGuess) -> Option<&str> {
     guess.candidates.first().map(|c| c.text.as_str())
+}
+
+fn build_dense_anchor_row_flags(report: &RedactionReport) -> Vec<bool> {
+    let redactions = &report.redactions;
+    let mut out = vec![false; redactions.len()];
+    for (index, current) in redactions.iter().enumerate() {
+        out[index] = redactions
+            .iter()
+            .enumerate()
+            .any(|(other_index, other)| is_dense_row_neighbor(index, current, other_index, other));
+    }
+    out
+}
+
+fn build_dense_row_max_heights(report: &RedactionReport) -> Vec<f32> {
+    let redactions = &report.redactions;
+    let mut out = vec![0.0_f32; redactions.len()];
+    for (index, current) in redactions.iter().enumerate() {
+        let mut max_height = current.bbox.height().abs().max(1.0_f32);
+        for (other_index, other) in redactions.iter().enumerate() {
+            if !is_dense_row_neighbor(index, current, other_index, other) {
+                continue;
+            }
+            max_height = max_height.max(other.bbox.height().abs().max(1.0_f32));
+        }
+        out[index] = max_height;
+    }
+    out
+}
+
+fn is_dense_row_neighbor(
+    index: usize,
+    current: &crate::types::redaction_types::RedactionOccurrence,
+    other_index: usize,
+    other: &crate::types::redaction_types::RedactionOccurrence,
+) -> bool {
+    if index == other_index {
+        return false;
+    }
+    if current.page_index != other.page_index {
+        return false;
+    }
+    if !same_visual_row(current.bbox, other.bbox) {
+        return false;
+    }
+    horizontal_gap_between_rects(current.bbox, other.bbox) <= 96.0_f32
+}
+
+fn horizontal_gap_between_rects(left: Rect, right: Rect) -> f32 {
+    if left.x1 < right.x0 {
+        return right.x0 - left.x1;
+    }
+    if right.x1 < left.x0 {
+        return left.x0 - right.x1;
+    }
+    0.0_f32
+}
+
+fn anchor_context_is_joinable(left_text: &str, right_text: &str) -> bool {
+    let left_words = anchor_words(left_text);
+    let right_words = anchor_words(right_text);
+    if left_words.is_empty() || right_words.is_empty() {
+        return false;
+    }
+    if left_words.len() > 3 || right_words.len() > 3 {
+        return false;
+    }
+    let left_has_marker = left_words
+        .iter()
+        .any(|word| matches!(word.as_str(), "including" | "included" | "among" | "served"));
+    let right_has_and = right_words.iter().any(|word| word == "and");
+    left_has_marker && right_has_and
+}
+
+fn anchor_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+}
+
+fn normalize_overlay_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn overlay_line_count(text: &str) -> usize {
+    text.split('\n').count().max(1)
+}
+
+fn multiline_extra_line_drop_pt(font_size_pt: f32, line_count: usize) -> f32 {
+    if line_count <= 1 {
+        return 0.0_f32;
+    }
+    let line_step_pt = font_size_pt.max(1.0_f32) * OVERLAY_MULTILINE_LEADING_RATIO;
+    (line_count.saturating_sub(1) as f32) * line_step_pt
+}
+
+fn multiline_text_width_pt(
+    page_index: u32,
+    font_key: &str,
+    font_size_pt: f32,
+    h_scale_pct: f32,
+    text: &str,
+    assets: &std::collections::BTreeMap<String, crate::types::file_types::FontAsset>,
+    width_map: &std::collections::BTreeMap<FontWidthKey, FontWidthTable>,
+) -> f32 {
+    let mut best = 0.0_f32;
+    for line in text.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let width = text_width_pt(
+            page_index,
+            font_key,
+            font_size_pt,
+            h_scale_pct,
+            line,
+            assets,
+            width_map,
+        );
+        if width.is_finite() && width > best {
+            best = width;
+        }
+    }
+    if best > 0.0_f32 {
+        best
+    } else {
+        0.1_f32
+    }
 }
 
 fn max_row_right_edge(
@@ -1085,10 +1746,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()))
     }
 
-    fn horizontal_overlap(a: Rect, b: Rect) -> f32 {
-        (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0_f32)
-    }
-
     #[test]
     fn load_inputs_from_bytes_builds_rects_and_anchor_triplet_overlays() {
         let data = VisualizationData::new();
@@ -1218,7 +1875,91 @@ mod tests {
     }
 
     #[test]
-    fn anchor_pair_multi_redaction_rows_do_not_emit_overlapping_overlay_runs() {
+    fn anchor_pair_overlay_preserves_multiline_guess_text() {
+        let data = VisualizationData::new();
+        let report = sample_anchor_pair_report();
+        let guesses = sample_guesses_with_candidate("NADIA\nMARCINKOVA");
+        let font_runs = sample_font_runs_with_anchor_row();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+        assert_eq!(inputs.overlays.len(), 2_usize);
+        let first = &inputs.overlays[0];
+        let second = &inputs.overlays[1];
+        assert_eq!(first.text, "including NADIA");
+        assert_eq!(second.text, "MARCINKOVA");
+        assert!(
+            second.y < first.y,
+            "wrapped line should be emitted below first line"
+        );
+    }
+
+    #[test]
+    fn anchor_pair_overlay_uses_selected_only_for_non_joinable_context() {
+        let data = VisualizationData::new();
+        let mut report = sample_anchor_pair_report();
+        report.redactions[0].underlying_text[0].text = "(pilot),".to_owned();
+        report.redactions[0].underlying_text[1].text = "(pilot),".to_owned();
+        let mut guesses = sample_guesses();
+        guesses.guesses[0].context.left_anchor_text = "(pilot),".to_owned();
+        guesses.guesses[0].context.right_anchor_text = "(pilot),".to_owned();
+        guesses.guesses[0].context.has_anchor_pair = true;
+        let font_runs = sample_font_runs_with_anchor_row();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+
+        assert_eq!(inputs.overlays.len(), 1_usize);
+        let overlay = &inputs.overlays[0];
+        assert_eq!(overlay.text, "(pilot), SARAH KELLEN");
+        assert!((overlay.x - 104.0_f32).abs() <= 0.001_f32);
+        assert!(overlay.bbox.x0 <= report.redactions[0].underlying_text[0].bbox.x0);
+    }
+
+    #[test]
+    fn raster_overlay_preserves_multiline_guess_text() {
+        let data = VisualizationData::new();
+        let report = sample_report();
+        let mut guesses = sample_guesses_with_candidate("NADIA\nMARCINKOVA");
+        guesses.guesses[0].context.has_anchor_pair = false;
+        guesses.guesses[0].context.left_anchor_text.clear();
+        guesses.guesses[0].context.right_anchor_text.clear();
+        let font_runs = sample_font_runs();
+
+        let inputs = data
+            .load_inputs_from_bytes(
+                &sample_pdf_bytes(),
+                &report,
+                Some(&guesses),
+                Some(&font_runs),
+            )
+            .expect("visualization inputs should load");
+
+        assert_eq!(inputs.overlays.len(), 1_usize);
+        let overlay = &inputs.overlays[0];
+        assert_eq!(overlay.text, "NADIA\nMARCINKOVA");
+        assert!(
+            overlay.bbox.y0 < report.redactions[0].bbox.y0,
+            "multiline raster overlay bbox should include wrapped lines"
+        );
+        assert!((overlay.bbox.x0 - report.redactions[0].bbox.x0).abs() <= 0.001_f32);
+        assert!((overlay.bbox.x1 - report.redactions[0].bbox.x1).abs() <= 0.001_f32);
+    }
+
+    #[test]
+    fn anchor_pair_multi_redaction_rows_use_leftmost_line_anchor_prefix() {
         let data = VisualizationData::new();
         let report = sample_multi_anchor_pair_report();
         let guesses = sample_multi_anchor_pair_guesses();
@@ -1234,12 +1975,9 @@ mod tests {
             .expect("visualization inputs should load");
 
         assert_eq!(inputs.overlays.len(), 2_usize);
-        assert_eq!(inputs.overlays[0].text, "including SARAH KELLEN and");
-        assert_eq!(inputs.overlays[1].text, "ADRIANA MUCINSKA");
-        let overlap = horizontal_overlap(inputs.overlays[0].bbox, inputs.overlays[1].bbox);
-        assert!(
-            overlap <= 0.25_f32,
-            "expected non-overlapping same-row overlays, overlap_pt={overlap:.3}"
-        );
+        assert_eq!(inputs.overlays[0].text, "including SARAH KELLEN");
+        assert_eq!(inputs.overlays[1].text, "including ADRIANA MUCINSKA");
+        assert!((inputs.overlays[0].x - 104.0_f32).abs() <= 0.001_f32);
+        assert!((inputs.overlays[1].x - 150.0_f32).abs() <= 0.001_f32);
     }
 }

@@ -16,6 +16,7 @@ const JOINT_ASSIGNMENT_DUPLICATE_PENALTY: f64 = 15.0;
 const JOINT_ASSIGNMENT_OVERLAP_MARGIN_PT: f64 = 1.0;
 const JOINT_ASSIGNMENT_OVERLAP_PENALTY: f64 = 2.0;
 const JOINT_ASSIGNMENT_MAX_GROUP_GAP_PT: f64 = 40.0;
+const JOINT_ASSIGNMENT_DENSE_GROUP_MAX_GAP_PT: f64 = 96.0;
 const JOINT_ASSIGNMENT_WRAP_LINE_MAX_Y_GAP_PT: f64 = 18.0;
 const JOINT_ASSIGNMENT_SAME_LINE_MAX_Y_DELTA_PT: f64 = 4.0;
 const JOINT_ASSIGNMENT_WRAP_RESET_X_DELTA_PT: f64 = 16.0;
@@ -48,7 +49,7 @@ struct RedactionGroup {
 }
 
 pub fn apply_row_joint_assignment(guesses: &mut [RedactionGuess]) -> BTreeSet<usize> {
-    let groups = collect_redaction_groups(guesses, None, true, true);
+    let groups = collect_redaction_groups(guesses, None, true, true, false);
     let mut promotions = Vec::<(usize, String)>::new();
     for group in groups {
         if let Some(selected) = solve_joint_assignment_group(guesses, &group) {
@@ -76,7 +77,7 @@ pub fn apply_row_sequence_consensus(
     guesses: &mut [RedactionGuess],
     skip_indices: &BTreeSet<usize>,
 ) {
-    let groups = collect_redaction_groups(guesses, Some(skip_indices), false, false);
+    let groups = collect_redaction_groups(guesses, Some(skip_indices), false, false, true);
     for group in groups {
         if group.indices.len() < 2 {
             continue;
@@ -136,13 +137,15 @@ fn collect_redaction_groups(
     skip_indices: Option<&BTreeSet<usize>>,
     require_two_sided: bool,
     include_empty_candidate_rows: bool,
+    allow_dense_geometry_signal: bool,
 ) -> Vec<RedactionGroup> {
     let mut by_page = BTreeMap::<u32, Vec<usize>>::new();
     for (index, guess) in guesses.iter().enumerate() {
         if skip_indices.is_some_and(|skip| skip.contains(&index)) {
             continue;
         }
-        if !guess.context.has_anchor_pair {
+        let has_candidates = !guess.candidates.is_empty() || !guess.exact_matches.is_empty();
+        if !(guess.context.has_anchor_pair || (allow_dense_geometry_signal && has_candidates)) {
             continue;
         }
         if require_two_sided && !is_two_sided_anchor_context(guess) {
@@ -187,14 +190,24 @@ fn collect_redaction_groups(
             let prev_index = *current.last().unwrap_or(&guess_index);
             let prev = &guesses[prev_index];
             let next = &guesses[guess_index];
-            if rows_are_group_contiguous(prev, next) {
+            if rows_are_group_contiguous(prev, next, allow_dense_geometry_signal) {
                 current.push(guess_index);
             } else {
-                maybe_push_group(&mut groups, &mut current, guesses);
+                maybe_push_group(
+                    &mut groups,
+                    &mut current,
+                    guesses,
+                    allow_dense_geometry_signal,
+                );
                 current.push(guess_index);
             }
         }
-        maybe_push_group(&mut groups, &mut current, guesses);
+        maybe_push_group(
+            &mut groups,
+            &mut current,
+            guesses,
+            allow_dense_geometry_signal,
+        );
     }
     groups
 }
@@ -203,13 +216,17 @@ fn maybe_push_group(
     groups: &mut Vec<RedactionGroup>,
     current: &mut Vec<usize>,
     guesses: &[RedactionGuess],
+    allow_dense_geometry_signal: bool,
 ) {
     if current.len() < JOINT_ASSIGNMENT_MIN_GROUP_ROWS || current.len() > JOINT_ASSIGNMENT_MAX_ROWS
     {
         current.clear();
         return;
     }
-    if !group_has_joint_assignment_signal(current, guesses) {
+    let has_joint_signal = group_has_joint_assignment_signal(current, guesses);
+    let has_dense_signal =
+        allow_dense_geometry_signal && group_has_dense_geometry_signal(current, guesses);
+    if !has_joint_signal && !has_dense_signal {
         current.clear();
         return;
     }
@@ -234,7 +251,11 @@ fn maybe_push_group(
     });
 }
 
-fn rows_are_group_contiguous(left: &RedactionGuess, right: &RedactionGuess) -> bool {
+fn rows_are_group_contiguous(
+    left: &RedactionGuess,
+    right: &RedactionGuess,
+    allow_dense_geometry_signal: bool,
+) -> bool {
     if !joint_assignment_rows_are_compatible(left, right) {
         return false;
     }
@@ -258,7 +279,7 @@ fn rows_are_group_contiguous(left: &RedactionGuess, right: &RedactionGuess) -> b
             right.context.left_anchor_text.as_str(),
             right.context.right_anchor_text.as_str(),
         );
-    if !has_list_signal {
+    if !has_list_signal && !allow_dense_geometry_signal {
         return false;
     }
     let wraps_to_new_line =
@@ -266,6 +287,36 @@ fn rows_are_group_contiguous(left: &RedactionGuess, right: &RedactionGuess) -> b
     let continues_forward =
         right.bbox.x0 as f64 <= left.bbox.x1 as f64 + JOINT_ASSIGNMENT_WRAP_FORWARD_X_ALLOWANCE_PT;
     wraps_to_new_line || continues_forward
+}
+
+fn group_has_dense_geometry_signal(group: &[usize], guesses: &[RedactionGuess]) -> bool {
+    if group.len() < 3 {
+        return false;
+    }
+    let mut dense_adjacencies = 0_usize;
+    for window in group.windows(2) {
+        let left = &guesses[window[0]];
+        let right = &guesses[window[1]];
+        if left.page_index != right.page_index {
+            continue;
+        }
+        let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+        let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+        let y_delta = (right_center_y - left_center_y).abs();
+        if y_delta <= JOINT_ASSIGNMENT_WRAP_LINE_MAX_Y_GAP_PT {
+            let horizontal_gap = if right.bbox.x0 as f64 >= left.bbox.x1 as f64 {
+                (right.bbox.x0 - left.bbox.x1) as f64
+            } else if left.bbox.x0 as f64 >= right.bbox.x1 as f64 {
+                (left.bbox.x0 - right.bbox.x1) as f64
+            } else {
+                0.0_f64
+            };
+            if horizontal_gap <= JOINT_ASSIGNMENT_DENSE_GROUP_MAX_GAP_PT {
+                dense_adjacencies += 1;
+            }
+        }
+    }
+    dense_adjacencies >= 2
 }
 
 fn group_has_joint_assignment_signal(group: &[usize], guesses: &[RedactionGuess]) -> bool {

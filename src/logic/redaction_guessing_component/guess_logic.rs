@@ -6,6 +6,7 @@ use super::joint_assignment::{apply_row_joint_assignment, apply_row_sequence_con
 use super::visual_logic::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
 use crate::data::dictionary_variant_data::build_dictionary_variants;
 use crate::data::fonts_data::FontsData;
+use crate::data::redaction_scan_data::CONTEXT_SPANS_META_KEY;
 use crate::data::typography_width_data::{
     build_typography_profile_from_pdf_bytes, fallback_typography_width,
     measure_text_width_from_profile,
@@ -20,6 +21,7 @@ use crate::types::time::Instant;
 use crate::types::typography_types::{
     TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
 };
+use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -290,6 +292,13 @@ const ANCHOR_PAIR_STRADDLE_TOLERANCE_PT: f64 = 2.0_f64;
 const ANCHOR_PAIR_MAX_OVERLAP_PT: f64 = 1.0_f64;
 const ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT: f32 = 4.0_f32;
 const ONE_SIDED_LIST_CONTEXT_SIDE_ALIGNMENT_MIN_PT: f64 = 24.0_f64;
+const CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT: f32 = 8.0_f32;
+const CLUSTER_ANCHOR_HINT_MAX_GAP_PT: f32 = 240.0_f32;
+const ROW_CONTEXT_MAX_GROUP_GAP_PT: f64 = 96.0_f64;
+const ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT: f64 = 18.0_f64;
+const ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT: f64 = 4.0_f64;
+const ROW_CONTEXT_WRAP_RESET_X_DELTA_PT: f64 = 16.0_f64;
+const ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT: f64 = 28.0_f64;
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
 
@@ -310,6 +319,41 @@ struct AnchorHints<'a> {
     left_x: Option<f64>,
     right_text: Option<&'a str>,
     right_x: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ContextSpanRecord {
+    text: String,
+    bbox: Rect,
+    line_bucket: i32,
+    role_hint: String,
+    #[serde(default)]
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClusterAnchorHint {
+    text: String,
+    bbox: Rect,
+    line_bucket: i32,
+    role_hint: String,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct InferredTypography {
+    font_key: String,
+    font_name: String,
+    font_size_pt: f32,
+    h_scale_pct: f32,
+}
+
+#[derive(Debug, Clone)]
+struct SharedClusterTypography {
+    font_key: String,
+    font_name: Option<String>,
+    font_size_pt: f32,
+    h_scale_pct: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -365,6 +409,7 @@ fn build_anchor_validated_guesses(
         typography_profile.width_table_count()
     )];
     let mut guesses = Vec::with_capacity(redactions.len());
+    let shared_context_hints = build_shared_context_hints(redactions);
 
     for (index, redaction) in redactions.iter().enumerate() {
         let (left_text, right_text, left_bbox, right_bbox) = extract_context(redaction);
@@ -372,8 +417,19 @@ fn build_anchor_validated_guesses(
             .get(&redaction.page_index)
             .cloned()
             .unwrap_or_default();
-        let anchor = select_anchor_pair(redaction, &page_runs, &assets, typography_profile);
+        let cluster_hints = shared_context_hints
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let anchor = select_anchor_pair(
+            redaction,
+            &page_runs,
+            cluster_hints,
+            &assets,
+            typography_profile,
+        );
         let Some(anchor) = anchor else {
+            let inferred_typography = infer_local_typography(redaction, &page_runs);
             diagnostics.push(format!(
                 "redaction_index={index} page_index={} anchored_row=false reason=missing_anchor",
                 redaction.page_index
@@ -419,10 +475,16 @@ fn build_anchor_validated_guesses(
                     tol_pt: FIXED_TOLERANCE_PT as f32,
                     anchor_left_x: None,
                     anchor_right_x: None,
-                    anchor_font_key: None,
-                    anchor_font_name: None,
-                    anchor_font_size_pt: None,
-                    anchor_h_scale_pct: None,
+                    anchor_font_key: inferred_typography
+                        .as_ref()
+                        .map(|value| value.font_key.clone()),
+                    anchor_font_name: inferred_typography
+                        .as_ref()
+                        .map(|value| value.font_name.clone()),
+                    anchor_font_size_pt: inferred_typography
+                        .as_ref()
+                        .map(|value| value.font_size_pt),
+                    anchor_h_scale_pct: inferred_typography.as_ref().map(|value| value.h_scale_pct),
                     anchor_row_bias_pt: None,
                     anchor_mode: None,
                     anchor_width_source: None,
@@ -466,6 +528,7 @@ fn build_anchor_validated_guesses(
         guesses.push(guess);
     }
 
+    propagate_row_context_to_guesses(&mut guesses);
     apply_cluster_consensus(&mut guesses, use_curated_name_prior);
     let jointly_assigned = apply_row_joint_assignment(&mut guesses);
     apply_row_sequence_consensus(&mut guesses, &jointly_assigned);
@@ -511,6 +574,315 @@ fn build_anchor_validated_guesses(
     }
 
     (guesses, diagnostics)
+}
+
+fn infer_local_typography(
+    redaction: &RedactionOccurrence,
+    page_runs: &[&FontTextRun],
+) -> Option<InferredTypography> {
+    let red_center_y = (redaction.bbox.y0 + redaction.bbox.y1) * 0.5_f32;
+    let red_left_x = redaction.bbox.x0 as f64;
+    let red_right_x = redaction.bbox.x1 as f64;
+    let mut best: Option<(&FontTextRun, f64)> = None;
+    for run in page_runs {
+        if run.font_key.trim().is_empty() {
+            continue;
+        }
+        let run_center_y = (run.bbox.y0 + run.bbox.y1) * 0.5_f32;
+        let y_distance = (run_center_y - red_center_y).abs() as f64;
+        if y_distance > 40.0_f64 {
+            continue;
+        }
+        let run_left_x = run.bbox.x0 as f64;
+        let run_right_x = run.bbox.x1 as f64;
+        let x_gap = if run_right_x <= red_left_x {
+            red_left_x - run_right_x
+        } else if run_left_x >= red_right_x {
+            run_left_x - red_right_x
+        } else {
+            0.0_f64
+        };
+        let vertical_overlap = vertical_overlap_run(&run.bbox, &redaction.bbox) as f64;
+        let overlap_bonus = if vertical_overlap > 0.0_f64 {
+            3.0_f64
+        } else {
+            0.0_f64
+        };
+        let score = y_distance * 2.0_f64 + x_gap - overlap_bonus;
+        match best {
+            None => best = Some((run, score)),
+            Some((_, best_score)) if score < best_score => best = Some((run, score)),
+            _ => {}
+        }
+    }
+    best.map(|(run, _)| InferredTypography {
+        font_key: run.font_key.clone(),
+        font_name: run.font_name.clone(),
+        font_size_pt: run.font_size_pt,
+        h_scale_pct: run.h_scale_pct,
+    })
+}
+
+fn propagate_row_context_to_guesses(guesses: &mut [RedactionGuess]) {
+    let mut by_page = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+    for (index, guess) in guesses.iter().enumerate() {
+        by_page.entry(guess.page_index).or_default().push(index);
+    }
+
+    for page_indices in by_page.values_mut() {
+        page_indices.sort_by(|left_index, right_index| {
+            let left = &guesses[*left_index];
+            let right = &guesses[*right_index];
+            let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+            let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+            left_center_y
+                .partial_cmp(&right_center_y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.bbox
+                        .x0
+                        .partial_cmp(&right.bbox.x0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        let mut visited = std::collections::BTreeSet::<usize>::new();
+        for seed_index in page_indices.iter().copied() {
+            if visited.contains(&seed_index) {
+                continue;
+            }
+            let mut cluster = Vec::<usize>::new();
+            let mut queue = vec![seed_index];
+            visited.insert(seed_index);
+            while let Some(current_index) = queue.pop() {
+                cluster.push(current_index);
+                for other_index in page_indices.iter().copied() {
+                    if visited.contains(&other_index) {
+                        continue;
+                    }
+                    if row_context_rows_are_linked(&guesses[current_index], &guesses[other_index]) {
+                        visited.insert(other_index);
+                        queue.push(other_index);
+                    }
+                }
+            }
+            cluster.sort_by(|left_index, right_index| {
+                let left = &guesses[*left_index];
+                let right = &guesses[*right_index];
+                let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+                let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+                left_center_y
+                    .partial_cmp(&right_center_y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.bbox
+                            .x0
+                            .partial_cmp(&right.bbox.x0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            apply_row_context_cluster(guesses, &cluster);
+        }
+    }
+}
+
+fn row_context_rows_are_contiguous(left: &RedactionGuess, right: &RedactionGuess) -> bool {
+    let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+    let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+    let y_delta = (right_center_y - left_center_y).abs();
+    if y_delta <= ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT {
+        let x_gap = (right.bbox.x0 as f64 - left.bbox.x1 as f64).max(0.0_f64);
+        return x_gap <= ROW_CONTEXT_MAX_GROUP_GAP_PT;
+    }
+    if right_center_y <= left_center_y || y_delta > ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT {
+        return false;
+    }
+    let wraps_to_new_line =
+        right.bbox.x0 as f64 + ROW_CONTEXT_WRAP_RESET_X_DELTA_PT < left.bbox.x0 as f64;
+    let continues_forward =
+        right.bbox.x0 as f64 <= left.bbox.x1 as f64 + ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT;
+    wraps_to_new_line || continues_forward
+}
+
+fn row_context_rows_are_linked(left: &RedactionGuess, right: &RedactionGuess) -> bool {
+    row_context_rows_are_contiguous(left, right) || row_context_rows_are_contiguous(right, left)
+}
+
+fn apply_row_context_cluster(guesses: &mut [RedactionGuess], cluster: &[usize]) {
+    if cluster.len() < 2 {
+        return;
+    }
+    let donor_index = cluster
+        .iter()
+        .copied()
+        .filter(|index| {
+            let context = &guesses[*index].context;
+            context.anchor_font_key.is_some() && context.anchor_font_size_pt.is_some()
+        })
+        .max_by(|left_index, right_index| {
+            let left = &guesses[*left_index];
+            let right = &guesses[*right_index];
+            let left_anchor_rank = if left.context.has_anchor_pair {
+                2_i32
+            } else {
+                1_i32
+            };
+            let right_anchor_rank = if right.context.has_anchor_pair {
+                2_i32
+            } else {
+                1_i32
+            };
+            left_anchor_rank
+                .cmp(&right_anchor_rank)
+                .then_with(|| left.candidates.len().cmp(&right.candidates.len()))
+                .then_with(|| {
+                    let left_score = left
+                        .candidates
+                        .first()
+                        .map(|item| item.score)
+                        .unwrap_or(0.0_f32);
+                    let right_score = right
+                        .candidates
+                        .first()
+                        .map(|item| item.score)
+                        .unwrap_or(0.0_f32);
+                    left_score
+                        .partial_cmp(&right_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+    let Some(donor_index) = donor_index else {
+        return;
+    };
+    let donor = guesses[donor_index].context.clone();
+    let shared_typography = derive_shared_cluster_typography(guesses, cluster);
+
+    for guess_index in cluster.iter().copied() {
+        let context = &mut guesses[guess_index].context;
+        if let Some(shared) = &shared_typography {
+            context.anchor_font_key = Some(shared.font_key.clone());
+            if let Some(font_name) = &shared.font_name {
+                context.anchor_font_name = Some(font_name.clone());
+            }
+            context.anchor_font_size_pt = Some(shared.font_size_pt);
+            context.anchor_h_scale_pct = Some(shared.h_scale_pct);
+        } else if !context.has_anchor_pair {
+            context.anchor_font_key = donor.anchor_font_key.clone();
+            context.anchor_font_name = donor.anchor_font_name.clone();
+            context.anchor_font_size_pt = donor.anchor_font_size_pt;
+            context.anchor_h_scale_pct = donor.anchor_h_scale_pct;
+        } else {
+            if context.anchor_font_key.is_none() {
+                context.anchor_font_key = donor.anchor_font_key.clone();
+            }
+            if context.anchor_font_name.is_none() {
+                context.anchor_font_name = donor.anchor_font_name.clone();
+            }
+            if context.anchor_font_size_pt.is_none() {
+                context.anchor_font_size_pt = donor.anchor_font_size_pt;
+            }
+            if context.anchor_h_scale_pct.is_none() {
+                context.anchor_h_scale_pct = donor.anchor_h_scale_pct;
+            }
+        }
+        if guess_index == donor_index {
+            continue;
+        }
+        if context.anchor_row_bias_pt.is_none() {
+            context.anchor_row_bias_pt = donor.anchor_row_bias_pt;
+        }
+        if context.char_width_pt <= 0.0_f32 && donor.char_width_pt > 0.0_f32 {
+            context.char_width_pt = donor.char_width_pt;
+        }
+        if context.tol_pt <= 0.0_f32 && donor.tol_pt > 0.0_f32 {
+            context.tol_pt = donor.tol_pt;
+        }
+    }
+}
+
+fn derive_shared_cluster_typography(
+    guesses: &[RedactionGuess],
+    cluster: &[usize],
+) -> Option<SharedClusterTypography> {
+    if cluster.is_empty() {
+        return None;
+    }
+    let mut samples = Vec::<(String, Option<String>, f32, f32)>::new();
+    for guess_index in cluster.iter().copied() {
+        let context = &guesses[guess_index].context;
+        let Some(font_key) = context.anchor_font_key.as_ref() else {
+            continue;
+        };
+        let Some(font_size_pt) = context.anchor_font_size_pt else {
+            continue;
+        };
+        let Some(h_scale_pct) = context.anchor_h_scale_pct else {
+            continue;
+        };
+        if !font_size_pt.is_finite()
+            || font_size_pt <= 0.0_f32
+            || !h_scale_pct.is_finite()
+            || h_scale_pct <= 0.0_f32
+        {
+            continue;
+        }
+        let font_name = context
+            .anchor_font_name
+            .as_ref()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        samples.push((font_key.clone(), font_name, font_size_pt, h_scale_pct));
+    }
+    if samples.is_empty() {
+        return None;
+    }
+    let mut font_key_counts = std::collections::BTreeMap::<String, usize>::new();
+    for (font_key, _, _, _) in &samples {
+        *font_key_counts.entry(font_key.clone()).or_insert(0_usize) += 1;
+    }
+    let target_font_key = font_key_counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
+        .map(|(font_key, _)| font_key)?;
+    let mut filtered = samples
+        .into_iter()
+        .filter(|(font_key, _, _, _)| *font_key == target_font_key)
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return None;
+    }
+    let font_name = filtered
+        .iter()
+        .find_map(|(_, name, _, _)| name.as_ref().cloned());
+    let mut font_sizes = filtered
+        .iter_mut()
+        .map(|(_, _, font_size_pt, _)| *font_size_pt)
+        .collect::<Vec<_>>();
+    let mut h_scales = filtered
+        .iter_mut()
+        .map(|(_, _, _, h_scale_pct)| *h_scale_pct)
+        .collect::<Vec<_>>();
+    let font_size_pt = median_f32(&mut font_sizes);
+    let h_scale_pct = median_f32(&mut h_scales);
+    Some(SharedClusterTypography {
+        font_key: target_font_key,
+        font_name,
+        font_size_pt,
+        h_scale_pct,
+    })
+}
+
+fn median_f32(values: &mut [f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0_f32;
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = values.len() >> 1_usize;
+    if (values.len() & 1_usize) == 0_usize {
+        (values[mid - 1] + values[mid]) * 0.5_f32
+    } else {
+        values[mid]
+    }
 }
 
 fn apply_cluster_consensus(guesses: &mut [RedactionGuess], use_effective_candidate_cost: bool) {
@@ -1166,29 +1538,299 @@ fn build_guess_for_anchor(
     (guess, funnel)
 }
 
+fn build_shared_context_hints(redactions: &[RedactionOccurrence]) -> Vec<Vec<ClusterAnchorHint>> {
+    let mut out = vec![Vec::<ClusterAnchorHint>::new(); redactions.len()];
+    let mut by_page = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+    for (index, redaction) in redactions.iter().enumerate() {
+        by_page.entry(redaction.page_index).or_default().push(index);
+    }
+    for page_indices in by_page.values_mut() {
+        page_indices.sort_by(|left_index, right_index| {
+            let left = &redactions[*left_index];
+            let right = &redactions[*right_index];
+            let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+            let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+            left_center_y
+                .partial_cmp(&right_center_y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.bbox
+                        .x0
+                        .partial_cmp(&right.bbox.x0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        let mut visited = std::collections::BTreeSet::<usize>::new();
+        for seed_index in page_indices.iter().copied() {
+            if visited.contains(&seed_index) {
+                continue;
+            }
+            let mut cluster = Vec::<usize>::new();
+            let mut queue = vec![seed_index];
+            visited.insert(seed_index);
+            while let Some(current_index) = queue.pop() {
+                cluster.push(current_index);
+                for other_index in page_indices.iter().copied() {
+                    if visited.contains(&other_index) {
+                        continue;
+                    }
+                    if redaction_rows_are_linked(
+                        &redactions[current_index],
+                        &redactions[other_index],
+                    ) {
+                        visited.insert(other_index);
+                        queue.push(other_index);
+                    }
+                }
+            }
+            let mut merged = Vec::<ClusterAnchorHint>::new();
+            let mut seen = BTreeSet::<String>::new();
+            for redaction_index in cluster.iter().copied() {
+                for span in parse_context_spans_from_meta(&redactions[redaction_index]) {
+                    let key = format!(
+                        "{:.1}:{:.1}:{:.1}:{:.1}:{}",
+                        span.bbox.x0, span.bbox.y0, span.bbox.x1, span.bbox.y1, span.text
+                    );
+                    if seen.insert(key) {
+                        merged.push(ClusterAnchorHint {
+                            text: span.text,
+                            bbox: span.bbox,
+                            line_bucket: span.line_bucket,
+                            role_hint: span.role_hint,
+                            source: span.source,
+                        });
+                    }
+                }
+                for hit in redactions[redaction_index]
+                    .underlying_text
+                    .iter()
+                    .filter(|hit| {
+                        let value = hit.text.trim();
+                        !value.is_empty()
+                    })
+                {
+                    let key = format!(
+                        "{:.1}:{:.1}:{:.1}:{:.1}:{}",
+                        hit.bbox.x0,
+                        hit.bbox.y0,
+                        hit.bbox.x1,
+                        hit.bbox.y1,
+                        hit.text.trim()
+                    );
+                    if seen.insert(key) {
+                        let role_hint = if hit.bbox.x1 <= redactions[redaction_index].bbox.x0 {
+                            "left".to_owned()
+                        } else if hit.bbox.x0 >= redactions[redaction_index].bbox.x1 {
+                            "right".to_owned()
+                        } else {
+                            "center".to_owned()
+                        };
+                        merged.push(ClusterAnchorHint {
+                            text: hit.text.trim().to_owned(),
+                            bbox: hit.bbox,
+                            line_bucket: ((hit.bbox.y0 + hit.bbox.y1) * 0.5_f32 / 2.0_f32).round()
+                                as i32,
+                            role_hint,
+                            source: "legacy_hit".to_owned(),
+                        });
+                    }
+                }
+            }
+            merged.sort_by(|left, right| {
+                let left_center_y = (left.bbox.y0 + left.bbox.y1) * 0.5_f32;
+                let right_center_y = (right.bbox.y0 + right.bbox.y1) * 0.5_f32;
+                left_center_y
+                    .partial_cmp(&right_center_y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.bbox
+                            .x0
+                            .partial_cmp(&right.bbox.x0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.text.cmp(&right.text))
+            });
+            for redaction_index in cluster {
+                out[redaction_index] = merged.clone();
+            }
+        }
+    }
+    out
+}
+
+fn parse_context_spans_from_meta(redaction: &RedactionOccurrence) -> Vec<ContextSpanRecord> {
+    let Some(raw) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<ContextSpanRecord>>(raw).unwrap_or_default()
+}
+
+fn redaction_rows_are_contiguous(left: &RedactionOccurrence, right: &RedactionOccurrence) -> bool {
+    let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
+    let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
+    let y_delta = (right_center_y - left_center_y).abs();
+    if y_delta <= ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT {
+        let x_gap = (right.bbox.x0 as f64 - left.bbox.x1 as f64).max(0.0_f64);
+        return x_gap <= ROW_CONTEXT_MAX_GROUP_GAP_PT;
+    }
+    if right_center_y <= left_center_y || y_delta > ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT {
+        return false;
+    }
+    let wraps_to_new_line =
+        right.bbox.x0 as f64 + ROW_CONTEXT_WRAP_RESET_X_DELTA_PT < left.bbox.x0 as f64;
+    let continues_forward =
+        right.bbox.x0 as f64 <= left.bbox.x1 as f64 + ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT;
+    wraps_to_new_line || continues_forward
+}
+
+fn redaction_rows_are_linked(left: &RedactionOccurrence, right: &RedactionOccurrence) -> bool {
+    redaction_rows_are_contiguous(left, right) || redaction_rows_are_contiguous(right, left)
+}
+
+fn select_cluster_hint(
+    redaction: &RedactionOccurrence,
+    cluster_hints: &[ClusterAnchorHint],
+    local_hint_hit: Option<&crate::types::redaction_types::UnderlyingTextHit>,
+    want_left: bool,
+) -> Option<ClusterAnchorHint> {
+    if let Some(local) = local_hint_hit {
+        let text = local.text.trim();
+        if !text.is_empty() {
+            let near_edge = if want_left {
+                let gap = (redaction.bbox.x0 - local.bbox.x1).max(0.0_f32);
+                gap <= CLUSTER_ANCHOR_HINT_MAX_GAP_PT
+                    || local.bbox.x1 <= redaction.bbox.x0 + CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT
+            } else {
+                let gap = (local.bbox.x0 - redaction.bbox.x1).max(0.0_f32);
+                gap <= CLUSTER_ANCHOR_HINT_MAX_GAP_PT
+                    || local.bbox.x0 >= redaction.bbox.x1 - CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT
+            };
+            if near_edge {
+                return Some(ClusterAnchorHint {
+                    text: text.to_owned(),
+                    bbox: local.bbox,
+                    line_bucket: ((local.bbox.y0 + local.bbox.y1) * 0.5_f32 / 2.0_f32).round()
+                        as i32,
+                    role_hint: "local".to_owned(),
+                    source: "local_hint".to_owned(),
+                });
+            }
+        }
+    }
+    let mut candidates = Vec::<(ClusterAnchorHint, f64, bool)>::new();
+    if let Some(local) = local_hint_hit {
+        let text = local.text.trim();
+        if !text.is_empty() {
+            candidates.push((
+                ClusterAnchorHint {
+                    text: text.to_owned(),
+                    bbox: local.bbox,
+                    line_bucket: ((local.bbox.y0 + local.bbox.y1) * 0.5_f32 / 2.0_f32).round()
+                        as i32,
+                    role_hint: "local".to_owned(),
+                    source: "local_hint".to_owned(),
+                },
+                0.0_f64,
+                true,
+            ));
+        }
+    }
+    for hint in cluster_hints {
+        let text = hint.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        candidates.push((hint.clone(), 0.0_f64, false));
+    }
+    let red_center_y = ((redaction.bbox.y0 + redaction.bbox.y1) * 0.5_f32) as f64;
+    let mut best: Option<(ClusterAnchorHint, f64)> = None;
+    for (hint, _score, is_local) in candidates {
+        let hint_center_y = ((hint.bbox.y0 + hint.bbox.y1) * 0.5_f32) as f64;
+        let y_distance = (hint_center_y - red_center_y).abs();
+        if y_distance > ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT + 6.0_f64 {
+            continue;
+        }
+        let (edge_gap, overlap_penalty) = if want_left {
+            let gap = redaction.bbox.x0 as f64 - hint.bbox.x1 as f64;
+            let overlap_penalty =
+                if hint.bbox.x1 > redaction.bbox.x0 + CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT {
+                    60.0_f64
+                } else {
+                    0.0_f64
+                };
+            (gap, overlap_penalty)
+        } else {
+            let gap = hint.bbox.x0 as f64 - redaction.bbox.x1 as f64;
+            let overlap_penalty =
+                if hint.bbox.x0 < redaction.bbox.x1 - CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT {
+                    60.0_f64
+                } else {
+                    0.0_f64
+                };
+            (gap, overlap_penalty)
+        };
+        if edge_gap > CLUSTER_ANCHOR_HINT_MAX_GAP_PT as f64 {
+            continue;
+        }
+        let role_penalty = match hint.role_hint.as_str() {
+            "left" if want_left => 0.0_f64,
+            "right" if !want_left => 0.0_f64,
+            "center" => 8.0_f64,
+            "local" => 0.0_f64,
+            _ => 20.0_f64,
+        };
+        let source_penalty = match hint.source.as_str() {
+            "line_cluster" => 0.0_f64,
+            "local_hint" => -2.0_f64,
+            "legacy_hit" => 2.0_f64,
+            _ => 4.0_f64,
+        };
+        let local_bonus = if is_local { -12.0_f64 } else { 0.0_f64 };
+        let line_bucket_penalty = (hint.line_bucket.abs() as f64) * 0.001_f64;
+        let score = edge_gap.max(0.0_f64)
+            + (y_distance * 4.0_f64)
+            + overlap_penalty
+            + role_penalty
+            + source_penalty
+            + line_bucket_penalty
+            + local_bonus;
+        match best {
+            None => best = Some((hint, score)),
+            Some((_, best_score)) if score < best_score => best = Some((hint, score)),
+            _ => {}
+        }
+    }
+    best.map(|(hint, _)| hint)
+}
+
 fn select_anchor_pair(
     redaction: &RedactionOccurrence,
     runs: &[&FontTextRun],
+    cluster_hints: &[ClusterAnchorHint],
     assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let red_center_y = rect_center_y(&redaction.bbox);
     let red_center_x = ((redaction.bbox.x0 + redaction.bbox.x1) * 0.5) as f64;
-    let left_hint_hit = redaction
+    let local_left_hint_hit = redaction
         .underlying_text
         .first()
         .filter(|hit| !hit.text.trim().is_empty());
-    let right_hint_hit = redaction
+    let local_right_hint_hit = redaction
         .underlying_text
         .get(1)
         .filter(|hit| !hit.text.trim().is_empty());
-    let left_hint = left_hint_hit.map(|hit| hit.text.trim());
-    let right_hint = right_hint_hit.map(|hit| hit.text.trim());
+    let left_cluster_hint =
+        select_cluster_hint(redaction, cluster_hints, local_left_hint_hit, true);
+    let right_cluster_hint =
+        select_cluster_hint(redaction, cluster_hints, local_right_hint_hit, false);
+    let left_hint = left_cluster_hint.as_ref().map(|hit| hit.text.trim());
+    let right_hint = right_cluster_hint.as_ref().map(|hit| hit.text.trim());
     let hints = AnchorHints {
         left_text: left_hint,
-        left_x: left_hint_hit.map(|hit| hit.bbox.x0 as f64),
+        left_x: left_cluster_hint.as_ref().map(|hit| hit.bbox.x0 as f64),
         right_text: right_hint,
-        right_x: right_hint_hit.map(|hit| hit.bbox.x0 as f64),
+        right_x: right_cluster_hint.as_ref().map(|hit| hit.bbox.x0 as f64),
     };
     let row_runs = sorted_row_runs_for_anchor(redaction, runs);
     if row_runs.is_empty() {

@@ -7,6 +7,7 @@ use crate::types::redaction_types::{
 };
 use crate::types::runtime_defaults::{RASTER_HIGHPASS_DPI, RASTER_PREPASS_DPI};
 use crate::types::time::Instant;
+use serde::Serialize;
 
 const LINE_BUCKET_PT: f32 = 2.0;
 const Y_BAND_PADDING_PT: f32 = 2.0;
@@ -15,8 +16,22 @@ const LINE_SEARCH_WINDOW_PT: f32 = 18.0;
 const MAX_CONTEXT_GAP_PT: f32 = 80.0;
 const LARGE_OVERLAP_PT: f32 = 20.0;
 const MAX_CONTEXT_WORDS_PER_SIDE: usize = 2;
+const CONTEXT_CLUSTER_MAX_Y_GAP_PT: f32 = 18.0;
+const CONTEXT_CLUSTER_WRAP_RESET_X_DELTA_PT: f32 = 16.0;
+const CONTEXT_CLUSTER_WRAP_FORWARD_X_ALLOWANCE_PT: f32 = 28.0;
+const MAX_CONTEXT_SPANS_PER_REDACTION: usize = 48;
+pub(crate) const CONTEXT_SPANS_META_KEY: &str = "context_spans_json_v1";
 type LineMatchScore = (i32, i32, i32, i32);
 type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
+
+#[derive(Debug, Clone, Serialize)]
+struct ContextSpanRecord {
+    text: String,
+    bbox: Rect,
+    line_bucket: i32,
+    role_hint: String,
+    source: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ScanPlan {
@@ -292,20 +307,36 @@ fn attach_underlying_text(
     }
 
     for redaction in page_redactions {
-        redaction.underlying_text = collect_context_hits_for_redaction(&hits, &redaction.bbox);
+        let (context_hits, context_spans) =
+            collect_context_hits_for_redaction(&hits, &redaction.bbox);
+        redaction.underlying_text = context_hits;
+        if !context_spans.is_empty() {
+            match serde_json::to_string(&context_spans) {
+                Ok(encoded) => {
+                    redaction
+                        .meta
+                        .insert(CONTEXT_SPANS_META_KEY.to_owned(), encoded);
+                }
+                Err(error) => diagnostics.push(format!(
+                    "page_index={} context_span_encode_error={error}",
+                    redaction.page_index
+                )),
+            }
+        }
     }
 }
 
 fn collect_context_hits_for_redaction(
     hits: &[UnderlyingTextHit],
     red_bbox: &Rect,
-) -> Vec<UnderlyingTextHit> {
+) -> (Vec<UnderlyingTextHit>, Vec<ContextSpanRecord>) {
     let red_center_y = (red_bbox.y0 + red_bbox.y1) * 0.5;
     let by_line = collect_line_candidates(hits, red_bbox, red_center_y);
+    let by_line_for_cluster = by_line.clone();
     let Some((line, before_anchor, after_anchor, _)) =
         select_best_context_line(hits, red_bbox, red_center_y, by_line)
     else {
-        return empty_context_hits(hits, red_bbox);
+        return (empty_context_hits(hits, red_bbox), Vec::new());
     };
 
     let before_phrase = before_anchor
@@ -320,10 +351,14 @@ fn collect_context_hits_for_redaction(
         .map(|idx| hits[*idx].page_index)
         .unwrap_or_default();
 
-    vec![
+    let context_hits = vec![
         build_phrase_hit(page_index, &before_phrase, hits, red_bbox),
         build_phrase_hit(page_index, &after_phrase, hits, red_bbox),
-    ]
+    ];
+    let line_cluster =
+        collect_context_line_cluster(hits, red_bbox, red_center_y, &line, &by_line_for_cluster);
+    let context_spans = build_context_span_records(hits, red_bbox, &line_cluster);
+    (context_hits, context_spans)
 }
 
 fn collect_line_candidates(
@@ -486,6 +521,188 @@ fn context_gap_rank_after(
     } else {
         100_000_i32
     }
+}
+
+fn collect_context_line_cluster(
+    hits: &[UnderlyingTextHit],
+    red_bbox: &Rect,
+    red_center_y: f32,
+    primary_line: &[usize],
+    by_line: &BTreeMap<i32, Vec<usize>>,
+) -> Vec<(i32, Vec<usize>)> {
+    if primary_line.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::<(i32, Vec<usize>)>::new();
+    let mut primary_sorted = primary_line.to_vec();
+    primary_sorted.sort_by(|left_idx, right_idx| {
+        hits[*left_idx]
+            .bbox
+            .x0
+            .partial_cmp(&hits[*right_idx].bbox.x0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                hits[*left_idx]
+                    .bbox
+                    .x1
+                    .partial_cmp(&hits[*right_idx].bbox.x1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    let primary_bucket = primary_sorted
+        .first()
+        .map(|index| line_bucket(&hits[*index].bbox))
+        .unwrap_or(0_i32);
+    let primary_first_x = primary_sorted
+        .first()
+        .map(|index| hits[*index].bbox.x0)
+        .unwrap_or(red_bbox.x0);
+    let primary_last_x = primary_sorted
+        .last()
+        .map(|index| hits[*index].bbox.x1)
+        .unwrap_or(red_bbox.x1);
+    let primary_center_y = primary_sorted
+        .iter()
+        .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5_f32)
+        .sum::<f32>()
+        / primary_sorted.len() as f32;
+    out.push((primary_bucket, primary_sorted));
+
+    for (bucket, line_indices) in by_line {
+        if *bucket == primary_bucket {
+            continue;
+        }
+        let mut sorted = line_indices.clone();
+        if sorted.is_empty() {
+            continue;
+        }
+        sorted.sort_by(|left_idx, right_idx| {
+            hits[*left_idx]
+                .bbox
+                .x0
+                .partial_cmp(&hits[*right_idx].bbox.x0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    hits[*left_idx]
+                        .bbox
+                        .x1
+                        .partial_cmp(&hits[*right_idx].bbox.x1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        let line_center_y = sorted
+            .iter()
+            .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5_f32)
+            .sum::<f32>()
+            / sorted.len() as f32;
+        let y_delta = (line_center_y - primary_center_y).abs();
+        if y_delta > CONTEXT_CLUSTER_MAX_Y_GAP_PT
+            || (line_center_y - red_center_y).abs() > CONTEXT_CLUSTER_MAX_Y_GAP_PT
+        {
+            continue;
+        }
+        let line_first_x = sorted
+            .first()
+            .map(|idx| hits[*idx].bbox.x0)
+            .unwrap_or(red_bbox.x0);
+        let wraps_to_new_line =
+            line_first_x + CONTEXT_CLUSTER_WRAP_RESET_X_DELTA_PT < primary_first_x;
+        let continues_forward =
+            line_first_x <= primary_last_x + CONTEXT_CLUSTER_WRAP_FORWARD_X_ALLOWANCE_PT;
+        if wraps_to_new_line || continues_forward {
+            out.push((*bucket, sorted));
+        }
+    }
+
+    out.sort_by(|left, right| {
+        let left_center = left
+            .1
+            .iter()
+            .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5_f32)
+            .sum::<f32>()
+            / left.1.len().max(1) as f32;
+        let right_center = right
+            .1
+            .iter()
+            .map(|idx| (hits[*idx].bbox.y0 + hits[*idx].bbox.y1) * 0.5_f32)
+            .sum::<f32>()
+            / right.1.len().max(1) as f32;
+        left_center
+            .partial_cmp(&right_center)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    out
+}
+
+fn build_context_span_records(
+    hits: &[UnderlyingTextHit],
+    red_bbox: &Rect,
+    lines: &[(i32, Vec<usize>)],
+) -> Vec<ContextSpanRecord> {
+    let mut out = Vec::<ContextSpanRecord>::new();
+    let mut seen = BTreeSet::<String>::new();
+    for (line_bucket, line_indices) in lines {
+        for idx in line_indices {
+            let Some(hit) = hits.get(*idx) else {
+                continue;
+            };
+            let text = hit.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let key = context_span_dedup_key(hit, *line_bucket);
+            if !seen.insert(key) {
+                continue;
+            }
+            out.push(ContextSpanRecord {
+                text: text.to_owned(),
+                bbox: hit.bbox,
+                line_bucket: *line_bucket,
+                role_hint: context_span_role_hint(hit, red_bbox).to_owned(),
+                source: "line_cluster".to_owned(),
+            });
+        }
+    }
+    out.sort_by(|left, right| {
+        let left_center_y = (left.bbox.y0 + left.bbox.y1) * 0.5_f32;
+        let right_center_y = (right.bbox.y0 + right.bbox.y1) * 0.5_f32;
+        left_center_y
+            .partial_cmp(&right_center_y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.bbox
+                    .x0
+                    .partial_cmp(&right.bbox.x0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.text.cmp(&right.text))
+    });
+    if out.len() > MAX_CONTEXT_SPANS_PER_REDACTION {
+        out.truncate(MAX_CONTEXT_SPANS_PER_REDACTION);
+    }
+    out
+}
+
+fn context_span_role_hint(hit: &UnderlyingTextHit, red_bbox: &Rect) -> &'static str {
+    if hit.bbox.x1 <= red_bbox.x0 + 0.5_f32 {
+        "left"
+    } else if hit.bbox.x0 >= red_bbox.x1 - 0.5_f32 {
+        "right"
+    } else {
+        "center"
+    }
+}
+
+fn context_span_dedup_key(hit: &UnderlyingTextHit, line_bucket: i32) -> String {
+    format!(
+        "{line_bucket}:{:.1}:{:.1}:{:.1}:{:.1}:{}",
+        hit.bbox.x0,
+        hit.bbox.y0,
+        hit.bbox.x1,
+        hit.bbox.y1,
+        hit.text.trim()
+    )
 }
 
 fn empty_context_hits(hits: &[UnderlyingTextHit], red_bbox: &Rect) -> Vec<UnderlyingTextHit> {
