@@ -20,6 +20,9 @@ const NOISE_WORDS: [&str; 24] = [
     "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
 ];
 
+const DETERMINISM_REQUIRED_REPEATS: usize = 2;
+const DETERMINISM_MAX_REPORTED_MISMATCHES: usize = 64;
+
 #[derive(Debug, Clone, Serialize)]
 struct ContractDatasetSummary {
     name: String,
@@ -77,6 +80,28 @@ struct AccuracyBenchmark {
     overall_candidates: CandidateSummary,
     overall_quality: QualitySummary,
     consistency: ConsistencySummary,
+    determinism_gate: DeterminismGateSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeterminismGateSummary {
+    enforced: bool,
+    required_repeats: usize,
+    evaluated_repeats: usize,
+    passed: bool,
+    mismatch_count: usize,
+    mismatches: Vec<DeterminismMismatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeterminismMismatch {
+    class: String,
+    repeat_index: usize,
+    dataset: Option<String>,
+    row_key: Option<String>,
+    target_label: Option<String>,
+    baseline: Option<String>,
+    observed: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1483,6 +1508,246 @@ fn metric_definitions() -> MetricDefinitions {
     }
 }
 
+fn format_optional_rank(rank: Option<usize>) -> String {
+    rank.map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn evaluate_determinism_gate(
+    run_snapshots: &[BenchmarkRunSnapshot],
+    requested_repeats: usize,
+) -> DeterminismGateSummary {
+    let enforced = requested_repeats >= DETERMINISM_REQUIRED_REPEATS;
+    if !enforced {
+        return DeterminismGateSummary {
+            enforced,
+            required_repeats: DETERMINISM_REQUIRED_REPEATS,
+            evaluated_repeats: run_snapshots.len(),
+            passed: true,
+            mismatch_count: 0,
+            mismatches: Vec::new(),
+        };
+    }
+
+    let mut mismatch_count = 0_usize;
+    let mut mismatches = Vec::<DeterminismMismatch>::new();
+    let mut record_mismatch = |mismatch: DeterminismMismatch| {
+        mismatch_count += 1;
+        if mismatches.len() >= DETERMINISM_MAX_REPORTED_MISMATCHES {
+            return;
+        }
+        mismatches.push(mismatch);
+    };
+    if run_snapshots.len() < DETERMINISM_REQUIRED_REPEATS {
+        record_mismatch(DeterminismMismatch {
+            class: "insufficient_repeats".to_owned(),
+            repeat_index: run_snapshots.len(),
+            dataset: None,
+            row_key: None,
+            target_label: None,
+            baseline: Some(DETERMINISM_REQUIRED_REPEATS.to_string()),
+            observed: Some(run_snapshots.len().to_string()),
+        });
+        return DeterminismGateSummary {
+            enforced,
+            required_repeats: DETERMINISM_REQUIRED_REPEATS,
+            evaluated_repeats: run_snapshots.len(),
+            passed: false,
+            mismatch_count,
+            mismatches,
+        };
+    }
+
+    let baseline_run = &run_snapshots[0];
+    let baseline_dataset_map = baseline_run
+        .dataset_runs
+        .iter()
+        .map(|dataset| (dataset.name.clone(), dataset))
+        .collect::<BTreeMap<_, _>>();
+    for (repeat_index, observed_run) in run_snapshots.iter().enumerate().skip(1) {
+        if observed_run.hash != baseline_run.hash {
+            record_mismatch(DeterminismMismatch {
+                class: "run_hash_mismatch".to_owned(),
+                repeat_index,
+                dataset: None,
+                row_key: None,
+                target_label: None,
+                baseline: Some(baseline_run.hash.clone()),
+                observed: Some(observed_run.hash.clone()),
+            });
+        }
+
+        let observed_dataset_map = observed_run
+            .dataset_runs
+            .iter()
+            .map(|dataset| (dataset.name.clone(), dataset))
+            .collect::<BTreeMap<_, _>>();
+
+        for (dataset_name, baseline_dataset) in &baseline_dataset_map {
+            let Some(observed_dataset) = observed_dataset_map.get(dataset_name) else {
+                record_mismatch(DeterminismMismatch {
+                    class: "dataset_missing".to_owned(),
+                    repeat_index,
+                    dataset: Some(dataset_name.clone()),
+                    row_key: None,
+                    target_label: None,
+                    baseline: Some("present".to_owned()),
+                    observed: Some("missing".to_owned()),
+                });
+                continue;
+            };
+            if baseline_dataset.dataset_hash != observed_dataset.dataset_hash {
+                record_mismatch(DeterminismMismatch {
+                    class: "dataset_hash_mismatch".to_owned(),
+                    repeat_index,
+                    dataset: Some(dataset_name.clone()),
+                    row_key: None,
+                    target_label: None,
+                    baseline: Some(baseline_dataset.dataset_hash.clone()),
+                    observed: Some(observed_dataset.dataset_hash.clone()),
+                });
+            }
+
+            let baseline_row_map = baseline_dataset
+                .rows
+                .iter()
+                .map(|row| (row.key.clone(), row))
+                .collect::<BTreeMap<_, _>>();
+            let observed_row_map = observed_dataset
+                .rows
+                .iter()
+                .map(|row| (row.key.clone(), row))
+                .collect::<BTreeMap<_, _>>();
+
+            for (row_key, baseline_row) in &baseline_row_map {
+                let Some(observed_row) = observed_row_map.get(row_key) else {
+                    record_mismatch(DeterminismMismatch {
+                        class: "row_missing".to_owned(),
+                        repeat_index,
+                        dataset: Some(dataset_name.clone()),
+                        row_key: Some(row_key.clone()),
+                        target_label: None,
+                        baseline: Some("present".to_owned()),
+                        observed: Some("missing".to_owned()),
+                    });
+                    continue;
+                };
+                if baseline_row.top1 != observed_row.top1 {
+                    record_mismatch(DeterminismMismatch {
+                        class: "row_top1_mismatch".to_owned(),
+                        repeat_index,
+                        dataset: Some(dataset_name.clone()),
+                        row_key: Some(row_key.clone()),
+                        target_label: None,
+                        baseline: baseline_row.top1.clone(),
+                        observed: observed_row.top1.clone(),
+                    });
+                }
+                if baseline_row.top5 != observed_row.top5 {
+                    record_mismatch(DeterminismMismatch {
+                        class: "row_top5_mismatch".to_owned(),
+                        repeat_index,
+                        dataset: Some(dataset_name.clone()),
+                        row_key: Some(row_key.clone()),
+                        target_label: None,
+                        baseline: Some(baseline_row.top5.join(" | ")),
+                        observed: Some(observed_row.top5.join(" | ")),
+                    });
+                }
+            }
+            for observed_row_key in observed_row_map.keys() {
+                if baseline_row_map.contains_key(observed_row_key) {
+                    continue;
+                }
+                record_mismatch(DeterminismMismatch {
+                    class: "row_extra".to_owned(),
+                    repeat_index,
+                    dataset: Some(dataset_name.clone()),
+                    row_key: Some(observed_row_key.clone()),
+                    target_label: None,
+                    baseline: Some("missing".to_owned()),
+                    observed: Some("present".to_owned()),
+                });
+            }
+
+            let baseline_target_rank_map = baseline_dataset
+                .target_ranks
+                .iter()
+                .map(|(label, rank)| (label.clone(), *rank))
+                .collect::<BTreeMap<_, _>>();
+            let observed_target_rank_map = observed_dataset
+                .target_ranks
+                .iter()
+                .map(|(label, rank)| (label.clone(), *rank))
+                .collect::<BTreeMap<_, _>>();
+            for (target_label, baseline_rank) in &baseline_target_rank_map {
+                let Some(observed_rank) = observed_target_rank_map.get(target_label).copied()
+                else {
+                    record_mismatch(DeterminismMismatch {
+                        class: "target_rank_missing".to_owned(),
+                        repeat_index,
+                        dataset: Some(dataset_name.clone()),
+                        row_key: None,
+                        target_label: Some(target_label.clone()),
+                        baseline: Some(format_optional_rank(*baseline_rank)),
+                        observed: Some("missing".to_owned()),
+                    });
+                    continue;
+                };
+                if observed_rank != *baseline_rank {
+                    record_mismatch(DeterminismMismatch {
+                        class: "target_rank_mismatch".to_owned(),
+                        repeat_index,
+                        dataset: Some(dataset_name.clone()),
+                        row_key: None,
+                        target_label: Some(target_label.clone()),
+                        baseline: Some(format_optional_rank(*baseline_rank)),
+                        observed: Some(format_optional_rank(observed_rank)),
+                    });
+                }
+            }
+            for (target_label, observed_rank) in &observed_target_rank_map {
+                if baseline_target_rank_map.contains_key(target_label) {
+                    continue;
+                }
+                record_mismatch(DeterminismMismatch {
+                    class: "target_rank_extra".to_owned(),
+                    repeat_index,
+                    dataset: Some(dataset_name.clone()),
+                    row_key: None,
+                    target_label: Some(target_label.clone()),
+                    baseline: Some("missing".to_owned()),
+                    observed: Some(format_optional_rank(*observed_rank)),
+                });
+            }
+        }
+
+        for observed_dataset_name in observed_dataset_map.keys() {
+            if baseline_dataset_map.contains_key(observed_dataset_name) {
+                continue;
+            }
+            record_mismatch(DeterminismMismatch {
+                class: "dataset_extra".to_owned(),
+                repeat_index,
+                dataset: Some(observed_dataset_name.clone()),
+                row_key: None,
+                target_label: None,
+                baseline: Some("missing".to_owned()),
+                observed: Some("present".to_owned()),
+            });
+        }
+    }
+
+    DeterminismGateSummary {
+        enforced,
+        required_repeats: DETERMINISM_REQUIRED_REPEATS,
+        evaluated_repeats: run_snapshots.len(),
+        passed: mismatch_count == 0,
+        mismatch_count,
+        mismatches,
+    }
+}
+
 fn compute_consistency(run_snapshots: &[BenchmarkRunSnapshot]) -> ConsistencySummary {
     if run_snapshots.is_empty() {
         return ConsistencySummary {
@@ -1755,6 +2020,14 @@ fn main() {
                 run_hashes: Vec::new(),
                 per_dataset: Vec::new(),
             },
+            determinism_gate: DeterminismGateSummary {
+                enforced: false,
+                required_repeats: DETERMINISM_REQUIRED_REPEATS,
+                evaluated_repeats: 1,
+                passed: true,
+                mismatch_count: 0,
+                mismatches: Vec::new(),
+            },
         };
         let dataset_runs = evaluated
             .iter()
@@ -1775,6 +2048,7 @@ fn main() {
     }
 
     let consistency = compute_consistency(&run_snapshots);
+    let determinism_gate = evaluate_determinism_gate(&run_snapshots, options.repeats);
     let mut payload = match selected_payload {
         Some(value) => value,
         None => {
@@ -1783,6 +2057,7 @@ fn main() {
         }
     };
     payload.consistency = consistency.clone();
+    payload.determinism_gate = determinism_gate.clone();
     println!("Guess Accuracy Benchmark");
     println!(
         "canonical_target_count={}",
@@ -2021,6 +2296,33 @@ fn main() {
         payload.consistency.unstable_rows_count,
         payload.consistency.unstable_rows_ratio
     );
+    println!(
+        "DETERMINISM_GATE enforced={} required_repeats={} evaluated_repeats={} passed={} mismatch_count={}",
+        payload.determinism_gate.enforced,
+        payload.determinism_gate.required_repeats,
+        payload.determinism_gate.evaluated_repeats,
+        payload.determinism_gate.passed,
+        payload.determinism_gate.mismatch_count
+    );
+    for mismatch in &payload.determinism_gate.mismatches {
+        println!(
+            "DETERMINISM_MISMATCH class={} repeat={} dataset={} row={} target={} baseline={} observed={}",
+            mismatch.class,
+            mismatch.repeat_index,
+            mismatch.dataset.as_deref().unwrap_or("-"),
+            mismatch.row_key.as_deref().unwrap_or("-"),
+            mismatch.target_label.as_deref().unwrap_or("-"),
+            mismatch.baseline.as_deref().unwrap_or("-"),
+            mismatch.observed.as_deref().unwrap_or("-")
+        );
+    }
+    if payload.determinism_gate.mismatch_count > payload.determinism_gate.mismatches.len() {
+        println!(
+            "DETERMINISM_MISMATCH truncated={} total={}",
+            payload.determinism_gate.mismatch_count - payload.determinism_gate.mismatches.len(),
+            payload.determinism_gate.mismatch_count
+        );
+    }
 
     if let Err(error) = write_json_file(&options.out_path, &payload) {
         eprintln!("{error}");
@@ -2038,4 +2340,131 @@ fn main() {
         std::process::exit(1);
     }
     println!("baseline_snapshot_path={}", baseline_out_path.display());
+
+    if payload.determinism_gate.enforced && !payload.determinism_gate.passed {
+        eprintln!(
+            "determinism gate failed: mismatch_count={}",
+            payload.determinism_gate.mismatch_count
+        );
+        std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evaluate_determinism_gate, BenchmarkRunSnapshot, DatasetRunSnapshot, RowSnapshot};
+    use std::collections::BTreeSet;
+
+    fn row_snapshot(key: &str, top1: Option<&str>, top5: &[&str]) -> RowSnapshot {
+        RowSnapshot {
+            key: key.to_owned(),
+            top1: top1.map(str::to_owned),
+            top5: top5
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+        }
+    }
+
+    fn dataset_snapshot(
+        name: &str,
+        dataset_hash: &str,
+        row: RowSnapshot,
+        rank: Option<usize>,
+    ) -> DatasetRunSnapshot {
+        DatasetRunSnapshot {
+            name: name.to_owned(),
+            dataset_hash: dataset_hash.to_owned(),
+            rows: vec![row],
+            target_ranks: vec![("target_0".to_owned(), rank)],
+        }
+    }
+
+    fn run_snapshot(hash: &str, dataset: DatasetRunSnapshot) -> BenchmarkRunSnapshot {
+        BenchmarkRunSnapshot {
+            hash: hash.to_owned(),
+            dataset_runs: vec![dataset],
+        }
+    }
+
+    #[test]
+    fn determinism_gate_passes_for_identical_double_run() {
+        let row = row_snapshot("row_0", Some("ALPHA"), &["ALPHA", "BETA", "GAMMA"]);
+        let dataset = dataset_snapshot("EFTA00038617", "dataset_hash_0", row, Some(1));
+        let runs = vec![
+            run_snapshot("run_hash_0", dataset.clone()),
+            run_snapshot("run_hash_0", dataset),
+        ];
+
+        let gate = evaluate_determinism_gate(&runs, 2);
+        assert!(gate.enforced, "determinism gate should be enforced");
+        assert!(
+            gate.passed,
+            "determinism gate should pass for identical runs"
+        );
+        assert_eq!(gate.mismatch_count, 0);
+        assert!(gate.mismatches.is_empty());
+    }
+
+    #[test]
+    fn determinism_gate_reports_actionable_mismatch_classes() {
+        let baseline_row = row_snapshot("row_0", Some("ALPHA"), &["ALPHA", "BETA", "GAMMA"]);
+        let observed_row = row_snapshot("row_0", Some("OMEGA"), &["OMEGA", "BETA", "GAMMA"]);
+        let runs = vec![
+            run_snapshot(
+                "run_hash_0",
+                dataset_snapshot("EFTA00038617", "dataset_hash_0", baseline_row, Some(1)),
+            ),
+            run_snapshot(
+                "run_hash_1",
+                dataset_snapshot("EFTA00038617", "dataset_hash_1", observed_row, Some(2)),
+            ),
+        ];
+
+        let gate = evaluate_determinism_gate(&runs, 2);
+        assert!(gate.enforced, "determinism gate should be enforced");
+        assert!(
+            !gate.passed,
+            "determinism gate should fail for divergent repeated runs"
+        );
+        assert!(gate.mismatch_count > 0);
+
+        let classes = gate
+            .mismatches
+            .iter()
+            .map(|item| item.class.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(classes.contains("run_hash_mismatch"));
+        assert!(classes.contains("row_top1_mismatch"));
+        assert!(classes.contains("target_rank_mismatch"));
+    }
+
+    #[test]
+    fn determinism_gate_is_not_enforced_for_single_run_mode() {
+        let runs = vec![
+            run_snapshot(
+                "run_hash_0",
+                dataset_snapshot(
+                    "EFTA00038617",
+                    "dataset_hash_0",
+                    row_snapshot("row_0", Some("ALPHA"), &["ALPHA"]),
+                    Some(1),
+                ),
+            ),
+            run_snapshot(
+                "run_hash_1",
+                dataset_snapshot(
+                    "EFTA00038617",
+                    "dataset_hash_1",
+                    row_snapshot("row_0", Some("OMEGA"), &["OMEGA"]),
+                    Some(2),
+                ),
+            ),
+        ];
+        let gate = evaluate_determinism_gate(&runs, 1);
+        assert!(!gate.enforced);
+        assert!(gate.passed);
+        assert_eq!(gate.mismatch_count, 0);
+        assert!(gate.mismatches.is_empty());
+    }
 }
