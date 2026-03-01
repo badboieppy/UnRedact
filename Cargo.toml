@@ -78,3 +78,8 @@ required-features = ["cli-entry"]
 name = "visual_score_impact_benchmark"
 path = "src/bin/visual_score_impact_benchmark.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "synthetic_overfitting_benchmark"
+path = "src/bin/synthetic_overfitting_benchmark.rs"
+required-features = ["cli-entry"]
