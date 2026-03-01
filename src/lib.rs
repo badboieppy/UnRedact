@@ -19,6 +19,7 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::unused_trait_names)]
 
+pub mod benchmarks;
 mod data;
 mod dependency;
 mod logic;

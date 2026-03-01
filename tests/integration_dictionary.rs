@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use unredact::benchmarks::types::known_redaction_contract::canonical_known_redaction_contract;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -10,31 +11,31 @@ use unredact::types::visualizer_config::VisualizerConfig;
 mod common;
 use common::{load_guess_report, test_output_dir};
 
-const TARGET_NAMES: [&str; 10] = [
-    "SARAH KELLEN",
-    "ADRIANA MUCINSKA",
-    "NADIA MARCINKOVA",
-    "LES WEXNER",
-    "LESLEY GROFF",
-    "JEAN LUC BRUNEL",
-    "HALEY ROBSON",
-    "WILLIAM HAMMOND",
-    "DAVID RODGERS",
-    "RICHARD BARNETT",
-];
-
 const ALT_FORMAT_DICTIONARY_LINES: [&str; 10] = [
     "KELLEN, SARAH",
     "MUCINSKA, ADRIANA",
     "NADIA|MARCINKOVA",
     "MR.|LES|WEXNER",
     "GROFF, LESLEY",
-    "BRUNEL, JEAN LUC JR.",
+    "OMEGA BRUNEL TOKEN",
     "ROBSON, HALEY",
     "HAMMOND, WILLIAM",
     "RODGERS, DAVID",
     "DR. RICHARD BARNETT",
 ];
+
+fn canonical_efta00038617_targets() -> Vec<String> {
+    let contract = canonical_known_redaction_contract()
+        .expect("canonical known redaction contract should load");
+    let dataset = contract
+        .dataset_by_name("EFTA00038617")
+        .expect("canonical contract should include EFTA00038617");
+    dataset
+        .targets
+        .iter()
+        .map(|target| target.target.clone())
+        .collect::<Vec<_>>()
+}
 
 fn write_dictionary(path: &Path) {
     let mut lines = ALT_FORMAT_DICTIONARY_LINES
@@ -174,9 +175,9 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
         }
     }
 
-    let missing = TARGET_NAMES
+    let target_names = canonical_efta00038617_targets();
+    let missing = target_names
         .iter()
-        .copied()
         .filter(|target| !pool_contains_target(&pool, target))
         .collect::<Vec<_>>();
     assert!(
@@ -185,7 +186,7 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
         missing
     );
 
-    let ranks = TARGET_NAMES
+    let ranks = target_names
         .iter()
         .map(|target| best_rank_in_rows(&rows, target))
         .collect::<Vec<_>>();
@@ -194,7 +195,7 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
         .filter_map(|rank| *rank)
         .filter(|rank| *rank <= 20)
         .count() as f64
-        / TARGET_NAMES.len() as f64;
+        / target_names.len() as f64;
     assert!(
         recall_at_20 >= 0.8_f64,
         "expected recall@20 >= 0.8 for alternate dictionary formats, got {:.3} (ranks={:?})",

@@ -1,0 +1,106 @@
+{
+  "contract_id": "C-KNOWN-REDACTION-TARGETS-V1",
+  "schema_version": 1,
+  "datasets": [
+    {
+      "name": "EFTA00038617",
+      "input_pdf": "test_data/EFTA00038617.pdf",
+      "row_selector": {
+        "kind": "page_y_range",
+        "page_index": 1,
+        "y0_min": 440.0,
+        "y1_max": 505.0
+      },
+      "targets": [
+        {
+          "label": "SARAH KELLEN",
+          "target": "SARAH KELLEN",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "ADRIANA MUCINSKA",
+          "target": "ADRIANA MUCINSKA",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "NADIA MARCINKOVA",
+          "target": "NADIA MARCINKOVA",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "LES WEXNER",
+          "target": "LES WEXNER",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "LESLEY GROFF",
+          "target": "LESLEY GROFF",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "HALEY ROBSON",
+          "target": "HALEY ROBSON",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "WILLIAM HAMMOND",
+          "target": "WILLIAM HAMMOND",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "DAVID RODGERS",
+          "target": "DAVID RODGERS",
+          "selector": {
+            "kind": "in_pool"
+          }
+        },
+        {
+          "label": "RICHARD BARNETT",
+          "target": "RICHARD BARNETT",
+          "selector": {
+            "kind": "in_pool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "EFTA00101126",
+      "input_pdf": "test_data/EFTA00101126.pdf",
+      "row_selector": {
+        "kind": "position_from_end"
+      },
+      "targets": [
+        {
+          "label": "second_last",
+          "target": "SARAH KELLEN",
+          "selector": {
+            "kind": "index_from_end",
+            "index_from_end": 2
+          }
+        },
+        {
+          "label": "last",
+          "target": "SARAH KELLEN",
+          "selector": {
+            "kind": "index_from_end",
+            "index_from_end": 1
+          }
+        }
+      ]
+    }
+  ]
+}

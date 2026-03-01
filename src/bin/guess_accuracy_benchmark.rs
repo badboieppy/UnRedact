@@ -4,30 +4,35 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use unredact::benchmarks::types::known_redaction_contract::{
+    canonical_known_redaction_contract, KnownRedactionContract, KnownRedactionDataset,
+    KnownRedactionRowSelector, KnownRedactionTargetSelector,
+};
 use unredact::service::tooling_entry::default_name_dictionary_entries;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::runtime_defaults::MULTI_SPAN_GAP_RATIO_THRESHOLD;
 use unredact::types::visualizer_config::VisualizerConfig;
 
-const EFTA00038617_TARGETS: [&str; 10] = [
-    "SARAH KELLEN",
-    "ADRIANA MUCINSKA",
-    "NADIA MARCINKOVA",
-    "LES WEXNER",
-    "LESLEY GROFF",
-    "JEAN LUC BRUNEL",
-    "HALEY ROBSON",
-    "WILLIAM HAMMOND",
-    "DAVID RODGERS",
-    "RICHARD BARNETT",
-];
-
 const NOISE_WORDS: [&str; 24] = [
     "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET",
     "KILO", "LIMA", "MIKE", "NOVEMBER", "OSCAR", "PAPA", "QUEBEC", "ROMEO", "SIERRA", "TANGO",
     "UNIFORM", "VICTOR", "WHISKEY", "XRAY",
 ];
+
+#[derive(Debug, Clone, Serialize)]
+struct ContractDatasetSummary {
+    name: String,
+    target_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CanonicalContractSummary {
+    contract_id: String,
+    schema_version: usize,
+    canonical_target_count: usize,
+    datasets: Vec<ContractDatasetSummary>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct RankedTarget {
@@ -45,6 +50,7 @@ struct BenchmarkSummary {
     recall_at_20: f64,
     mrr: f64,
     mean_rank_found: Option<f64>,
+    best_feasible_k: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +67,7 @@ struct DatasetResult {
 
 #[derive(Debug, Clone, Serialize)]
 struct AccuracyBenchmark {
+    contract: CanonicalContractSummary,
     definitions: MetricDefinitions,
     datasets: Vec<DatasetResult>,
     overall: BenchmarkSummary,
@@ -81,6 +88,7 @@ struct MetricDefinitions {
     recall_at_20: &'static str,
     mrr: &'static str,
     mean_rank_found: &'static str,
+    best_feasible_k: &'static str,
     best_rank: &'static str,
     visual_rows_total: &'static str,
     visual_rows_with_top_guess: &'static str,
@@ -131,6 +139,20 @@ struct MetricDefinitions {
     consistency_mean_rank_stddev: &'static str,
     consistency_unstable_rows_count: &'static str,
     consistency_unstable_rows_ratio: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BaselineDatasetSnapshot {
+    name: String,
+    summary: BenchmarkSummary,
+    targets: Vec<RankedTarget>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BaselineSnapshot {
+    contract: CanonicalContractSummary,
+    datasets: Vec<BaselineDatasetSnapshot>,
+    overall: BenchmarkSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -296,6 +318,8 @@ struct EvaluatedDataset {
 struct CliOptions {
     #[arg(long = "out", default_value = "benchmark/guess_accuracy.json")]
     out_path: PathBuf,
+    #[arg(long = "baseline-out")]
+    baseline_out_path: Option<PathBuf>,
     #[arg(
         long,
         default_value_t = 2_usize,
@@ -312,6 +336,72 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
         return Err("value must be > 0".to_owned());
     }
     Ok(parsed)
+}
+
+fn canonical_contract_summary(contract: &KnownRedactionContract) -> CanonicalContractSummary {
+    let datasets = contract
+        .datasets
+        .iter()
+        .map(|dataset| ContractDatasetSummary {
+            name: dataset.name.clone(),
+            target_count: dataset.targets.len(),
+        })
+        .collect::<Vec<_>>();
+    CanonicalContractSummary {
+        contract_id: contract.contract_id.clone(),
+        schema_version: contract.schema_version,
+        canonical_target_count: contract.canonical_target_count(),
+        datasets,
+    }
+}
+
+fn build_baseline_snapshot(benchmark: &AccuracyBenchmark) -> BaselineSnapshot {
+    BaselineSnapshot {
+        contract: benchmark.contract.clone(),
+        datasets: benchmark
+            .datasets
+            .iter()
+            .map(|dataset| BaselineDatasetSnapshot {
+                name: dataset.name.clone(),
+                summary: dataset.summary.clone(),
+                targets: dataset.targets.clone(),
+            })
+            .collect::<Vec<_>>(),
+        overall: benchmark.overall.clone(),
+    }
+}
+
+fn default_baseline_out_path(out_path: &Path) -> PathBuf {
+    let parent = out_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = out_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("guess_accuracy");
+    parent.join(format!("{stem}.baseline.json"))
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create output directory {}: {error}",
+            parent.display()
+        )
+    })
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    ensure_parent_dir(path)?;
+    let encoded = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("failed to encode json for {}: {error}", path.display()))?;
+    std::fs::write(path, encoded)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 fn benchmark_config() -> UnredactServiceConfig {
@@ -396,6 +486,13 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> BenchmarkSummary {
     let evaluated_items = ranks.len();
     let found = ranks.iter().filter_map(|rank| *rank).collect::<Vec<_>>();
     let found_items = found.len();
+    let best_feasible_k = if found_items == evaluated_items && !found.is_empty() {
+        found.iter().copied().max()
+    } else if evaluated_items == 0 {
+        Some(0_usize)
+    } else {
+        None
+    };
     let recall_at = |k: usize| -> f64 {
         if evaluated_items == 0 {
             return 0.0_f64;
@@ -430,6 +527,7 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> BenchmarkSummary {
         recall_at_20: recall_at(20),
         mrr,
         mean_rank_found,
+        best_feasible_k,
     }
 }
 
@@ -779,7 +877,7 @@ fn merge_timing_accumulators(accumulators: &[TimingAccumulator]) -> TimingAccumu
     merged
 }
 
-fn write_noisy_dictionary(path: &Path, targets: &[&str]) -> Result<(), String> {
+fn write_noisy_dictionary(path: &Path, targets: &[String]) -> Result<(), String> {
     let mut lines = targets
         .iter()
         .map(|value| value.to_string())
@@ -931,8 +1029,31 @@ fn compute_rank_stddev(rank_sets: &[Vec<(String, Option<usize>)>]) -> Option<f64
     mean(&deviations)
 }
 
-fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
-    let input = Path::new("test_data/EFTA00101126.pdf");
+fn unique_target_texts(dataset: &KnownRedactionDataset) -> Vec<String> {
+    dataset
+        .targets
+        .iter()
+        .map(|target| target.target.trim().to_ascii_uppercase())
+        .filter(|target| !target.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn evaluate_efta00101126(
+    root: &Path,
+    contract: &KnownRedactionDataset,
+) -> Result<EvaluatedDataset, String> {
+    if !matches!(
+        &contract.row_selector,
+        KnownRedactionRowSelector::PositionFromEnd {}
+    ) {
+        return Err(format!(
+            "dataset '{}' has unsupported row_selector for EFTA00101126 evaluator",
+            contract.name
+        ));
+    }
+    let input = Path::new(&contract.input_pdf);
     if !input.exists() {
         return Err(format!("missing dataset input {}", input.display()));
     }
@@ -941,33 +1062,35 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
     let report = run_report(input, &output_dir, None)?;
 
-    let mut targets = Vec::<RankedTarget>::new();
-    let target_text = "SARAH KELLEN";
-    if report.guesses.len() >= 2 {
-        let second_last = &report.guesses[report.guesses.len() - 2];
-        let last = &report.guesses[report.guesses.len() - 1];
-        targets.push(RankedTarget {
-            label: "second_last".to_owned(),
-            target: target_text.to_owned(),
-            best_rank: rank_in_guess(second_last, target_text),
-        });
-        targets.push(RankedTarget {
-            label: "last".to_owned(),
-            target: target_text.to_owned(),
-            best_rank: rank_in_guess(last, target_text),
-        });
-    } else {
-        targets.push(RankedTarget {
-            label: "second_last".to_owned(),
-            target: target_text.to_owned(),
-            best_rank: None,
-        });
-        targets.push(RankedTarget {
-            label: "last".to_owned(),
-            target: target_text.to_owned(),
-            best_rank: None,
-        });
-    }
+    let targets = contract
+        .targets
+        .iter()
+        .map(|target| {
+            let best_rank = match &target.selector {
+                KnownRedactionTargetSelector::IndexFromEnd { index_from_end } => {
+                    if report.guesses.len() >= *index_from_end {
+                        rank_in_guess(
+                            &report.guesses[report.guesses.len() - *index_from_end],
+                            &target.target,
+                        )
+                    } else {
+                        None
+                    }
+                }
+                KnownRedactionTargetSelector::InPool {} => {
+                    return Err(format!(
+                        "dataset '{}' target '{}' uses InPool selector, expected IndexFromEnd",
+                        contract.name, target.label
+                    ));
+                }
+            };
+            Ok(RankedTarget {
+                label: target.label.clone(),
+                target: target.target.clone(),
+                best_rank,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let ranks = targets
         .iter()
@@ -983,7 +1106,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
-        name: "EFTA00101126".to_owned(),
+        name: contract.name.clone(),
         summary: summarize_ranks(&ranks),
         visual_summary,
         visual_rerank_summary,
@@ -993,7 +1116,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
-        name: "EFTA00101126".to_owned(),
+        name: contract.name.clone(),
         dataset_hash: hash_json(&(
             dataset.name.clone(),
             dataset.summary.clone(),
@@ -1003,7 +1126,7 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
         ))?,
-        rows: build_row_snapshots("EFTA00101126", &report.guesses),
+        rows: build_row_snapshots(&contract.name, &report.guesses),
         target_ranks: targets
             .iter()
             .map(|target| (target.label.clone(), target.best_rank))
@@ -1019,8 +1142,24 @@ fn evaluate_efta00101126(root: &Path) -> Result<EvaluatedDataset, String> {
     })
 }
 
-fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
-    let input = Path::new("test_data/EFTA00038617.pdf");
+fn evaluate_efta00038617(
+    root: &Path,
+    contract: &KnownRedactionDataset,
+) -> Result<EvaluatedDataset, String> {
+    let (page_index, y0_min, y1_max) = match &contract.row_selector {
+        KnownRedactionRowSelector::PageYRange {
+            page_index,
+            y0_min,
+            y1_max,
+        } => (*page_index, *y0_min, *y1_max),
+        KnownRedactionRowSelector::PositionFromEnd {} => {
+            return Err(format!(
+                "dataset '{}' has unsupported row_selector for EFTA00038617 evaluator",
+                contract.name
+            ));
+        }
+    };
+    let input = Path::new(&contract.input_pdf);
     if !input.exists() {
         return Err(format!("missing dataset input {}", input.display()));
     }
@@ -1028,25 +1167,32 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
     std::fs::create_dir_all(&output_dir)
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
     let dictionary_path = output_dir.join("benchmark_dictionary.txt");
-    write_noisy_dictionary(&dictionary_path, &EFTA00038617_TARGETS)?;
+    write_noisy_dictionary(&dictionary_path, &unique_target_texts(contract))?;
     let report = run_report(input, &output_dir, Some(&dictionary_path))?;
 
     let first_bullet = report
         .guesses
         .iter()
         .filter(|guess| {
-            guess.page_index == 1 && guess.bbox.y0 >= 440.0_f32 && guess.bbox.y1 <= 505.0_f32
+            guess.page_index == page_index && guess.bbox.y0 >= y0_min && guess.bbox.y1 <= y1_max
         })
         .collect::<Vec<_>>();
 
-    let targets = EFTA00038617_TARGETS
+    let targets = contract
+        .targets
         .iter()
-        .map(|target| RankedTarget {
-            label: (*target).to_owned(),
-            target: (*target).to_owned(),
-            best_rank: best_rank_in_guesses(&first_bullet, target),
+        .map(|target| match &target.selector {
+            KnownRedactionTargetSelector::InPool {} => Ok(RankedTarget {
+                label: target.label.clone(),
+                target: target.target.clone(),
+                best_rank: best_rank_in_guesses(&first_bullet, &target.target),
+            }),
+            KnownRedactionTargetSelector::IndexFromEnd { .. } => Err(format!(
+                "dataset '{}' target '{}' uses IndexFromEnd selector, expected InPool",
+                contract.name, target.label
+            )),
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
 
     let ranks = targets
         .iter()
@@ -1062,7 +1208,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
     let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
-        name: "EFTA00038617".to_owned(),
+        name: contract.name.clone(),
         summary: summarize_ranks(&ranks),
         visual_summary,
         visual_rerank_summary,
@@ -1072,7 +1218,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
         targets: targets.clone(),
     };
     let run_snapshot = DatasetRunSnapshot {
-        name: "EFTA00038617".to_owned(),
+        name: contract.name.clone(),
         dataset_hash: hash_json(&(
             dataset.name.clone(),
             dataset.summary.clone(),
@@ -1082,7 +1228,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
         ))?,
-        rows: build_row_snapshots("EFTA00038617", &report.guesses),
+        rows: build_row_snapshots(&contract.name, &report.guesses),
         target_ranks: targets
             .iter()
             .map(|target| (target.label.clone(), target.best_rank))
@@ -1100,7 +1246,7 @@ fn evaluate_efta00038617(root: &Path) -> Result<EvaluatedDataset, String> {
 
 fn print_summary(label: &str, summary: &BenchmarkSummary) {
     println!(
-        "{label:16} items={:>2} found={:>2} r@1={:>5.1}% r@5={:>5.1}% r@20={:>5.1}% mrr={:.3} mean_rank={}",
+        "{label:16} items={:>2} found={:>2} r@1={:>5.1}% r@5={:>5.1}% r@20={:>5.1}% mrr={:.3} mean_rank={} best_k={}",
         summary.evaluated_items,
         summary.found_items,
         summary.recall_at_1 * 100.0_f64,
@@ -1110,6 +1256,10 @@ fn print_summary(label: &str, summary: &BenchmarkSummary) {
         summary
             .mean_rank_found
             .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        summary
+            .best_feasible_k
+            .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_owned())
     );
 }
@@ -1249,6 +1399,8 @@ fn metric_definitions() -> MetricDefinitions {
         recall_at_20: "Fraction of targets with best_rank <= 20. Higher is better.",
         mrr: "Mean reciprocal rank across all targets: avg(1/rank), with 0 for not-found.",
         mean_rank_found: "Average rank among found targets only. Lower is better.",
+        best_feasible_k:
+            "Smallest K where recall@K reaches 1.0 for the evaluated targets. Null means not all targets were found.",
         best_rank:
             "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
         visual_rows_total: "Total redaction rows in guesses for the dataset.",
@@ -1474,6 +1626,29 @@ fn compute_consistency(run_snapshots: &[BenchmarkRunSnapshot]) -> ConsistencySum
 
 fn main() {
     let options = CliOptions::parse();
+    let known_contract = match canonical_known_redaction_contract() {
+        Ok(contract) => contract,
+        Err(error) => {
+            eprintln!("failed to load canonical known redaction contract: {error}");
+            std::process::exit(1);
+        }
+    };
+    let contract_summary = canonical_contract_summary(known_contract);
+    let efta00101126_contract = match known_contract.dataset_by_name("EFTA00101126") {
+        Some(dataset) => dataset,
+        None => {
+            eprintln!("missing dataset contract entry for EFTA00101126");
+            std::process::exit(1);
+        }
+    };
+    let efta00038617_contract = match known_contract.dataset_by_name("EFTA00038617") {
+        Some(dataset) => dataset,
+        None => {
+            eprintln!("missing dataset contract entry for EFTA00038617");
+            std::process::exit(1);
+        }
+    };
+
     let mut run_snapshots = Vec::<BenchmarkRunSnapshot>::new();
     let mut selected_payload = None::<AccuracyBenchmark>;
 
@@ -1495,7 +1670,7 @@ fn main() {
             std::process::exit(1);
         }
 
-        let efta00101126 = match evaluate_efta00101126(&benchmark_root) {
+        let efta00101126 = match evaluate_efta00101126(&benchmark_root, efta00101126_contract) {
             Ok(result) => result,
             Err(error) => {
                 eprintln!(
@@ -1505,7 +1680,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let efta00038617 = match evaluate_efta00038617(&benchmark_root) {
+        let efta00038617 = match evaluate_efta00038617(&benchmark_root, efta00038617_contract) {
             Ok(result) => result,
             Err(error) => {
                 eprintln!(
@@ -1559,6 +1734,7 @@ fn main() {
         let definitions = metric_definitions();
 
         let provisional = AccuracyBenchmark {
+            contract: contract_summary.clone(),
             definitions,
             datasets,
             overall,
@@ -1608,6 +1784,10 @@ fn main() {
     };
     payload.consistency = consistency.clone();
     println!("Guess Accuracy Benchmark");
+    println!(
+        "canonical_target_count={}",
+        payload.contract.canonical_target_count
+    );
     println!("Metric definitions:");
     println!("  evaluated_items: {}", payload.definitions.evaluated_items);
     println!("  found_items: {}", payload.definitions.found_items);
@@ -1616,6 +1796,7 @@ fn main() {
     println!("  recall_at_20: {}", payload.definitions.recall_at_20);
     println!("  mrr: {}", payload.definitions.mrr);
     println!("  mean_rank_found: {}", payload.definitions.mean_rank_found);
+    println!("  best_feasible_k: {}", payload.definitions.best_feasible_k);
     println!("  best_rank: {}", payload.definitions.best_rank);
     println!(
         "  visual_rows_total: {}",
@@ -1841,28 +2022,20 @@ fn main() {
         payload.consistency.unstable_rows_ratio
     );
 
-    if let Some(parent) = options.out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let create_result = std::fs::create_dir_all(parent);
-            if let Err(error) = create_result {
-                eprintln!(
-                    "failed to create output directory {}: {error}",
-                    parent.display()
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    let encoded = match serde_json::to_vec_pretty(&payload) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("failed to encode benchmark json: {error}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(error) = std::fs::write(&options.out_path, encoded) {
-        eprintln!("failed to write {}: {error}", options.out_path.display());
+    if let Err(error) = write_json_file(&options.out_path, &payload) {
+        eprintln!("{error}");
         std::process::exit(1);
     }
     println!("wrote {}", options.out_path.display());
+
+    let baseline_out_path = options
+        .baseline_out_path
+        .clone()
+        .unwrap_or_else(|| default_baseline_out_path(&options.out_path));
+    let baseline = build_baseline_snapshot(&payload);
+    if let Err(error) = write_json_file(&baseline_out_path, &baseline) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+    println!("baseline_snapshot_path={}", baseline_out_path.display());
 }
