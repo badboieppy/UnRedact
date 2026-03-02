@@ -299,6 +299,7 @@ const ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT: f64 = 18.0_f64;
 const ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT: f64 = 4.0_f64;
 const ROW_CONTEXT_WRAP_RESET_X_DELTA_PT: f64 = 16.0_f64;
 const ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT: f64 = 28.0_f64;
+const HINT_SUPERSET_MIN_PREFIX_CHARS: usize = 6;
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
 
@@ -2308,6 +2309,21 @@ fn resolve_anchor_text_and_x(
         return (hint_text.to_owned(), run.bbox.x0 as f64 + offset);
     }
     if hint_text.contains(run_text) {
+        let normalized_hint = hint_text.trim_end();
+        if normalized_hint.ends_with(',') {
+            let prefix_chars = normalized_hint
+                .find(run_text)
+                .map(|offset| {
+                    normalized_hint[..offset]
+                        .chars()
+                        .filter(|ch| !ch.is_whitespace())
+                        .count()
+                })
+                .unwrap_or(0);
+            if prefix_chars >= HINT_SUPERSET_MIN_PREFIX_CHARS {
+                return (hint_text.to_owned(), hint_x.unwrap_or(run.bbox.x0 as f64));
+            }
+        }
         return (run_text.to_owned(), run.bbox.x0 as f64);
     }
     (hint_text.to_owned(), hint_x.unwrap_or(run.bbox.x0 as f64))
@@ -2757,4 +2773,76 @@ fn curated_name_prior_set() -> &'static BTreeSet<String> {
             .map(|line| line.to_ascii_uppercase())
             .collect::<BTreeSet<_>>()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_anchor_text_and_x;
+    use crate::types::file_types::{FontTextRun, Rect};
+    use crate::types::typography_types::TypographyProfile;
+
+    fn make_run(text: &str, x0: f32, x1: f32) -> FontTextRun {
+        FontTextRun {
+            page_index: 0,
+            text: text.to_owned(),
+            bbox: Rect::new(x0, 100.0, x1, 110.0),
+            font_key: "font-key".to_owned(),
+            font_name: "font-name".to_owned(),
+            font_size_pt: 10.0_f32,
+            h_scale_pct: 100.0_f32,
+            measured_width_pt: None,
+            measured_width_px: None,
+            measured_dpi: None,
+            char_advances_pt: Vec::new(),
+            char_advances_px: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_anchor_prefers_full_hint_when_run_text_is_substring() {
+        let run = make_run("Maxwell,", 180.0_f32, 236.0_f32);
+        let profile = TypographyProfile::default();
+        let (text, x) = resolve_anchor_text_and_x(
+            0,
+            &run,
+            Some("Ghislaine Maxwell,"),
+            Some(130.0_f64),
+            None,
+            &profile,
+        );
+        assert_eq!(text, "Ghislaine Maxwell,");
+        assert_eq!(x, 130.0_f64);
+    }
+
+    #[test]
+    fn resolve_anchor_keeps_run_text_when_superset_prefix_is_too_short() {
+        let run = make_run("Brunel,", 180.0_f32, 236.0_f32);
+        let profile = TypographyProfile::default();
+        let (text, x) = resolve_anchor_text_and_x(
+            0,
+            &run,
+            Some("Luc Brunel,"),
+            Some(130.0_f64),
+            None,
+            &profile,
+        );
+        assert_eq!(text, "Brunel,");
+        assert_eq!(x, 180.0_f64);
+    }
+
+    #[test]
+    fn resolve_anchor_keeps_run_text_when_hint_does_not_end_with_comma() {
+        let run = make_run("including", 90.0_f32, 150.0_f32);
+        let profile = TypographyProfile::default();
+        let (text, x) = resolve_anchor_text_and_x(
+            0,
+            &run,
+            Some("EPSTEIN, including"),
+            Some(40.0_f64),
+            None,
+            &profile,
+        );
+        assert_eq!(text, "including");
+        assert_eq!(x, 90.0_f64);
+    }
 }

@@ -1,0 +1,103 @@
+{
+  "contract_id": "C-INVESTIGATIVE-PROOF-FIRST",
+  "schema_version": 1,
+  "proposal_id": "proposal-rank-pass-001",
+  "proposal_title": "Adjust anchor-weighted rerank scoring for known target ordering",
+  "proposal_owner": "benchmark-team",
+  "created_at_utc": "2026-03-01T00:00:00Z",
+  "consumed_contracts": [
+    "C-BEST-FEASIBLE-K-RULE",
+    "C-BASELINE-NO-REGRESSION"
+  ],
+  "baseline_artifacts": {
+    "known_baseline_path": "benchmark/known_redaction_baseline.json",
+    "deterministic_gate_path": "benchmark/determinism_bundle2_probe.json",
+    "synthetic_gate_path": "benchmark/synthetic_overfitting_evaluation.json"
+  },
+  "baseline_metrics": [
+    {
+      "metric_id": "known.recall_at_1",
+      "value": 0.10,
+      "source_artifact": "benchmark/guess_accuracy.json"
+    },
+    {
+      "metric_id": "known.best_feasible_k",
+      "value": 10.0,
+      "source_artifact": "benchmark/guess_accuracy.json"
+    },
+    {
+      "metric_id": "determinism.mismatch_count",
+      "value": 0.0,
+      "source_artifact": "benchmark/determinism_bundle2_probe.json"
+    },
+    {
+      "metric_id": "synthetic.fixed_seed_mismatch_count",
+      "value": 0.0,
+      "source_artifact": "benchmark/synthetic_overfitting_evaluation.json"
+    }
+  ],
+  "hypothesis": {
+    "mechanism": "Increase rank priority for high-confidence contextual anchor matches.",
+    "expected_effect": "Lift known target top-1 placement while preserving deterministic and synthetic gates."
+  },
+  "expected_metric_deltas": [
+    {
+      "metric_id": "known.recall_at_1",
+      "direction": "increase",
+      "minimum_delta": 0.05,
+      "maximum_delta": null,
+      "rationale": "Primary top-1 objective."
+    },
+    {
+      "metric_id": "known.best_feasible_k",
+      "direction": "decrease",
+      "minimum_delta": null,
+      "maximum_delta": -1.0,
+      "rationale": "Fallback objective is lower feasible K."
+    },
+    {
+      "metric_id": "determinism.mismatch_count",
+      "direction": "not_higher",
+      "minimum_delta": null,
+      "maximum_delta": 0.0,
+      "rationale": "Determinism gate cannot regress."
+    },
+    {
+      "metric_id": "synthetic.fixed_seed_mismatch_count",
+      "direction": "not_higher",
+      "minimum_delta": null,
+      "maximum_delta": 0.0,
+      "rationale": "Synthetic fixed-seed gate cannot regress."
+    }
+  ],
+  "disconfirmation_signals": [
+    {
+      "signal_id": "known_recall_not_improved",
+      "metric_id": "known.recall_at_1",
+      "comparator": "less_or_equal",
+      "threshold": 0.0,
+      "rationale": "Reject when recall delta is non-positive."
+    },
+    {
+      "signal_id": "best_k_not_reduced",
+      "metric_id": "known.best_feasible_k",
+      "comparator": "greater_or_equal",
+      "threshold": 0.0,
+      "rationale": "Reject when best feasible K does not decrease."
+    },
+    {
+      "signal_id": "determinism_mismatch_increase",
+      "metric_id": "determinism.mismatch_count",
+      "comparator": "greater_than",
+      "threshold": 0.0,
+      "rationale": "Reject on any mismatch increase."
+    },
+    {
+      "signal_id": "synthetic_mismatch_increase",
+      "metric_id": "synthetic.fixed_seed_mismatch_count",
+      "comparator": "greater_than",
+      "threshold": 0.0,
+      "rationale": "Reject on any synthetic mismatch increase."
+    }
+  ]
+}

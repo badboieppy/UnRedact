@@ -1,0 +1,37 @@
+{
+  "contract_id": "C-INVESTIGATIVE-PROOF-FIRST",
+  "schema_version": 1,
+  "proposal_id": "proposal-rank-pass-incomplete",
+  "proposal_title": "Incomplete dossier example",
+  "proposal_owner": "benchmark-team",
+  "created_at_utc": "2026-03-01T00:00:00Z",
+  "consumed_contracts": [
+    "C-BEST-FEASIBLE-K-RULE"
+  ],
+  "baseline_artifacts": {
+    "known_baseline_path": "benchmark/known_redaction_baseline.json",
+    "deterministic_gate_path": "",
+    "synthetic_gate_path": "benchmark/synthetic_overfitting_evaluation.json"
+  },
+  "baseline_metrics": [
+    {
+      "metric_id": "known.recall_at_1",
+      "value": 0.10,
+      "source_artifact": "benchmark/guess_accuracy.json"
+    }
+  ],
+  "hypothesis": {
+    "mechanism": "",
+    "expected_effect": "Missing critical details"
+  },
+  "expected_metric_deltas": [
+    {
+      "metric_id": "known.recall_at_1",
+      "direction": "increase",
+      "minimum_delta": 0.0,
+      "maximum_delta": null,
+      "rationale": ""
+    }
+  ],
+  "disconfirmation_signals": []
+}

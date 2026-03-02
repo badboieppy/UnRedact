@@ -83,3 +83,8 @@ required-features = ["cli-entry"]
 name = "synthetic_overfitting_benchmark"
 path = "src/bin/synthetic_overfitting_benchmark.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "evidence_first_change_gate"
+path = "src/bin/evidence_first_change_gate.rs"
+required-features = ["cli-entry"]
