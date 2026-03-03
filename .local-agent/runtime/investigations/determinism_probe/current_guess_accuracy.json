@@ -1,0 +1,373 @@
+{
+  "contract": {
+    "contract_id": "C-KNOWN-REDACTION-TARGETS-V1",
+    "schema_version": 1,
+    "canonical_target_count": 11,
+    "datasets": [
+      {
+        "name": "EFTA00038617",
+        "target_count": 9
+      },
+      {
+        "name": "EFTA00101126",
+        "target_count": 2
+      }
+    ]
+  },
+  "definitions": {
+    "evaluated_items": "Number of target strings evaluated in this dataset.",
+    "found_items": "How many targets appeared anywhere in ranked guesses (exact matches + candidate list).",
+    "recall_at_1": "Fraction of targets with best_rank <= 1. Higher is better.",
+    "recall_at_5": "Fraction of targets with best_rank <= 5. Higher is better.",
+    "recall_at_20": "Fraction of targets with best_rank <= 20. Higher is better.",
+    "mrr": "Mean reciprocal rank across all targets: avg(1/rank), with 0 for not-found.",
+    "mean_rank_found": "Average rank among found targets only. Lower is better.",
+    "best_feasible_k": "Smallest K where recall@K reaches 1.0 for the evaluated targets. Null means not all targets were found.",
+    "best_rank": "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
+    "visual_rows_total": "Total redaction rows in guesses for the dataset.",
+    "visual_rows_with_top_guess": "Rows where a scored top candidate exists (candidate list non-empty).",
+    "visual_rows_scored": "Rows with computed visual score (visual_mean_abs_diff present).",
+    "visual_rows_dropped": "Rows removed by visual thresholding (visual_dropped=true).",
+    "visual_mean_abs_diff": "Mean absolute grayscale delta in the non-redaction overlay window; lower is better.",
+    "visual_median_abs_diff": "Median of visual_mean_abs_diff across scored rows; lower is better.",
+    "visual_p90_abs_diff": "90th percentile of visual_mean_abs_diff across scored rows; lower is better.",
+    "visual_mean_changed_pixel_ratio": "Average fraction of significantly changed pixels in scored rows; lower is better.",
+    "visual_mean_compared_pixels": "Average non-background pixel count used per scored row.",
+    "visual_rerank_rows_considered": "Rows eligible for visual rerank candidate scoring (top-K evaluation path).",
+    "visual_rerank_rows_scored": "Rows where visual rerank actually scored candidate alternatives.",
+    "visual_rerank_top1_changed": "Rows where rerank changed top-1 guess from geometric ranking.",
+    "visual_rerank_top1_changed_ratio": "top1_changed / rows_scored for visual rerank; higher means more rerank impact.",
+    "visual_rerank_mean_gain": "Average blended-score gain of chosen rerank candidate over baseline top candidate.",
+    "timing_redactions_ms": "Average redaction stage runtime in milliseconds.",
+    "timing_fonts_ms": "Average font extraction stage runtime in milliseconds.",
+    "timing_guess_ms": "Average guessing stage runtime in milliseconds.",
+    "timing_visualize_ms": "Average visualization stage runtime in milliseconds.",
+    "timing_orchestrator_total_ms": "Average total orchestrator runtime in milliseconds.",
+    "candidate_rows_total": "Total redaction rows considered for candidate-count statistics.",
+    "candidate_rows_with_candidates": "Rows where the candidate list is non-empty.",
+    "candidate_mean_count": "Mean number of candidates per row.",
+    "candidate_median_count": "Median number of candidates per row.",
+    "candidate_p90_count": "90th percentile candidate count per row.",
+    "candidate_multi_span_rows": "Rows classified as multi-span by anchor-gap ratio.",
+    "candidate_multi_span_mean_count": "Mean candidate count for multi-span rows.",
+    "candidate_multi_span_p90_count": "90th percentile candidate count for multi-span rows.",
+    "candidate_single_span_rows": "Rows classified as non-multi-span rows.",
+    "candidate_single_span_mean_count": "Mean candidate count for non-multi-span rows.",
+    "quality_rows_total": "Total rows in the guess report for anchor/width quality accounting.",
+    "quality_anchored_rows": "Rows that have an anchor pair or one-sided recovered anchor.",
+    "quality_anchor_two_sided_rows": "Rows where anchor_mode is two_sided (full left/right anchor).",
+    "quality_anchor_one_sided_rows": "Rows where anchor_mode is left_only or right_only.",
+    "quality_width_asset_rows": "Rows whose primary candidate width source is embedded font asset shaping.",
+    "quality_width_table_rows": "Rows whose primary candidate width source is PDF width table lookup.",
+    "quality_width_core_rows": "Rows whose primary candidate width source is core-font width table fallback.",
+    "quality_width_fallback_rows": "Rows whose primary candidate width source is heuristic fallback.",
+    "quality_width_fallback_reason_rows": "Rows carrying explicit width_fallback_reason diagnostics.",
+    "quality_exact_rows": "Rows where exact_matches is non-empty.",
+    "quality_exact_zero_error_rows": "Rows where every exact_match exists in candidates with zero raw error.",
+    "quality_exact_invalid_rows": "Rows where exact_matches contains any entry missing from candidates or with non-zero raw error.",
+    "consistency_repeats": "Number of repeated benchmark runs with the same code/config.",
+    "consistency_all_hashes_identical": "True when every repeated run produced the same benchmark hash.",
+    "consistency_hash_match_ratio": "Fraction of runs whose hash matches run #1.",
+    "consistency_top1_agreement_ratio": "Fraction of rows whose top1 guess is identical across repeated runs.",
+    "consistency_top5_jaccard_mean": "Mean pairwise Jaccard similarity of top5 guess sets across repeated runs.",
+    "consistency_mean_rank_stddev": "Average per-target standard deviation of rank across repeats.",
+    "consistency_unstable_rows_count": "Number of rows that changed top1 guess across repeated runs.",
+    "consistency_unstable_rows_ratio": "Unstable row count divided by total compared rows."
+  },
+  "datasets": [
+    {
+      "name": "EFTA00101126",
+      "summary": {
+        "evaluated_items": 2,
+        "found_items": 2,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_20": 1.0,
+        "mrr": 0.25,
+        "mean_rank_found": 4.0,
+        "best_feasible_k": 4
+      },
+      "visual_summary": {
+        "rows_total": 9,
+        "rows_with_top_guess": 8,
+        "rows_scored": 1,
+        "rows_dropped": 0,
+        "mean_abs_diff": 0.0,
+        "median_abs_diff": 0.0,
+        "p90_abs_diff": 0.0,
+        "mean_changed_pixel_ratio": 0.0,
+        "mean_compared_pixels": 765.0
+      },
+      "visual_rerank_summary": {
+        "rows_considered": 0,
+        "rows_scored": 0,
+        "top1_changed": 0,
+        "top1_changed_ratio": null,
+        "mean_gain": null
+      },
+      "timing_summary": {
+        "redactions_ms": 86.0,
+        "fonts_ms": 8.0,
+        "guess_ms": 95.0,
+        "visualize_ms": 0.0,
+        "orchestrator_total_ms": 199.0
+      },
+      "candidate_summary": {
+        "rows_total": 9,
+        "rows_with_candidates": 8,
+        "mean_count": 411.1111111111111,
+        "median_count": 600.0,
+        "p90_count": 600.0,
+        "multi_span_rows": 6,
+        "multi_span_mean_count": 508.3333333333333,
+        "multi_span_p90_count": 600.0,
+        "single_span_rows": 3,
+        "single_span_mean_count": 216.66666666666666
+      },
+      "quality_summary": {
+        "rows_total": 9,
+        "anchored_rows": 8,
+        "anchor_two_sided_rows": 6,
+        "anchor_one_sided_rows": 2,
+        "width_asset_rows": 0,
+        "width_table_rows": 0,
+        "width_core_rows": 8,
+        "width_fallback_rows": 0,
+        "width_fallback_reason_rows": 8,
+        "exact_rows": 0,
+        "exact_zero_error_rows": 0,
+        "exact_invalid_rows": 0
+      },
+      "targets": [
+        {
+          "label": "second_last",
+          "target": "SARAH KELLEN",
+          "best_rank": 4
+        },
+        {
+          "label": "last",
+          "target": "SARAH KELLEN",
+          "best_rank": 4
+        }
+      ]
+    },
+    {
+      "name": "EFTA00038617",
+      "summary": {
+        "evaluated_items": 9,
+        "found_items": 9,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.0,
+        "recall_at_20": 0.3333333333333333,
+        "mrr": 0.04880404909165334,
+        "mean_rank_found": 47.22222222222222,
+        "best_feasible_k": 133
+      },
+      "visual_summary": {
+        "rows_total": 32,
+        "rows_with_top_guess": 27,
+        "rows_scored": 26,
+        "rows_dropped": 0,
+        "mean_abs_diff": 0.007764093327121093,
+        "median_abs_diff": 0.0,
+        "p90_abs_diff": 0.013075643219053745,
+        "mean_changed_pixel_ratio": 0.01887385403880706,
+        "mean_compared_pixels": 466.9230769230769
+      },
+      "visual_rerank_summary": {
+        "rows_considered": 0,
+        "rows_scored": 0,
+        "top1_changed": 0,
+        "top1_changed_ratio": null,
+        "mean_gain": null
+      },
+      "timing_summary": {
+        "redactions_ms": 94.0,
+        "fonts_ms": 2.0,
+        "guess_ms": 175.0,
+        "visualize_ms": 0.0,
+        "orchestrator_total_ms": 276.0
+      },
+      "candidate_summary": {
+        "rows_total": 32,
+        "rows_with_candidates": 27,
+        "mean_count": 149.8125,
+        "median_count": 50.0,
+        "p90_count": 600.0,
+        "multi_span_rows": 22,
+        "multi_span_mean_count": 142.77272727272728,
+        "multi_span_p90_count": 600.0,
+        "single_span_rows": 10,
+        "single_span_mean_count": 165.3
+      },
+      "quality_summary": {
+        "rows_total": 32,
+        "anchored_rows": 29,
+        "anchor_two_sided_rows": 10,
+        "anchor_one_sided_rows": 19,
+        "width_asset_rows": 0,
+        "width_table_rows": 0,
+        "width_core_rows": 29,
+        "width_fallback_rows": 0,
+        "width_fallback_reason_rows": 29,
+        "exact_rows": 0,
+        "exact_zero_error_rows": 0,
+        "exact_invalid_rows": 0
+      },
+      "targets": [
+        {
+          "label": "SARAH KELLEN",
+          "target": "SARAH KELLEN",
+          "best_rank": 18
+        },
+        {
+          "label": "ADRIANA MUCINSKA",
+          "target": "ADRIANA MUCINSKA",
+          "best_rank": 133
+        },
+        {
+          "label": "NADIA MARCINKOVA",
+          "target": "NADIA MARCINKOVA",
+          "best_rank": 66
+        },
+        {
+          "label": "LES WEXNER",
+          "target": "LES WEXNER",
+          "best_rank": 22
+        },
+        {
+          "label": "LESLEY GROFF",
+          "target": "LESLEY GROFF",
+          "best_rank": 7
+        },
+        {
+          "label": "HALEY ROBSON",
+          "target": "HALEY ROBSON",
+          "best_rank": 22
+        },
+        {
+          "label": "WILLIAM HAMMOND",
+          "target": "WILLIAM HAMMOND",
+          "best_rank": 122
+        },
+        {
+          "label": "DAVID RODGERS",
+          "target": "DAVID RODGERS",
+          "best_rank": 21
+        },
+        {
+          "label": "RICHARD BARNETT",
+          "target": "RICHARD BARNETT",
+          "best_rank": 14
+        }
+      ]
+    }
+  ],
+  "overall": {
+    "evaluated_items": 11,
+    "found_items": 11,
+    "recall_at_1": 0.0,
+    "recall_at_5": 0.18181818181818182,
+    "recall_at_20": 0.45454545454545453,
+    "mrr": 0.08538513107498909,
+    "mean_rank_found": 39.36363636363637,
+    "best_feasible_k": 133
+  },
+  "overall_visual": {
+    "rows_total": 41,
+    "rows_with_top_guess": 35,
+    "rows_scored": 27,
+    "rows_dropped": 0,
+    "mean_abs_diff": 0.0074765343150054965,
+    "median_abs_diff": 0.0,
+    "p90_abs_diff": 0.0,
+    "mean_changed_pixel_ratio": 0.018174822407740134,
+    "mean_compared_pixels": 477.962962962963
+  },
+  "overall_visual_rerank": {
+    "rows_considered": 0,
+    "rows_scored": 0,
+    "top1_changed": 0,
+    "top1_changed_ratio": null,
+    "mean_gain": null
+  },
+  "overall_timing": {
+    "redactions_ms": 90.0,
+    "fonts_ms": 5.0,
+    "guess_ms": 135.0,
+    "visualize_ms": 0.0,
+    "orchestrator_total_ms": 237.5
+  },
+  "overall_candidates": {
+    "rows_total": 41,
+    "rows_with_candidates": 35,
+    "mean_count": 207.17073170731706,
+    "median_count": 50.0,
+    "p90_count": 600.0,
+    "multi_span_rows": 28,
+    "multi_span_mean_count": 221.10714285714286,
+    "multi_span_p90_count": 600.0,
+    "single_span_rows": 13,
+    "single_span_mean_count": 177.15384615384616
+  },
+  "overall_quality": {
+    "rows_total": 41,
+    "anchored_rows": 37,
+    "anchor_two_sided_rows": 16,
+    "anchor_one_sided_rows": 21,
+    "width_asset_rows": 0,
+    "width_table_rows": 0,
+    "width_core_rows": 37,
+    "width_fallback_rows": 0,
+    "width_fallback_reason_rows": 37,
+    "exact_rows": 0,
+    "exact_zero_error_rows": 0,
+    "exact_invalid_rows": 0
+  },
+  "consistency": {
+    "repeats": 2,
+    "all_hashes_identical": true,
+    "hash_match_ratio": 1.0,
+    "top1_agreement_ratio": 1.0,
+    "top5_jaccard_mean": 1.0,
+    "mean_rank_stddev": 0.0,
+    "unstable_rows_count": 0,
+    "unstable_rows_ratio": 0.0,
+    "run_hashes": [
+      "92e6d95bdda7a5dd84b15cd0ac15deed5f029aedfd6858eed4ff2d653abbdb89",
+      "92e6d95bdda7a5dd84b15cd0ac15deed5f029aedfd6858eed4ff2d653abbdb89"
+    ],
+    "per_dataset": [
+      {
+        "dataset": "EFTA00038617",
+        "repeats": 2,
+        "all_hashes_identical": true,
+        "hash_match_ratio": 1.0,
+        "top1_agreement_ratio": 1.0,
+        "top5_jaccard_mean": 1.0,
+        "mean_rank_stddev": 0.0,
+        "unstable_rows_count": 0,
+        "unstable_rows_ratio": 0.0
+      },
+      {
+        "dataset": "EFTA00101126",
+        "repeats": 2,
+        "all_hashes_identical": true,
+        "hash_match_ratio": 1.0,
+        "top1_agreement_ratio": 1.0,
+        "top5_jaccard_mean": 1.0,
+        "mean_rank_stddev": 0.0,
+        "unstable_rows_count": 0,
+        "unstable_rows_ratio": 0.0
+      }
+    ]
+  },
+  "determinism_gate": {
+    "enforced": true,
+    "required_repeats": 2,
+    "evaluated_repeats": 2,
+    "passed": true,
+    "mismatch_count": 0,
+    "mismatches": []
+  }
+}

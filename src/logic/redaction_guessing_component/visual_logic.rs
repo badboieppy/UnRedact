@@ -119,6 +119,7 @@ pub fn apply_visual_scores_from_bytes(
         input_redactions: String::new(),
         input_fonts: String::new(),
         guesses: guesses.to_vec(),
+        anchors: Vec::new(),
         diagnostics: Vec::new(),
     };
     let inputs = visualization.load_inputs_from_bytes(

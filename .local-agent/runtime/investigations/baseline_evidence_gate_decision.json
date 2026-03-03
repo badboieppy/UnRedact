@@ -1,0 +1,13 @@
+{
+  "policy": "evidence_first_change_gate_v1",
+  "dossier_path": "src/benchmarks/contracts/evidence_dossier_example_valid.json",
+  "dossier_sha256": "6979a0268ccce3ad3784694a299a6a8f682391e5202026b9a3b64a52a3f3fc77",
+  "contract_id": "C-INVESTIGATIVE-PROOF-FIRST",
+  "schema_version": 1,
+  "proposal_id": "proposal-rank-pass-001",
+  "approved": true,
+  "completeness_passed": true,
+  "contract_alignment_passed": true,
+  "disconfirmation_passed": true,
+  "errors": []
+}

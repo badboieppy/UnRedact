@@ -1,0 +1,38 @@
+{
+  "bundle_slug": "baseline-refresh-and-governance-docs",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-013",
+    "CON-014",
+    "CON-017",
+    "CON-028",
+    "CON-029"
+  ],
+  "contracts_introduced": [
+    "baseline_governance_contract"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands remain documented as mandatory.",
+      "No policy contradiction with current contract ledger entries.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "Governance documentation maps every required command to expected outputs and pass/fail rules with margin and rollback semantics.",
+  "artifacts_expected": [
+    "governance documentation updates",
+    "command-to-artifact mapping tables",
+    "validation evidence log entries"
+  ]
+}

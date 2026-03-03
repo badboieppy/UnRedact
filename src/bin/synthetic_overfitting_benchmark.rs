@@ -1,5 +1,5 @@
 use clap::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,11 +22,16 @@ const EXPLORATORY_SEED_POLICY: &str = "diagnostic_only";
 const EXPLORATORY_SEED_STRATEGY: &str = "pseudo_random_from_fixed_base_seed";
 const RUN_COMPLETENESS_POLICY: &str = "binding_full_coverage";
 const REQUIRED_PROFILE_COMMAND: &str = "cargo run --bin synthetic_overfitting_benchmark --release";
+const MULTI_SEED_PANEL_POLICY: &str = "binding_average_non_regression";
 
 const FIXED_SEEDS: [u64; 3] = [12_345_u64, 424_242_u64, 98_765_u64];
 const FIXED_RUNS_PER_SEED: usize = 2;
-const EXPLORATORY_SEED_COUNT: usize = 5;
+const EXPLORATORY_SEED_COUNT: usize = 20;
 const EXPLORATORY_SEED_BASE: u64 = 0x5EED_5EED_1337_1337_u64;
+const MULTI_SEED_PANEL_MIN_COUNT: usize = 20;
+const MULTI_SEED_PANEL_R20_TOLERANCE: f64 = 0.01_f64;
+const MULTI_SEED_PANEL_MRR_TOLERANCE: f64 = 0.002_f64;
+const HARD_THRESHOLD_MARGIN_RATIO: f64 = 0.01_f64;
 
 const SAME_LINE_DELTA_PT: f32 = 3.0_f32;
 const MIN_TARGET_WORD_LEN: usize = 4;
@@ -67,7 +72,7 @@ struct CliOptions {
     out: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RankSummary {
     evaluated_items: usize,
     found_items: usize,
@@ -160,12 +165,38 @@ struct ExploratorySeedDiagnosticsSection {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct MultiSeedPanelSection {
+    policy: String,
+    seed_count: usize,
+    required_min_seed_count: usize,
+    tolerance_recall_at_20: f64,
+    tolerance_mrr: f64,
+    margin_ratio: f64,
+    baseline_summary: RankSummary,
+    current_summary: RankSummary,
+    delta_recall_at_20: f64,
+    delta_mrr: f64,
+    allowed_negative_delta_recall_at_20: f64,
+    allowed_negative_delta_mrr: f64,
+    passed_seed_count: bool,
+    passed_thresholds: bool,
+    passed: bool,
+    failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MultiSeedPanelBaseline {
+    summary: RankSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct SyntheticOverfittingReport {
     protocol: ProtocolConfiguration,
     source_pool: SourcePoolInventory,
     run_completeness_gate: RunCompletenessGateSection,
     fixed_seed_gate: FixedSeedGateSection,
     exploratory_seed_diagnostics: ExploratorySeedDiagnosticsSection,
+    multi_seed_panel: MultiSeedPanelSection,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,7 +302,88 @@ fn protocol_configuration() -> ProtocolConfiguration {
 }
 
 fn hard_gate_passed(report: &SyntheticOverfittingReport) -> bool {
-    report.run_completeness_gate.passed && report.fixed_seed_gate.passed
+    report.run_completeness_gate.passed
+        && report.fixed_seed_gate.passed
+        && report.multi_seed_panel.passed
+}
+
+fn default_panel_baseline_out_path(out_path: &Path) -> PathBuf {
+    let parent = out_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = out_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("synthetic_overfitting_evaluation");
+    parent.join(format!("{stem}.baseline.json"))
+}
+
+fn load_panel_baseline(path: &Path) -> Result<Option<MultiSeedPanelBaseline>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read panel baseline {}: {error}", path.display()))?;
+    let parsed = serde_json::from_slice::<MultiSeedPanelBaseline>(&bytes)
+        .map_err(|error| format!("failed to parse panel baseline {}: {error}", path.display()))?;
+    Ok(Some(parsed))
+}
+
+fn write_panel_baseline(path: &Path, summary: &RankSummary) -> Result<(), String> {
+    let snapshot = MultiSeedPanelBaseline {
+        summary: summary.clone(),
+    };
+    write_json(path, &snapshot)
+}
+
+fn evaluate_multi_seed_panel(
+    current_summary: &RankSummary,
+    seed_count: usize,
+    baseline_summary: &RankSummary,
+) -> MultiSeedPanelSection {
+    let allowed_negative_delta_recall_at_20 =
+        MULTI_SEED_PANEL_R20_TOLERANCE * (1.0_f64 + HARD_THRESHOLD_MARGIN_RATIO);
+    let allowed_negative_delta_mrr =
+        MULTI_SEED_PANEL_MRR_TOLERANCE * (1.0_f64 + HARD_THRESHOLD_MARGIN_RATIO);
+    let delta_recall_at_20 = current_summary.recall_at_20 - baseline_summary.recall_at_20;
+    let delta_mrr = current_summary.mrr - baseline_summary.mrr;
+    let passed_seed_count = seed_count >= MULTI_SEED_PANEL_MIN_COUNT;
+    let passed_thresholds = delta_recall_at_20 >= -allowed_negative_delta_recall_at_20
+        && delta_mrr >= -allowed_negative_delta_mrr;
+    let mut failures = Vec::<String>::new();
+    if !passed_seed_count {
+        failures.push(format!(
+            "seed_count_below_min observed={} required={}",
+            seed_count, MULTI_SEED_PANEL_MIN_COUNT
+        ));
+    }
+    if delta_recall_at_20 < -allowed_negative_delta_recall_at_20 {
+        failures.push(format!(
+            "recall_at_20_regression delta={delta_recall_at_20:.6} allowed_negative_delta={allowed_negative_delta_recall_at_20:.6}"
+        ));
+    }
+    if delta_mrr < -allowed_negative_delta_mrr {
+        failures.push(format!(
+            "mrr_regression delta={delta_mrr:.6} allowed_negative_delta={allowed_negative_delta_mrr:.6}"
+        ));
+    }
+    MultiSeedPanelSection {
+        policy: MULTI_SEED_PANEL_POLICY.to_owned(),
+        seed_count,
+        required_min_seed_count: MULTI_SEED_PANEL_MIN_COUNT,
+        tolerance_recall_at_20: MULTI_SEED_PANEL_R20_TOLERANCE,
+        tolerance_mrr: MULTI_SEED_PANEL_MRR_TOLERANCE,
+        margin_ratio: HARD_THRESHOLD_MARGIN_RATIO,
+        baseline_summary: baseline_summary.clone(),
+        current_summary: current_summary.clone(),
+        delta_recall_at_20,
+        delta_mrr,
+        allowed_negative_delta_recall_at_20,
+        allowed_negative_delta_mrr,
+        passed_seed_count,
+        passed_thresholds,
+        passed: passed_seed_count && passed_thresholds,
+        failures,
+    }
 }
 
 fn require_release_build() -> Result<(), String> {
@@ -452,6 +564,17 @@ fn run(options: CliOptions) -> Result<(), String> {
     let fixed_runs_per_seed = protocol.fixed_runs_per_seed;
     let exploratory_seed_policy = protocol.exploratory_seed_policy.clone();
     let exploratory_seed_strategy = protocol.exploratory_seed_strategy.clone();
+    let panel_baseline_path = default_panel_baseline_out_path(&options.out);
+    let panel_baseline = load_panel_baseline(&panel_baseline_path)?;
+    let baseline_summary = panel_baseline
+        .as_ref()
+        .map(|snapshot| snapshot.summary.clone())
+        .unwrap_or_else(|| exploratory_summary.clone());
+    let multi_seed_panel = evaluate_multi_seed_panel(
+        &exploratory_summary,
+        exploratory_seeds.len(),
+        &baseline_summary,
+    );
     let run_completeness_gate = build_run_completeness_gate(
         pdfs.len(),
         protocol
@@ -481,11 +604,22 @@ fn run(options: CliOptions) -> Result<(), String> {
             summary: exploratory_summary,
             seed_reports: exploratory_reports,
         },
+        multi_seed_panel,
     };
 
     print_report_summary(&report);
     write_json(&options.out, &report)?;
     println!("wrote {}", options.out.display());
+    if panel_baseline.is_none() {
+        write_panel_baseline(
+            &panel_baseline_path,
+            &report.multi_seed_panel.current_summary,
+        )?;
+        println!(
+            "panel_baseline_bootstrapped_path={}",
+            panel_baseline_path.display()
+        );
+    }
     if !hard_gate_passed(&report) {
         return Err(format_hard_gate_failure(&report));
     }
@@ -505,6 +639,13 @@ fn format_hard_gate_failure(report: &SyntheticOverfittingReport) -> String {
         failures.push(format!(
             "fixed_seed_gate_failed mismatches={}",
             report.fixed_seed_gate.mismatch_count
+        ));
+    }
+    if !report.multi_seed_panel.passed {
+        failures.push(format!(
+            "multi_seed_panel_failed policy={} failures={}",
+            report.multi_seed_panel.policy,
+            report.multi_seed_panel.failures.join(" | ")
         ));
     }
     if failures.is_empty() {
@@ -1335,6 +1476,30 @@ fn print_report_summary(report: &SyntheticOverfittingReport) {
             &seed.summary,
         );
     }
+    println!(
+        "multi_seed_panel policy={} passed={} seed_count={} required_min_seed_count={} delta_r20={:.6} delta_mrr={:.6} allowed_negative_delta_r20={:.6} allowed_negative_delta_mrr={:.6}",
+        report.multi_seed_panel.policy,
+        report.multi_seed_panel.passed,
+        report.multi_seed_panel.seed_count,
+        report.multi_seed_panel.required_min_seed_count,
+        report.multi_seed_panel.delta_recall_at_20,
+        report.multi_seed_panel.delta_mrr,
+        report.multi_seed_panel.allowed_negative_delta_recall_at_20,
+        report.multi_seed_panel.allowed_negative_delta_mrr
+    );
+    print_rank_summary(
+        "multi_seed_panel_baseline_overall",
+        &report.multi_seed_panel.baseline_summary,
+    );
+    print_rank_summary(
+        "multi_seed_panel_current_overall",
+        &report.multi_seed_panel.current_summary,
+    );
+    if !report.multi_seed_panel.failures.is_empty() {
+        for failure in &report.multi_seed_panel.failures {
+            println!("MULTI_SEED_PANEL_FAILURE {failure}");
+        }
+    }
     if report.fixed_seed_gate.mismatch_count > 0 {
         for mismatch in &report.fixed_seed_gate.mismatches {
             println!(
@@ -1363,9 +1528,10 @@ mod tests {
     use super::{
         build_run_completeness_gate, compare_seed_runs, discover_pdfs, hard_gate_passed,
         protocol_configuration, DeterminismMismatch, ExploratorySeedDiagnosticsSection,
-        FileSeedRows, FixedSeedGateSection, RankSummary, RunCompletenessGateSection,
-        SeedEvaluationReport, SeedSnapshot, SourcePoolInventory, SyntheticOverfittingReport,
-        TargetRow,
+        FileSeedRows, FixedSeedGateSection, MultiSeedPanelSection, RankSummary,
+        RunCompletenessGateSection, SeedEvaluationReport, SeedSnapshot, SourcePoolInventory,
+        SyntheticOverfittingReport, TargetRow, HARD_THRESHOLD_MARGIN_RATIO,
+        MULTI_SEED_PANEL_MIN_COUNT, MULTI_SEED_PANEL_MRR_TOLERANCE, MULTI_SEED_PANEL_R20_TOLERANCE,
     };
     use std::path::PathBuf;
 
@@ -1459,6 +1625,26 @@ mod tests {
                 seeds: Vec::new(),
                 summary: empty_summary(),
                 seed_reports: Vec::new(),
+            },
+            multi_seed_panel: MultiSeedPanelSection {
+                policy: "binding_average_non_regression".to_owned(),
+                seed_count: MULTI_SEED_PANEL_MIN_COUNT,
+                required_min_seed_count: MULTI_SEED_PANEL_MIN_COUNT,
+                tolerance_recall_at_20: MULTI_SEED_PANEL_R20_TOLERANCE,
+                tolerance_mrr: MULTI_SEED_PANEL_MRR_TOLERANCE,
+                margin_ratio: HARD_THRESHOLD_MARGIN_RATIO,
+                baseline_summary: empty_summary(),
+                current_summary: empty_summary(),
+                delta_recall_at_20: 0.0_f64,
+                delta_mrr: 0.0_f64,
+                allowed_negative_delta_recall_at_20: MULTI_SEED_PANEL_R20_TOLERANCE
+                    * (1.0_f64 + HARD_THRESHOLD_MARGIN_RATIO),
+                allowed_negative_delta_mrr: MULTI_SEED_PANEL_MRR_TOLERANCE
+                    * (1.0_f64 + HARD_THRESHOLD_MARGIN_RATIO),
+                passed_seed_count: true,
+                passed_thresholds: true,
+                passed: true,
+                failures: Vec::new(),
             },
         }
     }
@@ -1569,6 +1755,17 @@ mod tests {
             .run_completeness_gate
             .failures
             .push("seed_run_count_mismatch expected=11 observed=10".to_owned());
+        assert!(!hard_gate_passed(&report));
+    }
+
+    #[test]
+    fn hard_gate_fails_when_multi_seed_panel_gate_fails() {
+        let mut report = minimal_report(true);
+        report.multi_seed_panel.passed = false;
+        report
+            .multi_seed_panel
+            .failures
+            .push("mrr_regression delta=-0.020000 allowed_negative_delta=0.002020".to_owned());
         assert!(!hard_gate_passed(&report));
     }
 

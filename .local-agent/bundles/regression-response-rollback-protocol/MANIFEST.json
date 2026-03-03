@@ -1,0 +1,36 @@
+{
+  "bundle_slug": "regression-response-rollback-protocol",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-003",
+    "CON-022",
+    "CON-029"
+  ],
+  "contracts_introduced": [
+    "regression_action_protocol"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands complete successfully.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent.",
+      "No-retry path enforced for hard regression outcomes."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "An out-of-band regression event yields deterministic investigate-plus-rollback flow and writes a root-cause evidence artifact without retrying the failed run.",
+  "artifacts_expected": [
+    "regression investigation artifact",
+    "rollback action record",
+    "validation evidence log entries"
+  ]
+}

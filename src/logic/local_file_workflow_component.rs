@@ -14,6 +14,7 @@ pub struct OutputFilePaths {
     pub redactions_path: PathBuf,
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
+    pub anchors_path: PathBuf,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -33,6 +34,7 @@ pub fn build_output_file_paths(input: &Path, output_dir: &Path) -> Result<Output
         redactions_path: output_dir.join(format!("{stem}.redactions.json")),
         fonts_path: output_dir.join(format!("{stem}.fonts.json")),
         guesses_path: output_dir.join(format!("{stem}.guesses.json")),
+        anchors_path: output_dir.join(format!("{stem}.anchors.json")),
         visualized_pdf_path: Some(output_dir.join(format!("{stem}.visualized.pdf"))),
     })
 }
@@ -48,12 +50,14 @@ pub fn write_encoded_outputs(
             redactions_path: output_paths.redactions_path.as_path(),
             fonts_path: output_paths.fonts_path.as_path(),
             guesses_path: output_paths.guesses_path.as_path(),
+            anchors_path: output_paths.anchors_path.as_path(),
             visualized_pdf_path: output_paths.visualized_pdf_path.as_deref(),
         },
         payload: ResultPublishPayload {
             redactions_json: encoded.redactions_json.as_slice(),
             fonts_json: encoded.fonts_json.as_slice(),
             guesses_json: encoded.guesses_json.as_slice(),
+            anchors_json: encoded.anchors_json.as_slice(),
             visualized_pdf_bytes: encoded.visualized_pdf_bytes.as_deref(),
         },
     })
@@ -182,6 +186,7 @@ mod tests {
         );
         assert_eq!(out.fonts_path, output_dir.join("report.fonts.json"));
         assert_eq!(out.guesses_path, output_dir.join("report.guesses.json"));
+        assert_eq!(out.anchors_path, output_dir.join("report.anchors.json"));
         assert_eq!(
             out.visualized_pdf_path,
             Some(output_dir.join("report.visualized.pdf"))

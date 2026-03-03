@@ -1,0 +1,885 @@
+{
+  "protocol": {
+    "protocol_id": "C-SYNTHETIC-SEED-TIERS",
+    "version": 1,
+    "source_pool_policy": "all_test_data_pdfs",
+    "fixed_seed_policy": "binding",
+    "fixed_seeds": [
+      12345,
+      424242,
+      98765
+    ],
+    "fixed_runs_per_seed": 2,
+    "exploratory_seed_policy": "diagnostic_only",
+    "exploratory_seed_strategy": "pseudo_random_from_fixed_base_seed",
+    "exploratory_seed_count": 5,
+    "exploratory_seed_base": 6840227781368288055
+  },
+  "source_pool": {
+    "policy": "all_test_data_pdfs",
+    "root": "test_data",
+    "discovered_pdf_count": 5,
+    "discovered_pdfs": [
+      "test_data\\EFTA00038617.pdf",
+      "test_data\\EFTA00101126.pdf",
+      "test_data\\EFTA01083121.pdf",
+      "test_data\\EFTA02238592.pdf",
+      "test_data\\EFTA02717423.pdf"
+    ]
+  },
+  "run_completeness_gate": {
+    "policy": "binding_full_coverage",
+    "required_profile": "cargo run --bin synthetic_overfitting_benchmark --release",
+    "debug_build_detected": false,
+    "discovered_pdf_count": 5,
+    "expected_seed_runs": 11,
+    "observed_seed_runs": 11,
+    "expected_seed_file_evaluations": 55,
+    "observed_seed_file_evaluations": 55,
+    "skipped_seed_file_evaluations": 0,
+    "failed_seeds": [],
+    "failures": [],
+    "passed": true
+  },
+  "fixed_seed_gate": {
+    "policy": "binding",
+    "fixed_seeds": [
+      12345,
+      424242,
+      98765
+    ],
+    "runs_per_seed": 2,
+    "passed": true,
+    "mismatch_count": 0,
+    "mismatches": [],
+    "seed_reports": [
+      {
+        "seed": 12345,
+        "run_hashes": [
+          "ae98ac61f74111c77693bc88f544a66c7cdde163e132317c5f67dcc1676fcef9",
+          "ae98ac61f74111c77693bc88f544a66c7cdde163e132317c5f67dcc1676fcef9"
+        ],
+        "baseline": {
+          "seed": 12345,
+          "evaluated_files": 5,
+          "skipped_files": 0,
+          "sampled_targets_total": 32,
+          "summary": {
+            "evaluated_items": 32,
+            "found_items": 1,
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_20": 0.0,
+            "mrr": 0.00037650602409638556,
+            "mean_rank_found": 83.0
+          },
+          "comparator_hash": "ae98ac61f74111c77693bc88f544a66c7cdde163e132317c5f67dcc1676fcef9",
+          "files": [
+            {
+              "pdf_path": "test_data\\EFTA00038617.pdf",
+              "candidate_pool_size": 44,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 1,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0015060240963855422,
+                "mean_rank_found": 83.0
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA00101126.pdf",
+              "candidate_pool_size": 51,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA01083121.pdf",
+              "candidate_pool_size": 19,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02238592.pdf",
+              "candidate_pool_size": 6,
+              "sampled_targets": 6,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 6,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02717423.pdf",
+              "candidate_pool_size": 2,
+              "sampled_targets": 2,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 2,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            }
+          ]
+        }
+      },
+      {
+        "seed": 424242,
+        "run_hashes": [
+          "ed43afecfc136151209b61608e530c6ddd8a5a024289e22d4cd05bd6942938e8",
+          "ed43afecfc136151209b61608e530c6ddd8a5a024289e22d4cd05bd6942938e8"
+        ],
+        "baseline": {
+          "seed": 424242,
+          "evaluated_files": 5,
+          "skipped_files": 0,
+          "sampled_targets_total": 32,
+          "summary": {
+            "evaluated_items": 32,
+            "found_items": 3,
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_20": 0.03125,
+            "mrr": 0.002951818885448916,
+            "mean_rank_found": 183.66666666666666
+          },
+          "comparator_hash": "ed43afecfc136151209b61608e530c6ddd8a5a024289e22d4cd05bd6942938e8",
+          "files": [
+            {
+              "pdf_path": "test_data\\EFTA00038617.pdf",
+              "candidate_pool_size": 44,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 1,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0002941176470588235,
+                "mean_rank_found": 425.0
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA00101126.pdf",
+              "candidate_pool_size": 51,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA01083121.pdf",
+              "candidate_pool_size": 19,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 2,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.125,
+                "mrr": 0.011513157894736841,
+                "mean_rank_found": 63.0
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02238592.pdf",
+              "candidate_pool_size": 6,
+              "sampled_targets": 6,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 6,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02717423.pdf",
+              "candidate_pool_size": 2,
+              "sampled_targets": 2,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 2,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            }
+          ]
+        }
+      },
+      {
+        "seed": 98765,
+        "run_hashes": [
+          "30fd0b7334e59fd6c39b147ee4ed6d53d57b9ddb9507d33d2a9e0402c676f7c4",
+          "30fd0b7334e59fd6c39b147ee4ed6d53d57b9ddb9507d33d2a9e0402c676f7c4"
+        ],
+        "baseline": {
+          "seed": 98765,
+          "evaluated_files": 5,
+          "skipped_files": 0,
+          "sampled_targets_total": 32,
+          "summary": {
+            "evaluated_items": 32,
+            "found_items": 2,
+            "recall_at_1": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_20": 0.0,
+            "mrr": 0.000596287755471152,
+            "mean_rank_found": 105.5
+          },
+          "comparator_hash": "30fd0b7334e59fd6c39b147ee4ed6d53d57b9ddb9507d33d2a9e0402c676f7c4",
+          "files": [
+            {
+              "pdf_path": "test_data\\EFTA00038617.pdf",
+              "candidate_pool_size": 44,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 1,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.001288659793814433,
+                "mean_rank_found": 97.0
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA00101126.pdf",
+              "candidate_pool_size": 51,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA01083121.pdf",
+              "candidate_pool_size": 19,
+              "sampled_targets": 8,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 8,
+                "found_items": 1,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0010964912280701754,
+                "mean_rank_found": 114.0
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02238592.pdf",
+              "candidate_pool_size": 6,
+              "sampled_targets": 6,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 6,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            },
+            {
+              "pdf_path": "test_data\\EFTA02717423.pdf",
+              "candidate_pool_size": 2,
+              "sampled_targets": 2,
+              "skipped": false,
+              "skip_reason": null,
+              "summary": {
+                "evaluated_items": 2,
+                "found_items": 0,
+                "recall_at_1": 0.0,
+                "recall_at_5": 0.0,
+                "recall_at_20": 0.0,
+                "mrr": 0.0,
+                "mean_rank_found": null
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "exploratory_seed_diagnostics": {
+    "policy": "diagnostic_only",
+    "strategy": "pseudo_random_from_fixed_base_seed",
+    "seeds": [
+      562127815042821759,
+      83275707321985586,
+      13406875607376352761,
+      5684778449485788136,
+      13243799229639241892
+    ],
+    "summary": {
+      "evaluated_items": 160,
+      "found_items": 14,
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.01875,
+      "recall_at_20": 0.05,
+      "mrr": 0.007975489645906074,
+      "mean_rank_found": 141.42857142857142
+    },
+    "seed_reports": [
+      {
+        "seed": 562127815042821759,
+        "evaluated_files": 5,
+        "skipped_files": 0,
+        "sampled_targets_total": 32,
+        "summary": {
+          "evaluated_items": 32,
+          "found_items": 0,
+          "recall_at_1": 0.0,
+          "recall_at_5": 0.0,
+          "recall_at_20": 0.0,
+          "mrr": 0.0,
+          "mean_rank_found": null
+        },
+        "comparator_hash": "d0c123af71d33a2d60d224b5f0388a8c0f728463b7cb16ebd2ce8a22cb3a30ab",
+        "files": [
+          {
+            "pdf_path": "test_data\\EFTA00038617.pdf",
+            "candidate_pool_size": 44,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA00101126.pdf",
+            "candidate_pool_size": 51,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA01083121.pdf",
+            "candidate_pool_size": 19,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02238592.pdf",
+            "candidate_pool_size": 6,
+            "sampled_targets": 6,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 6,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02717423.pdf",
+            "candidate_pool_size": 2,
+            "sampled_targets": 2,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 2,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          }
+        ]
+      },
+      {
+        "seed": 83275707321985586,
+        "evaluated_files": 5,
+        "skipped_files": 0,
+        "sampled_targets_total": 32,
+        "summary": {
+          "evaluated_items": 32,
+          "found_items": 4,
+          "recall_at_1": 0.0,
+          "recall_at_5": 0.03125,
+          "recall_at_20": 0.09375,
+          "mrr": 0.012899426961926962,
+          "mean_rank_found": 106.25
+        },
+        "comparator_hash": "85cd1483603359a405f7642dd3bd72028893fd534fcb4d38a76e66edf2e17ecf",
+        "files": [
+          {
+            "pdf_path": "test_data\\EFTA00038617.pdf",
+            "candidate_pool_size": 44,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 2,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.125,
+              "mrr": 0.009931041181041182,
+              "mean_rank_found": 204.5
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA00101126.pdf",
+            "candidate_pool_size": 51,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.125,
+              "recall_at_20": 0.125,
+              "mrr": 0.03125,
+              "mean_rank_found": 4.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA01083121.pdf",
+            "candidate_pool_size": 19,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.125,
+              "mrr": 0.010416666666666666,
+              "mean_rank_found": 12.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02238592.pdf",
+            "candidate_pool_size": 6,
+            "sampled_targets": 6,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 6,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02717423.pdf",
+            "candidate_pool_size": 2,
+            "sampled_targets": 2,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 2,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          }
+        ]
+      },
+      {
+        "seed": 13406875607376352761,
+        "evaluated_files": 5,
+        "skipped_files": 0,
+        "sampled_targets_total": 32,
+        "summary": {
+          "evaluated_items": 32,
+          "found_items": 4,
+          "recall_at_1": 0.0,
+          "recall_at_5": 0.03125,
+          "recall_at_20": 0.0625,
+          "mrr": 0.013576487671882409,
+          "mean_rank_found": 60.0
+        },
+        "comparator_hash": "918125cdd860ef78e888b4df4644f0d21c7bc8e20ac5bd99c27e2f171ca1b690",
+        "files": [
+          {
+            "pdf_path": "test_data\\EFTA00038617.pdf",
+            "candidate_pool_size": 44,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 2,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.125,
+              "mrr": 0.011542792792792793,
+              "mean_rank_found": 61.5
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA00101126.pdf",
+            "candidate_pool_size": 51,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.125,
+              "recall_at_20": 0.125,
+              "mrr": 0.041666666666666664,
+              "mean_rank_found": 3.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA01083121.pdf",
+            "candidate_pool_size": 19,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0010964912280701754,
+              "mean_rank_found": 114.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02238592.pdf",
+            "candidate_pool_size": 6,
+            "sampled_targets": 6,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 6,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02717423.pdf",
+            "candidate_pool_size": 2,
+            "sampled_targets": 2,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 2,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          }
+        ]
+      },
+      {
+        "seed": 5684778449485788136,
+        "evaluated_files": 5,
+        "skipped_files": 0,
+        "sampled_targets_total": 32,
+        "summary": {
+          "evaluated_items": 32,
+          "found_items": 3,
+          "recall_at_1": 0.0,
+          "recall_at_5": 0.0,
+          "recall_at_20": 0.03125,
+          "mrr": 0.0029309876187095054,
+          "mean_rank_found": 239.66666666666666
+        },
+        "comparator_hash": "2aaf35862040fae4bf11e5b8e8bc55a48884e40d66b2d85c65f1ffaeb8550f5c",
+        "files": [
+          {
+            "pdf_path": "test_data\\EFTA00038617.pdf",
+            "candidate_pool_size": 44,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA00101126.pdf",
+            "candidate_pool_size": 51,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA01083121.pdf",
+            "candidate_pool_size": 19,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 2,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.125,
+              "mrr": 0.011513157894736841,
+              "mean_rank_found": 63.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02238592.pdf",
+            "candidate_pool_size": 6,
+            "sampled_targets": 6,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 6,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0002810567734682406,
+              "mean_rank_found": 593.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02717423.pdf",
+            "candidate_pool_size": 2,
+            "sampled_targets": 2,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 2,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          }
+        ]
+      },
+      {
+        "seed": 13243799229639241892,
+        "evaluated_files": 5,
+        "skipped_files": 0,
+        "sampled_targets_total": 32,
+        "summary": {
+          "evaluated_items": 32,
+          "found_items": 3,
+          "recall_at_1": 0.0,
+          "recall_at_5": 0.03125,
+          "recall_at_20": 0.0625,
+          "mrr": 0.010470545977011494,
+          "mean_rank_found": 198.66666666666666
+        },
+        "comparator_hash": "3c5463e10c8bce6ae86962f0219cee4159eca8420c7937439db05a13fac00fde",
+        "files": [
+          {
+            "pdf_path": "test_data\\EFTA00038617.pdf",
+            "candidate_pool_size": 44,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA00101126.pdf",
+            "candidate_pool_size": 51,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.125,
+              "recall_at_20": 0.125,
+              "mrr": 0.03125,
+              "mean_rank_found": 4.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA01083121.pdf",
+            "candidate_pool_size": 19,
+            "sampled_targets": 8,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 8,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.125,
+              "mrr": 0.010416666666666666,
+              "mean_rank_found": 12.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02238592.pdf",
+            "candidate_pool_size": 6,
+            "sampled_targets": 6,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 6,
+              "found_items": 1,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.00028735632183908046,
+              "mean_rank_found": 580.0
+            }
+          },
+          {
+            "pdf_path": "test_data\\EFTA02717423.pdf",
+            "candidate_pool_size": 2,
+            "sampled_targets": 2,
+            "skipped": false,
+            "skip_reason": null,
+            "summary": {
+              "evaluated_items": 2,
+              "found_items": 0,
+              "recall_at_1": 0.0,
+              "recall_at_5": 0.0,
+              "recall_at_20": 0.0,
+              "mrr": 0.0,
+              "mean_rank_found": null
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

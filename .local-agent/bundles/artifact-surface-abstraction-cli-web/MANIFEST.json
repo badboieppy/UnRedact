@@ -1,0 +1,36 @@
+{
+  "bundle_slug": "artifact-surface-abstraction-cli-web",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-008",
+    "CON-016",
+    "CON-027"
+  ],
+  "contracts_introduced": [
+    "anchor_artifact_delivery_parity"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands complete successfully.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent.",
+      "CLI and web artifact field contracts are equivalent for canonical rows."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "For the same input, CLI and web flows expose equivalent anchors artifact semantics and fields without layer-boundary leakage.",
+  "artifacts_expected": [
+    "CLI anchors artifact output",
+    "web anchors payload output",
+    "parity validation evidence log entries"
+  ]
+}

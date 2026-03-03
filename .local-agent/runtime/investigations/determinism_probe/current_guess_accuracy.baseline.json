@@ -1,0 +1,114 @@
+{
+  "contract": {
+    "contract_id": "C-KNOWN-REDACTION-TARGETS-V1",
+    "schema_version": 1,
+    "canonical_target_count": 11,
+    "datasets": [
+      {
+        "name": "EFTA00038617",
+        "target_count": 9
+      },
+      {
+        "name": "EFTA00101126",
+        "target_count": 2
+      }
+    ]
+  },
+  "datasets": [
+    {
+      "name": "EFTA00101126",
+      "summary": {
+        "evaluated_items": 2,
+        "found_items": 2,
+        "recall_at_1": 0.0,
+        "recall_at_5": 1.0,
+        "recall_at_20": 1.0,
+        "mrr": 0.25,
+        "mean_rank_found": 4.0,
+        "best_feasible_k": 4
+      },
+      "targets": [
+        {
+          "label": "second_last",
+          "target": "SARAH KELLEN",
+          "best_rank": 4
+        },
+        {
+          "label": "last",
+          "target": "SARAH KELLEN",
+          "best_rank": 4
+        }
+      ]
+    },
+    {
+      "name": "EFTA00038617",
+      "summary": {
+        "evaluated_items": 9,
+        "found_items": 9,
+        "recall_at_1": 0.0,
+        "recall_at_5": 0.0,
+        "recall_at_20": 0.3333333333333333,
+        "mrr": 0.04880404909165334,
+        "mean_rank_found": 47.22222222222222,
+        "best_feasible_k": 133
+      },
+      "targets": [
+        {
+          "label": "SARAH KELLEN",
+          "target": "SARAH KELLEN",
+          "best_rank": 18
+        },
+        {
+          "label": "ADRIANA MUCINSKA",
+          "target": "ADRIANA MUCINSKA",
+          "best_rank": 133
+        },
+        {
+          "label": "NADIA MARCINKOVA",
+          "target": "NADIA MARCINKOVA",
+          "best_rank": 66
+        },
+        {
+          "label": "LES WEXNER",
+          "target": "LES WEXNER",
+          "best_rank": 22
+        },
+        {
+          "label": "LESLEY GROFF",
+          "target": "LESLEY GROFF",
+          "best_rank": 7
+        },
+        {
+          "label": "HALEY ROBSON",
+          "target": "HALEY ROBSON",
+          "best_rank": 22
+        },
+        {
+          "label": "WILLIAM HAMMOND",
+          "target": "WILLIAM HAMMOND",
+          "best_rank": 122
+        },
+        {
+          "label": "DAVID RODGERS",
+          "target": "DAVID RODGERS",
+          "best_rank": 21
+        },
+        {
+          "label": "RICHARD BARNETT",
+          "target": "RICHARD BARNETT",
+          "best_rank": 14
+        }
+      ]
+    }
+  ],
+  "overall": {
+    "evaluated_items": 11,
+    "found_items": 11,
+    "recall_at_1": 0.0,
+    "recall_at_5": 0.18181818181818182,
+    "recall_at_20": 0.45454545454545453,
+    "mrr": 0.08538513107498909,
+    "mean_rank_found": 39.36363636363637,
+    "best_feasible_k": 133
+  }
+}

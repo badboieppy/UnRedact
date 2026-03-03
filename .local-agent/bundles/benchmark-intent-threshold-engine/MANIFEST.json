@@ -1,0 +1,36 @@
+{
+  "bundle_slug": "benchmark-intent-threshold-engine",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-017",
+    "CON-022",
+    "CON-028"
+  ],
+  "contracts_introduced": [
+    "intent_aware_threshold_gate_contract"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands complete successfully.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent.",
+      "Gate decision includes explicit intent, threshold, margin, and outcome fields."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "Gate output for a neutral task shows threshold comparison with margin band and fails deterministically when a metric crosses out of tolerated range.",
+  "artifacts_expected": [
+    "gate decision artifact with explicit threshold math",
+    "bundle-intent metadata trace",
+    "validation evidence log entries"
+  ]
+}

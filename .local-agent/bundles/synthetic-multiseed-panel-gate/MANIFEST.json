@@ -1,0 +1,36 @@
+{
+  "bundle_slug": "synthetic-multiseed-panel-gate",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-002",
+    "CON-021",
+    "CON-028"
+  ],
+  "contracts_introduced": [
+    "synthetic_multiseed_panel_contract"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands complete successfully.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent.",
+      "Panel section must be present with seed_count >= 20 and explicit threshold deltas."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "Synthetic benchmark report includes a required average panel with at least 20 seeds, reports delta thresholds, and emits deterministic pass/fail outcome.",
+  "artifacts_expected": [
+    "synthetic benchmark report with multi-seed panel section",
+    "panel threshold decision fields",
+    "validation evidence log entries"
+  ]
+}

@@ -1654,6 +1654,16 @@ mod tests {
                     width_fallback_reason: None,
                     confidence_score: None,
                     confidence_factors: None,
+                    anchor_row_id: None,
+                    left_anchor_id: None,
+                    right_anchor_id: None,
+                    left_anchor_type: None,
+                    right_anchor_type: None,
+                    left_anchor_selected_source: None,
+                    right_anchor_selected_source: None,
+                    left_anchor_confidence: None,
+                    right_anchor_confidence: None,
+                    row_anchor_confidence: None,
                     has_anchor_pair: true,
                 },
                 visual_compared_pixels: None,
@@ -1662,6 +1672,7 @@ mod tests {
                 visual_reason: None,
                 visual_dropped: false,
             }],
+            anchors: vec![],
             diagnostics: vec![],
         }
     }
@@ -1691,6 +1702,7 @@ mod tests {
             input_redactions: String::new(),
             input_fonts: String::new(),
             guesses: vec![first, second],
+            anchors: vec![],
             diagnostics: vec![],
         }
     }

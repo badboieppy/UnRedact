@@ -1,0 +1,37 @@
+{
+  "bundle_slug": "anchor-candidate-trace-completeness",
+  "status": "planned",
+  "intent": "neutral",
+  "loc_budget_target": 500,
+  "doctrine_path": "D:\\Development\\RandomProjects\\Agents\\doctrines\\engineering_doctrine.md",
+  "contracts_consumed": [
+    "CON-012",
+    "CON-019",
+    "CON-024",
+    "CON-026"
+  ],
+  "contracts_introduced": [
+    "anchor_candidate_trace_contract"
+  ],
+  "validation_intent": {
+    "required_commands": [
+      "cargo test",
+      "cargo run --bin guess_accuracy_benchmark --release",
+      "cargo run --bin synthetic_overfitting_benchmark --release",
+      "cargo run --bin visual_score_impact_benchmark --release",
+      "cargo run --bin evidence_first_change_gate --release"
+    ],
+    "quality_gates": [
+      "All required validation commands complete successfully.",
+      "No core metric regression beyond accepted tolerance bands for neutral intent.",
+      "No missing terminal reason codes in emitted candidate traces."
+    ],
+    "regression_policy": "no_retry_investigate_then_rollback_on_out_of_band_regression"
+  },
+  "purpose_demo": "A row with fallback behavior contains one selected candidate and all rejected alternatives, each carrying one terminal reason code and deterministic ordering.",
+  "artifacts_expected": [
+    "anchors artifact with full candidate decision sets",
+    "reason-code coverage evidence",
+    "validation evidence log entries"
+  ]
+}

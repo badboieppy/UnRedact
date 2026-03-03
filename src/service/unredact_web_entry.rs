@@ -22,6 +22,7 @@ pub struct UnredactWebOutputs {
     pub redactions_json: Vec<u8>,
     pub fonts_json: Vec<u8>,
     pub guesses_json: Vec<u8>,
+    pub anchors_json: Vec<u8>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
 
@@ -58,6 +59,7 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
         redactions_json: encoded.redactions_json,
         fonts_json: encoded.fonts_json,
         guesses_json: encoded.guesses_json,
+        anchors_json: encoded.anchors_json,
         visualized_pdf_bytes: encoded.visualized_pdf_bytes,
     })
 }

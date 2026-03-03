@@ -1,0 +1,801 @@
+{
+  "input_redactions": "memory://test_data/EFTA00101126.pdf.redactions.json",
+  "decisions": [
+    {
+      "anchor_row_id": "page1_row0",
+      "page_index": 1,
+      "bbox": {
+        "x0": 33.0,
+        "y0": 66.0,
+        "x1": 70.5,
+        "y1": 84.0
+      },
+      "selected_candidate_id": "page1_row0_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page1_row0_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_pair_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row0_left",
+            "anchor_type": "left",
+            "text": "--",
+            "x": 32.25,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 32.25,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "right": {
+            "anchor_id": "page1_row0_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        },
+        {
+          "candidate_id": "page1_row0_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page1_row0_left",
+            "anchor_type": "left",
+            "text": "--",
+            "x": 32.25,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 32.25,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        },
+        {
+          "candidate_id": "page1_row0_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page1_row0_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row1",
+      "page_index": 1,
+      "bbox": {
+        "x0": 72.75,
+        "y0": 66.0,
+        "x1": 77.25,
+        "y1": 84.0
+      },
+      "selected_candidate_id": "page1_row1_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page1_row1_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_same_run_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row1_left",
+            "anchor_type": "left",
+            "text": "-- Print",
+            "x": 32.25,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": -37.230003,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page1_row1_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        },
+        {
+          "candidate_id": "page1_row1_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page1_row1_left",
+            "anchor_type": "left",
+            "text": "-- Print",
+            "x": 32.25,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": -37.230003,
+            "confidence": 0.55
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        },
+        {
+          "candidate_id": "page1_row1_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page1_row1_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row2",
+      "page_index": 1,
+      "bbox": {
+        "x0": 85.5,
+        "y0": 66.0,
+        "x1": 90.0,
+        "y1": 84.0
+      },
+      "selected_candidate_id": "page1_row2_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page1_row2_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_same_run_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row2_left",
+            "anchor_type": "left",
+            "text": "-- Print",
+            "x": 32.25,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": -37.230003,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page1_row2_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        },
+        {
+          "candidate_id": "page1_row2_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page1_row2_left",
+            "anchor_type": "left",
+            "text": "-- Print",
+            "x": 32.25,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": -37.230003,
+            "confidence": 0.55
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        },
+        {
+          "candidate_id": "page1_row2_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page1_row2_right",
+            "anchor_type": "right",
+            "text": "Print",
+            "x": 69.48,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row3",
+      "page_index": 1,
+      "bbox": {
+        "x0": 92.25,
+        "y0": 66.0,
+        "x1": 132.0,
+        "y1": 84.0
+      },
+      "selected_candidate_id": "page1_row3_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page1_row3_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_pair_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row3_left",
+            "anchor_type": "left",
+            "text": "--",
+            "x": 32.25,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 32.25,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "right": {
+            "anchor_id": "page1_row3_right",
+            "anchor_type": "right",
+            "text": "Save As...",
+            "x": 170.14,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 196.32,
+            "selected_minus_alternate_delta_pt": -26.180008,
+            "confidence": 0.55
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        },
+        {
+          "candidate_id": "page1_row3_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page1_row3_left",
+            "anchor_type": "left",
+            "text": "--",
+            "x": 32.25,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 32.25,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        },
+        {
+          "candidate_id": "page1_row3_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page1_row3_right",
+            "anchor_type": "right",
+            "text": "Save As...",
+            "x": 170.14,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 196.32,
+            "selected_minus_alternate_delta_pt": -26.180008,
+            "confidence": 0.55
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 150.0
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row4",
+      "page_index": 1,
+      "bbox": {
+        "x0": 144.0,
+        "y0": 66.0,
+        "x1": 243.0,
+        "y1": 81.0
+      },
+      "selected_candidate_id": "page1_row4_left_only_selected",
+      "selected_mode": "left_only",
+      "candidates": [
+        {
+          "candidate_id": "page1_row4_left_only_selected",
+          "anchor_mode": "left_only",
+          "was_selected": true,
+          "reason_code": "selected_left_only_fallback",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row4_left",
+            "anchor_type": "left",
+            "text": "1",
+            "x": 30.46,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 69.48,
+            "selected_minus_alternate_delta_pt": -39.020004,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page1_row4_right",
+            "anchor_type": "right",
+            "text": "Save As...",
+            "x": 243.5,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": null,
+            "selected_minus_alternate_delta_pt": null,
+            "confidence": 0.55
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 102.45
+        },
+        {
+          "candidate_id": "page1_row4_two_sided_rejected",
+          "anchor_mode": "two_sided",
+          "was_selected": false,
+          "reason_code": "rejected_unavailable",
+          "tie_break_rank": 1,
+          "left": null,
+          "right": null,
+          "anchor_font_key": null,
+          "anchor_font_name": null,
+          "anchor_font_size_pt": null,
+          "anchor_h_scale_pct": null
+        },
+        {
+          "candidate_id": "page1_row4_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_unavailable",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": null,
+          "anchor_font_key": null,
+          "anchor_font_name": null,
+          "anchor_font_size_pt": null,
+          "anchor_h_scale_pct": null
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row5",
+      "page_index": 1,
+      "bbox": {
+        "x0": 481.5,
+        "y0": 66.0,
+        "x1": 516.75,
+        "y1": 81.0
+      },
+      "selected_candidate_id": "page1_row5_right_only_selected",
+      "selected_mode": "right_only",
+      "candidates": [
+        {
+          "candidate_id": "page1_row5_right_only_selected",
+          "anchor_mode": "right_only",
+          "was_selected": true,
+          "reason_code": "selected_right_only_fallback",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page1_row5_left",
+            "anchor_type": "left",
+            "text": "Save As...",
+            "x": 481.0,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": null,
+            "selected_minus_alternate_delta_pt": null,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page1_row5_right",
+            "anchor_type": "right",
+            "text": "Reset",
+            "x": 516.17,
+            "selected_source": "run_prefix_projection",
+            "projection_source": "char_advances",
+            "alternate_x": 516.17,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 0.92
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 93.44
+        },
+        {
+          "candidate_id": "page1_row5_two_sided_rejected",
+          "anchor_mode": "two_sided",
+          "was_selected": false,
+          "reason_code": "rejected_unavailable",
+          "tie_break_rank": 1,
+          "left": null,
+          "right": null,
+          "anchor_font_key": null,
+          "anchor_font_name": null,
+          "anchor_font_size_pt": null,
+          "anchor_h_scale_pct": null
+        },
+        {
+          "candidate_id": "page1_row5_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_unavailable",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": null,
+          "anchor_font_key": null,
+          "anchor_font_name": null,
+          "anchor_font_size_pt": null,
+          "anchor_h_scale_pct": null
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page1_row6",
+      "page_index": 1,
+      "bbox": {
+        "x0": 522.75,
+        "y0": 66.0,
+        "x1": 580.5,
+        "y1": 81.0
+      },
+      "selected_candidate_id": null,
+      "selected_mode": null,
+      "candidates": [
+        {
+          "candidate_id": "page1_row6_two_sided_0",
+          "anchor_mode": "two_sided",
+          "was_selected": false,
+          "reason_code": "rejected_missing_anchor",
+          "tie_break_rank": 0,
+          "left": null,
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 93.44
+        },
+        {
+          "candidate_id": "page1_row6_left_only_1",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_missing_anchor",
+          "tie_break_rank": 1,
+          "left": null,
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 93.44
+        },
+        {
+          "candidate_id": "page1_row6_right_only_2",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_missing_anchor",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Helvetica",
+          "anchor_font_size_pt": 10.94,
+          "anchor_h_scale_pct": 93.44
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page7_row7",
+      "page_index": 7,
+      "bbox": {
+        "x0": 174.0,
+        "y0": 267.0,
+        "x1": 264.0,
+        "y1": 282.0
+      },
+      "selected_candidate_id": "page7_row7_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page7_row7_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_pair_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page7_row7_left",
+            "anchor_type": "left",
+            "text": "EPSTEIN, including",
+            "x": 71.86,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 126.11,
+            "selected_minus_alternate_delta_pt": -54.25,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page7_row7_right",
+            "anchor_type": "right",
+            "text": "and ",
+            "x": 267.3,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 267.3,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        },
+        {
+          "candidate_id": "page7_row7_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page7_row7_left",
+            "anchor_type": "left",
+            "text": "EPSTEIN, including",
+            "x": 71.86,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 126.11,
+            "selected_minus_alternate_delta_pt": -54.25,
+            "confidence": 0.55
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        },
+        {
+          "candidate_id": "page7_row7_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page7_row7_right",
+            "anchor_type": "right",
+            "text": "and ",
+            "x": 267.3,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 267.3,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        }
+      ]
+    },
+    {
+      "anchor_row_id": "page7_row8",
+      "page_index": 7,
+      "bbox": {
+        "x0": 240.0,
+        "y0": 228.0,
+        "x1": 330.0,
+        "y1": 243.0
+      },
+      "selected_candidate_id": "page7_row8_two_sided_selected",
+      "selected_mode": "two_sided",
+      "candidates": [
+        {
+          "candidate_id": "page7_row8_two_sided_selected",
+          "anchor_mode": "two_sided",
+          "was_selected": true,
+          "reason_code": "selected_pair_two_sided",
+          "tie_break_rank": 0,
+          "left": {
+            "anchor_id": "page7_row8_left",
+            "anchor_type": "left",
+            "text": "EPSTEIN, including",
+            "x": 137.11,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 191.36,
+            "selected_minus_alternate_delta_pt": -54.25,
+            "confidence": 0.55
+          },
+          "right": {
+            "anchor_id": "page7_row8_right",
+            "anchor_type": "right",
+            "text": "and ",
+            "x": 332.55,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 332.55,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        },
+        {
+          "candidate_id": "page7_row8_left_only_rejected",
+          "anchor_mode": "left_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 1,
+          "left": {
+            "anchor_id": "page7_row8_left",
+            "anchor_type": "left",
+            "text": "EPSTEIN, including",
+            "x": 137.11,
+            "selected_source": "hint_only_fallback",
+            "projection_source": null,
+            "alternate_x": 191.36,
+            "selected_minus_alternate_delta_pt": -54.25,
+            "confidence": 0.55
+          },
+          "right": null,
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        },
+        {
+          "candidate_id": "page7_row8_right_only_rejected",
+          "anchor_mode": "right_only",
+          "was_selected": false,
+          "reason_code": "rejected_lower_priority_candidate",
+          "tie_break_rank": 2,
+          "left": null,
+          "right": {
+            "anchor_id": "page7_row8_right",
+            "anchor_type": "right",
+            "text": "and ",
+            "x": 332.55,
+            "selected_source": "run_exact",
+            "projection_source": null,
+            "alternate_x": 332.55,
+            "selected_minus_alternate_delta_pt": 0.0,
+            "confidence": 1.0
+          },
+          "anchor_font_key": "OPBaseFont0",
+          "anchor_font_name": "Times-Roman",
+          "anchor_font_size_pt": 11.46,
+          "anchor_h_scale_pct": 104.52
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    "dictionary_source=default_names",
+    "dictionary_size=752",
+    "timing_ms stage=guess_font_runs value=7",
+    "timing_ms stage=guess_width_tables value=0",
+    "font_run_count=3205 font_asset_count=0 width_table_count=0",
+    "redaction_index=0 page_index=1 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=7388 funnel_after_shape=7388 funnel_after_anchor=1202 funnel_after_box=1202 funnel_scored=1202",
+    "redaction_index=1 page_index=1 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=7388 funnel_after_shape=7388 funnel_after_anchor=826 funnel_after_box=826 funnel_scored=826",
+    "redaction_index=2 page_index=1 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=7388 funnel_after_shape=7388 funnel_after_anchor=826 funnel_after_box=826 funnel_scored=826",
+    "redaction_index=3 page_index=1 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=7388 funnel_after_shape=7388 funnel_after_anchor=4437 funnel_after_box=4437 funnel_scored=4437",
+    "redaction_index=4 page_index=1 anchor_mode=left_only funnel_scanned=700 funnel_after_char_units=700 funnel_after_context=700 funnel_after_shape=700 funnel_after_anchor=700 funnel_after_box=700 funnel_scored=700",
+    "redaction_index=5 page_index=1 anchor_mode=right_only funnel_scanned=700 funnel_after_char_units=700 funnel_after_context=700 funnel_after_shape=700 funnel_after_anchor=700 funnel_after_box=700 funnel_scored=700",
+    "redaction_index=6 page_index=1 anchored_row=false reason=missing_anchor",
+    "redaction_index=7 page_index=7 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=2281 funnel_after_shape=2145 funnel_after_anchor=1703 funnel_after_box=1703 funnel_scored=1703",
+    "redaction_index=8 page_index=7 anchor_mode=two_sided funnel_scanned=7388 funnel_after_char_units=7388 funnel_after_context=2281 funnel_after_shape=2145 funnel_after_anchor=716 funnel_after_box=716 funnel_scored=716",
+    "redaction_index=0 page_index=1 anchored_row=true exact_count=0 candidate_count=600 top_guess=bill left_anchor=[--] right_anchor=[Print] tol_pt=8 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=1 page_index=1 anchored_row=true exact_count=0 candidate_count=600 top_guess=k left_anchor=[-- Print] right_anchor=[Print] tol_pt=8 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=2 page_index=1 anchored_row=true exact_count=0 candidate_count=600 top_guess=j. left_anchor=[-- Print] right_anchor=[Print] tol_pt=8 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=3 page_index=1 anchored_row=true exact_count=0 candidate_count=600 top_guess=donald trump left_anchor=[--] right_anchor=[Save As...] tol_pt=8 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=4 page_index=1 anchored_row=true exact_count=0 candidate_count=50 top_guess=OBREGON, ANA left_anchor=[1] right_anchor=[Save As...] tol_pt=14 anchor_mode=left_only anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=5 page_index=1 anchored_row=true exact_count=0 candidate_count=50 top_guess=AARON left_anchor=[Save As...] right_anchor=[Reset] tol_pt=4 anchor_mode=right_only anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=7 page_index=7 anchored_row=true exact_count=0 candidate_count=600 top_guess=Leonardo Dicaprio left_anchor=[EPSTEIN, including] right_anchor=[and ] tol_pt=8 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "redaction_index=8 page_index=7 anchored_row=true exact_count=0 candidate_count=600 top_guess=Leonardo Dicaprio left_anchor=[EPSTEIN, including] right_anchor=[and ] tol_pt=3.5 anchor_mode=two_sided anchor_width_source=core_font space_width_source=core_font candidate_width_source=core_font width_fallback_reason=font_asset_missing+width_table_missing",
+    "timing_ms stage=guess_anchor_rows value=37",
+    "visual_score=enabled rows_total=9 rows_with_top_guess=8 context_rows_scored=0 context_rows_rejected=0 rows_scored=1 rows_dropped=0 dpi_requested=200 dpi_effective=72 min_ink_pixels_requested=64 min_ink_pixels_effective=8 drop_threshold=none context_max_diff=0.22",
+    "visual_crop_fallback base_error=none overlay_error=Invalid file trailer",
+    "visual_rerank=enabled=true rows_considered=0 rows_scored=0 top1_changed=0 top1_changed_ratio=0.0000 mean_gain=0.0000 top_k=3 eval_cap=32 blend_weight=0.920",
+    "visual_rerank_timing=candidate_evals=0 eval_ms_total=0 eval_ms_per_candidate=0.000 eval_ms_per_scored_row=0.000",
+    "visual_score_timing=annotate_overlay_ms=0 annotate_context_ms=0 renderer_init_ms=0 page_render_ms=53 row_scoring_ms=0 pages_rendered=2",
+    "visual_tile_rendering=pages_cropped=2 crop_apply_ms=0 tile_padding_pt=8 max_crop_coverage=0.92",
+    "timing_ms stage=guess_visual_score value=57",
+    "timing_ms stage=guess_run_from_bytes_total value=96",
+    "timing_ms stage=redactions value=99",
+    "timing_ms stage=fonts value=8",
+    "timing_ms stage=guess value=96",
+    "timing_ms stage=visualize_payload value=0",
+    "timing_ms stage=orchestrator_total value=213",
+    "timing_ms stage=visualize value=1"
+  ]
+}

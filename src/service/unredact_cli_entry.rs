@@ -26,6 +26,7 @@ pub struct UnredactServiceOutputs {
     pub redactions_path: PathBuf,
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
+    pub anchors_path: PathBuf,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -50,6 +51,7 @@ pub struct UnredactBatchFileResult {
     pub redactions_path: Option<PathBuf>,
     pub fonts_path: Option<PathBuf>,
     pub guesses_path: Option<PathBuf>,
+    pub anchors_path: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
     pub error: Option<String>,
     pub elapsed_ms: u128,
@@ -131,6 +133,7 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         redactions_path: output_paths.redactions_path,
         fonts_path: output_paths.fonts_path,
         guesses_path: output_paths.guesses_path,
+        anchors_path: output_paths.anchors_path,
         visualized_pdf_path: output_paths.visualized_pdf_path,
     })
 }
@@ -214,6 +217,7 @@ fn run_batch_item(
                 redactions_path: None,
                 fonts_path: None,
                 guesses_path: None,
+                anchors_path: None,
                 visualized_pdf_path: None,
                 error: Some(error),
                 elapsed_ms: started.elapsed().as_millis(),
@@ -229,6 +233,7 @@ fn run_batch_item(
             redactions_path: Some(outputs.redactions_path),
             fonts_path: Some(outputs.fonts_path),
             guesses_path: Some(outputs.guesses_path),
+            anchors_path: Some(outputs.anchors_path),
             visualized_pdf_path: outputs.visualized_pdf_path,
             error: None,
             elapsed_ms: started.elapsed().as_millis(),
@@ -239,6 +244,7 @@ fn run_batch_item(
             redactions_path: None,
             fonts_path: None,
             guesses_path: None,
+            anchors_path: None,
             visualized_pdf_path: None,
             error: Some(format!("{}: {error}", input.display())),
             elapsed_ms: started.elapsed().as_millis(),

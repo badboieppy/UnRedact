@@ -13,7 +13,9 @@ use crate::data::typography_width_data::{
 };
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::{
-    GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
+    AnchorCandidateDecision, AnchorDecisionRecord, AnchorProjectionSource,
+    AnchorSelectionReasonCode, AnchorSideDecision, AnchorSourceLabel, AnchorType, GuessCandidate,
+    GuessConfig, GuessContext, GuessReport, RedactionGuess,
 };
 use crate::types::redaction_types::{Rect, RedactionKind, RedactionOccurrence, RedactionReport};
 use crate::types::runtime_defaults::{DEFAULT_FONT_METRICS_DPI, MULTI_SPAN_GAP_RATIO_THRESHOLD};
@@ -105,7 +107,7 @@ fn build_report_from_parts_with_fonts_inputs(
         .iter()
         .any(|line| line == "dictionary_source=default_names");
     let guess_anchor_started = Instant::now();
-    let (mut guesses, guess_diagnostics) = build_anchor_validated_guesses(
+    let (mut guesses, anchors, guess_diagnostics) = build_anchor_validated_guesses(
         &inputs.redactions.redactions,
         &inputs.dictionary,
         inputs.font_runs,
@@ -157,6 +159,7 @@ fn build_report_from_parts_with_fonts_inputs(
         input_redactions: inputs.input_redactions_label,
         input_fonts: inputs.input_fonts_label,
         guesses,
+        anchors,
         diagnostics: all_diagnostics,
     }
 }
@@ -168,7 +171,9 @@ fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
             .first()
             .map(|candidate| candidate.score as f64)
             .unwrap_or(0.0_f64);
-        let anchor = if !guess.context.has_anchor_pair {
+        let anchor = if let Some(value) = guess.context.row_anchor_confidence {
+            value as f64
+        } else if !guess.context.has_anchor_pair {
             0.35_f64
         } else if guess.context.anchor_mode.as_deref() == Some("two_sided") {
             1.0_f64
@@ -201,13 +206,14 @@ fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
                 - fallback_penalty)
                 .clamp(0.0_f64, 1.0_f64);
         guess.context.confidence_score = Some(confidence as f32);
+        guess.context.row_anchor_confidence = Some(confidence as f32);
         guess.context.confidence_factors = Some(format!(
                 "base={base:.3};anchor={anchor:.3};width={width:.3};visual={visual:.3};fallback_penalty={fallback_penalty:.3}"
             ));
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum AnchorMode {
     TwoSided,
     LeftOnly,
@@ -224,12 +230,37 @@ impl AnchorMode {
     }
 }
 
+fn rejected_reason_for_mode(
+    selected_mode: AnchorMode,
+    candidate_mode: &str,
+) -> AnchorSelectionReasonCode {
+    match selected_mode {
+        AnchorMode::TwoSided => AnchorSelectionReasonCode::RejectedLowerPriorityCandidate,
+        AnchorMode::LeftOnly => match candidate_mode {
+            "two_sided" | "right_only" => AnchorSelectionReasonCode::RejectedUnavailable,
+            _ => AnchorSelectionReasonCode::RejectedLowerPriorityCandidate,
+        },
+        AnchorMode::RightOnly => match candidate_mode {
+            "two_sided" | "left_only" => AnchorSelectionReasonCode::RejectedUnavailable,
+            _ => AnchorSelectionReasonCode::RejectedLowerPriorityCandidate,
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AnchorPairData {
     left_anchor_text: String,
     right_anchor_text: String,
     left_x: f64,
     right_x: f64,
+    left_source: AnchorSourceLabel,
+    right_source: AnchorSourceLabel,
+    left_projection_source: Option<AnchorProjectionSource>,
+    right_projection_source: Option<AnchorProjectionSource>,
+    left_alternate_x: Option<f64>,
+    right_alternate_x: Option<f64>,
+    left_delta_pt: Option<f64>,
+    right_delta_pt: Option<f64>,
     font_key: String,
     font_name: String,
     font_size_pt: f32,
@@ -239,6 +270,17 @@ struct AnchorPairData {
     epsilon_pt: f64,
     row_bias_pt: f64,
     mode: AnchorMode,
+    selection_reason_code: AnchorSelectionReasonCode,
+}
+
+#[derive(Debug, Clone)]
+struct AnchorSideResolution {
+    text: String,
+    x: f64,
+    source: AnchorSourceLabel,
+    projection_source: Option<AnchorProjectionSource>,
+    alternate_x: Option<f64>,
+    selected_minus_alternate_delta_pt: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -299,7 +341,7 @@ const ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT: f64 = 18.0_f64;
 const ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT: f64 = 4.0_f64;
 const ROW_CONTEXT_WRAP_RESET_X_DELTA_PT: f64 = 16.0_f64;
 const ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT: f64 = 28.0_f64;
-const HINT_SUPERSET_MIN_PREFIX_CHARS: usize = 6;
+const ANCHOR_CANDIDATE_MODE_ORDER: [&str; 3] = ["two_sided", "left_only", "right_only"];
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
 
@@ -374,7 +416,7 @@ fn build_anchor_validated_guesses(
     typography_profile: &TypographyProfile,
     cfg: &GuessConfig,
     use_curated_name_prior: bool,
-) -> (Vec<RedactionGuess>, Vec<String>) {
+) -> (Vec<RedactionGuess>, Vec<AnchorDecisionRecord>, Vec<String>) {
     let dictionary_variants = build_dictionary_variants(dictionary);
     let assets = font_runs
         .assets
@@ -410,6 +452,7 @@ fn build_anchor_validated_guesses(
         typography_profile.width_table_count()
     )];
     let mut guesses = Vec::with_capacity(redactions.len());
+    let mut anchor_records = Vec::with_capacity(redactions.len());
     let shared_context_hints = build_shared_context_hints(redactions);
 
     for (index, redaction) in redactions.iter().enumerate() {
@@ -429,6 +472,9 @@ fn build_anchor_validated_guesses(
             &assets,
             typography_profile,
         );
+        let anchor_row_id = format!("page{}_row{index}", redaction.page_index);
+        let left_anchor_id = format!("{anchor_row_id}_left");
+        let right_anchor_id = format!("{anchor_row_id}_right");
         let Some(anchor) = anchor else {
             let inferred_typography = infer_local_typography(redaction, &page_runs);
             diagnostics.push(format!(
@@ -494,6 +540,16 @@ fn build_anchor_validated_guesses(
                     width_fallback_reason: None,
                     confidence_score: None,
                     confidence_factors: None,
+                    anchor_row_id: Some(anchor_row_id.clone()),
+                    left_anchor_id: Some(left_anchor_id.clone()),
+                    right_anchor_id: Some(right_anchor_id.clone()),
+                    left_anchor_type: Some(AnchorType::Left),
+                    right_anchor_type: Some(AnchorType::Right),
+                    left_anchor_selected_source: None,
+                    right_anchor_selected_source: None,
+                    left_anchor_confidence: None,
+                    right_anchor_confidence: None,
+                    row_anchor_confidence: None,
                     has_anchor_pair: false,
                 },
                 visual_compared_pixels: None,
@@ -502,10 +558,42 @@ fn build_anchor_validated_guesses(
                 visual_reason: None,
                 visual_dropped: false,
             });
+            anchor_records.push(AnchorDecisionRecord {
+                anchor_row_id: anchor_row_id.clone(),
+                page_index: redaction.page_index,
+                bbox: redaction.bbox,
+                selected_candidate_id: None,
+                selected_mode: None,
+                candidates: ANCHOR_CANDIDATE_MODE_ORDER
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, mode)| AnchorCandidateDecision {
+                        candidate_id: format!("{anchor_row_id}_{mode}_{rank}"),
+                        anchor_mode: (*mode).to_owned(),
+                        was_selected: false,
+                        reason_code: AnchorSelectionReasonCode::RejectedMissingAnchor,
+                        tie_break_rank: Some(rank as u32),
+                        left: None,
+                        right: None,
+                        anchor_font_key: inferred_typography
+                            .as_ref()
+                            .map(|value| value.font_key.clone()),
+                        anchor_font_name: inferred_typography
+                            .as_ref()
+                            .map(|value| value.font_name.clone()),
+                        anchor_font_size_pt: inferred_typography
+                            .as_ref()
+                            .map(|value| value.font_size_pt),
+                        anchor_h_scale_pct: inferred_typography
+                            .as_ref()
+                            .map(|value| value.h_scale_pct),
+                    })
+                    .collect::<Vec<_>>(),
+            });
             continue;
         };
 
-        let (guess, funnel) = build_guess_for_anchor(
+        let (mut guess, funnel) = build_guess_for_anchor(
             redaction,
             &dictionary_variants,
             cfg,
@@ -514,6 +602,22 @@ fn build_anchor_validated_guesses(
             typography_profile,
             use_curated_name_prior,
         );
+        let left_confidence =
+            anchor_side_confidence(anchor.left_source, anchor.left_projection_source);
+        let right_confidence =
+            anchor_side_confidence(anchor.right_source, anchor.right_projection_source);
+        let row_confidence =
+            ((left_confidence + right_confidence) * 0.5_f32).clamp(0.0_f32, 1.0_f32);
+        guess.context.anchor_row_id = Some(anchor_row_id.clone());
+        guess.context.left_anchor_id = Some(left_anchor_id.clone());
+        guess.context.right_anchor_id = Some(right_anchor_id.clone());
+        guess.context.left_anchor_type = Some(AnchorType::Left);
+        guess.context.right_anchor_type = Some(AnchorType::Right);
+        guess.context.left_anchor_selected_source = Some(anchor.left_source);
+        guess.context.right_anchor_selected_source = Some(anchor.right_source);
+        guess.context.left_anchor_confidence = Some(left_confidence);
+        guess.context.right_anchor_confidence = Some(right_confidence);
+        guess.context.row_anchor_confidence = Some(row_confidence);
         diagnostics.push(format!(
                 "redaction_index={index} page_index={} anchor_mode={} funnel_scanned={} funnel_after_char_units={} funnel_after_context={} funnel_after_shape={} funnel_after_anchor={} funnel_after_box={} funnel_scored={}",
                 redaction.page_index,
@@ -526,6 +630,84 @@ fn build_anchor_validated_guesses(
                 funnel.after_box,
                 funnel.scored,
             ));
+        let selected_mode = anchor.mode.as_str().to_owned();
+        let selected_candidate_id = format!("{anchor_row_id}_{selected_mode}_selected");
+        let left_side = AnchorSideDecision {
+            anchor_id: left_anchor_id.clone(),
+            anchor_type: AnchorType::Left,
+            text: anchor.left_anchor_text.clone(),
+            x: anchor.left_x as f32,
+            selected_source: anchor.left_source,
+            projection_source: anchor.left_projection_source,
+            alternate_x: anchor.left_alternate_x.map(|value| value as f32),
+            selected_minus_alternate_delta_pt: anchor.left_delta_pt.map(|value| value as f32),
+            confidence: Some(left_confidence),
+        };
+        let right_side = AnchorSideDecision {
+            anchor_id: right_anchor_id.clone(),
+            anchor_type: AnchorType::Right,
+            text: anchor.right_anchor_text.clone(),
+            x: anchor.right_x as f32,
+            selected_source: anchor.right_source,
+            projection_source: anchor.right_projection_source,
+            alternate_x: anchor.right_alternate_x.map(|value| value as f32),
+            selected_minus_alternate_delta_pt: anchor.right_delta_pt.map(|value| value as f32),
+            confidence: Some(right_confidence),
+        };
+        let mut candidates = vec![AnchorCandidateDecision {
+            candidate_id: selected_candidate_id.clone(),
+            anchor_mode: selected_mode.clone(),
+            was_selected: true,
+            reason_code: anchor.selection_reason_code,
+            tie_break_rank: Some(0),
+            left: Some(left_side.clone()),
+            right: Some(right_side.clone()),
+            anchor_font_key: Some(anchor.font_key.clone()),
+            anchor_font_name: Some(anchor.font_name.clone()),
+            anchor_font_size_pt: Some(anchor.font_size_pt),
+            anchor_h_scale_pct: Some(anchor.h_scale_pct),
+        }];
+        for candidate_mode in ANCHOR_CANDIDATE_MODE_ORDER {
+            if candidate_mode == selected_mode {
+                continue;
+            }
+            let reason_code = rejected_reason_for_mode(anchor.mode, candidate_mode);
+            let emit_geometry = matches!(
+                reason_code,
+                AnchorSelectionReasonCode::RejectedLowerPriorityCandidate
+            );
+            let (left, right) = if emit_geometry {
+                match candidate_mode {
+                    "two_sided" => (Some(left_side.clone()), Some(right_side.clone())),
+                    "left_only" => (Some(left_side.clone()), None),
+                    "right_only" => (None, Some(right_side.clone())),
+                    _ => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            candidates.push(AnchorCandidateDecision {
+                candidate_id: format!("{anchor_row_id}_{candidate_mode}_rejected"),
+                anchor_mode: candidate_mode.to_owned(),
+                was_selected: false,
+                reason_code,
+                tie_break_rank: Some(candidates.len() as u32),
+                left,
+                right,
+                anchor_font_key: emit_geometry.then(|| anchor.font_key.clone()),
+                anchor_font_name: emit_geometry.then(|| anchor.font_name.clone()),
+                anchor_font_size_pt: emit_geometry.then_some(anchor.font_size_pt),
+                anchor_h_scale_pct: emit_geometry.then_some(anchor.h_scale_pct),
+            });
+        }
+        anchor_records.push(AnchorDecisionRecord {
+            anchor_row_id: anchor_row_id.clone(),
+            page_index: redaction.page_index,
+            bbox: redaction.bbox,
+            selected_candidate_id: Some(selected_candidate_id),
+            selected_mode: Some(selected_mode),
+            candidates,
+        });
         guesses.push(guess);
     }
 
@@ -574,7 +756,7 @@ fn build_anchor_validated_guesses(
             ));
     }
 
-    (guesses, diagnostics)
+    (guesses, anchor_records, diagnostics)
 }
 
 fn infer_local_typography(
@@ -1188,6 +1370,16 @@ fn build_guess_for_anchor(
                     width_fallback_reason: None,
                     confidence_score: None,
                     confidence_factors: None,
+                    anchor_row_id: None,
+                    left_anchor_id: None,
+                    right_anchor_id: None,
+                    left_anchor_type: Some(AnchorType::Left),
+                    right_anchor_type: Some(AnchorType::Right),
+                    left_anchor_selected_source: Some(anchor.left_source),
+                    right_anchor_selected_source: Some(anchor.right_source),
+                    left_anchor_confidence: None,
+                    right_anchor_confidence: None,
+                    row_anchor_confidence: None,
                     has_anchor_pair: true,
                 },
                 visual_compared_pixels: None,
@@ -1528,6 +1720,16 @@ fn build_guess_for_anchor(
             width_fallback_reason,
             confidence_score: None,
             confidence_factors: None,
+            anchor_row_id: None,
+            left_anchor_id: None,
+            right_anchor_id: None,
+            left_anchor_type: Some(AnchorType::Left),
+            right_anchor_type: Some(AnchorType::Right),
+            left_anchor_selected_source: Some(anchor.left_source),
+            right_anchor_selected_source: Some(anchor.right_source),
+            left_anchor_confidence: None,
+            right_anchor_confidence: None,
+            row_anchor_confidence: None,
             has_anchor_pair: true,
         },
         visual_compared_pixels: None,
@@ -1915,7 +2117,7 @@ fn try_same_run_hint_anchor(
         text_matches(run_text, left_hint_text) && text_matches(run_text, right_hint_text)
     })?;
     let asset = assets.get(&same_run.font_key);
-    let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
+    let left_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         same_run,
         Some(left_hint_text),
@@ -1923,7 +2125,7 @@ fn try_same_run_hint_anchor(
         asset,
         typography_profile,
     );
-    let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
+    let right_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         same_run,
         Some(right_hint_text),
@@ -1931,6 +2133,8 @@ fn try_same_run_hint_anchor(
         asset,
         typography_profile,
     );
+    let left_x = left_resolution.x;
+    let right_x = right_resolution.x;
     if right_x <= left_x {
         return None;
     }
@@ -1942,10 +2146,18 @@ fn try_same_run_hint_anchor(
     };
     let calibration = estimate_row_epsilon(row_runs, same_run, redaction, &measure_ctx);
     Some(AnchorPairData {
-        left_anchor_text,
-        right_anchor_text,
+        left_anchor_text: left_resolution.text,
+        right_anchor_text: right_resolution.text,
         left_x,
         right_x,
+        left_source: left_resolution.source,
+        right_source: right_resolution.source,
+        left_projection_source: left_resolution.projection_source,
+        right_projection_source: right_resolution.projection_source,
+        left_alternate_x: left_resolution.alternate_x,
+        right_alternate_x: right_resolution.alternate_x,
+        left_delta_pt: left_resolution.selected_minus_alternate_delta_pt,
+        right_delta_pt: right_resolution.selected_minus_alternate_delta_pt,
         font_key: same_run.font_key.clone(),
         font_name: same_run.font_name.clone(),
         font_size_pt: same_run.font_size_pt,
@@ -1955,6 +2167,7 @@ fn try_same_run_hint_anchor(
         epsilon_pt: calibration.epsilon_pt,
         row_bias_pt: calibration.bias_pt,
         mode: AnchorMode::TwoSided,
+        selection_reason_code: AnchorSelectionReasonCode::SelectedSameRunTwoSided,
     })
 }
 
@@ -2082,7 +2295,7 @@ fn build_two_sided_anchor_from_pair(
     let asset = assets
         .get(&left_run.font_key)
         .or_else(|| assets.get(&right_run.font_key));
-    let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
+    let left_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         left_run,
         hints.left_text,
@@ -2090,7 +2303,7 @@ fn build_two_sided_anchor_from_pair(
         asset,
         typography_profile,
     );
-    let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
+    let right_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         right_run,
         hints.right_text,
@@ -2098,6 +2311,10 @@ fn build_two_sided_anchor_from_pair(
         asset,
         typography_profile,
     );
+    let left_anchor_text = left_resolution.text.as_str();
+    let right_anchor_text = right_resolution.text.as_str();
+    let left_x = left_resolution.x;
+    let right_x = right_resolution.x;
     if left_anchor_text.trim().is_empty() || right_anchor_text.trim().is_empty() {
         return None;
     }
@@ -2117,10 +2334,18 @@ fn build_two_sided_anchor_from_pair(
     };
     let calibration = estimate_row_epsilon(row_runs, left_run, redaction, &measure_ctx);
     Some(AnchorPairData {
-        left_anchor_text,
-        right_anchor_text,
+        left_anchor_text: left_resolution.text,
+        right_anchor_text: right_resolution.text,
         left_x,
         right_x,
+        left_source: left_resolution.source,
+        right_source: right_resolution.source,
+        left_projection_source: left_resolution.projection_source,
+        right_projection_source: right_resolution.projection_source,
+        left_alternate_x: left_resolution.alternate_x,
+        right_alternate_x: right_resolution.alternate_x,
+        left_delta_pt: left_resolution.selected_minus_alternate_delta_pt,
+        right_delta_pt: right_resolution.selected_minus_alternate_delta_pt,
         font_key: left_run.font_key.clone(),
         font_name: left_run.font_name.clone(),
         font_size_pt: left_run.font_size_pt,
@@ -2130,6 +2355,7 @@ fn build_two_sided_anchor_from_pair(
         epsilon_pt: calibration.epsilon_pt,
         row_bias_pt: calibration.bias_pt,
         mode: AnchorMode::TwoSided,
+        selection_reason_code: AnchorSelectionReasonCode::SelectedPairTwoSided,
     })
 }
 
@@ -2181,7 +2407,7 @@ fn recover_one_sided_anchor(
 
     if let Some(left_run) = left_only {
         let asset = assets.get(&left_run.font_key);
-        let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
+        let left_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             left_run,
             hints.left_text,
@@ -2189,6 +2415,8 @@ fn recover_one_sided_anchor(
             asset,
             typography_profile,
         );
+        let left_anchor_text = left_resolution.text.as_str();
+        let left_x = left_resolution.x;
         let right_anchor_text = hints.right_text.unwrap_or_default().to_owned();
         let right_x = (redaction.bbox.x1 as f64 + 0.5_f64).max(left_x + 1.0_f64);
         if !left_anchor_text.trim().is_empty() && right_x > left_x {
@@ -2201,10 +2429,18 @@ fn recover_one_sided_anchor(
             let mut calibration = estimate_row_epsilon(row_runs, left_run, redaction, &measure_ctx);
             calibration.epsilon_pt = (calibration.epsilon_pt * 1.75_f64).max(4.0_f64);
             return Some(AnchorPairData {
-                left_anchor_text,
+                left_anchor_text: left_resolution.text,
                 right_anchor_text,
                 left_x,
                 right_x,
+                left_source: left_resolution.source,
+                right_source: AnchorSourceLabel::HintOnlyFallback,
+                left_projection_source: left_resolution.projection_source,
+                right_projection_source: None,
+                left_alternate_x: left_resolution.alternate_x,
+                right_alternate_x: None,
+                left_delta_pt: left_resolution.selected_minus_alternate_delta_pt,
+                right_delta_pt: None,
                 font_key: left_run.font_key.clone(),
                 font_name: left_run.font_name.clone(),
                 font_size_pt: left_run.font_size_pt,
@@ -2214,13 +2450,14 @@ fn recover_one_sided_anchor(
                 epsilon_pt: calibration.epsilon_pt,
                 row_bias_pt: calibration.bias_pt,
                 mode: AnchorMode::LeftOnly,
+                selection_reason_code: AnchorSelectionReasonCode::SelectedLeftOnlyFallback,
             });
         }
     }
 
     if let Some(right_run) = right_only {
         let asset = assets.get(&right_run.font_key);
-        let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
+        let right_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             right_run,
             hints.right_text,
@@ -2228,6 +2465,8 @@ fn recover_one_sided_anchor(
             asset,
             typography_profile,
         );
+        let right_anchor_text = right_resolution.text.as_str();
+        let right_x = right_resolution.x;
         let left_anchor_text = hints.left_text.unwrap_or_default().to_owned();
         let left_x = (redaction.bbox.x0 as f64 - 0.5_f64).min(right_x - 1.0_f64);
         if !right_anchor_text.trim().is_empty() && right_x > left_x {
@@ -2242,9 +2481,17 @@ fn recover_one_sided_anchor(
             calibration.epsilon_pt = (calibration.epsilon_pt * 1.75_f64).max(4.0_f64);
             return Some(AnchorPairData {
                 left_anchor_text,
-                right_anchor_text,
+                right_anchor_text: right_resolution.text,
                 left_x,
                 right_x,
+                left_source: AnchorSourceLabel::HintOnlyFallback,
+                right_source: right_resolution.source,
+                left_projection_source: None,
+                right_projection_source: right_resolution.projection_source,
+                left_alternate_x: None,
+                right_alternate_x: right_resolution.alternate_x,
+                left_delta_pt: None,
+                right_delta_pt: right_resolution.selected_minus_alternate_delta_pt,
                 font_key: right_run.font_key.clone(),
                 font_name: right_run.font_name.clone(),
                 font_size_pt: right_run.font_size_pt,
@@ -2254,6 +2501,7 @@ fn recover_one_sided_anchor(
                 epsilon_pt: calibration.epsilon_pt,
                 row_bias_pt: calibration.bias_pt,
                 mode: AnchorMode::RightOnly,
+                selection_reason_code: AnchorSelectionReasonCode::SelectedRightOnlyFallback,
             });
         }
     }
@@ -2268,65 +2516,124 @@ fn resolve_anchor_text_and_x(
     hint_x: Option<f64>,
     asset: Option<&FontAsset>,
     typography_profile: &TypographyProfile,
-) -> (String, f64) {
-    let run_text = run.text.trim();
-    if run_text.is_empty() {
-        return (String::new(), run.bbox.x0 as f64);
-    }
+) -> AnchorSideResolution {
+    let run_text = run.text.as_str();
+    let run_x = run.bbox.x0 as f64;
     let Some(hint_text) = hint else {
-        return (run_text.to_owned(), run.bbox.x0 as f64);
+        return to_anchor_side_resolution(
+            run_text.to_owned(),
+            run_x,
+            AnchorSourceLabel::RunExact,
+            None,
+            None,
+        );
     };
-    if hint_text.is_empty() {
-        return (run_text.to_owned(), run.bbox.x0 as f64);
+    if run_text.is_empty() {
+        let selected_x = hint_x.unwrap_or(run_x);
+        return to_anchor_side_resolution(
+            hint_text.to_owned(),
+            selected_x,
+            AnchorSourceLabel::HintOnlyFallback,
+            None,
+            Some(run_x),
+        );
     }
-    if run_text == hint_text {
-        return (hint_text.to_owned(), run.bbox.x0 as f64);
+    if hint_text.is_empty() {
+        return to_anchor_side_resolution(
+            run_text.to_owned(),
+            run_x,
+            AnchorSourceLabel::RunExact,
+            None,
+            None,
+        );
+    }
+    let normalized_run = normalize_transport_text(run_text);
+    let normalized_hint = normalize_transport_text(hint_text);
+    if normalized_run == normalized_hint {
+        return to_anchor_side_resolution(
+            run_text.to_owned(),
+            run_x,
+            AnchorSourceLabel::RunExact,
+            None,
+            hint_x,
+        );
     }
     if let Some(prefix_bytes) = run_text.find(hint_text) {
         let prefix = &run_text[..prefix_bytes];
-        let offset = prefix_width_from_run(run, prefix_bytes)
-            .or_else(|| {
-                measure_text_width_from_sources(
-                    &TypographyMeasureInput {
-                        page_index,
-                        font_key: &run.font_key,
-                        font_name: &run.font_name,
-                        font_size_pt: run.font_size_pt,
-                        h_scale_pct: run.h_scale_pct,
-                        text: prefix,
-                        metrics_dpi: DEFAULT_FONT_METRICS_DPI,
-                    },
-                    asset,
-                    typography_profile,
-                )
-                .map(|value| value.pt)
-            })
-            .unwrap_or_else(|| {
+        let (offset, projection_source) =
+            if let Some(value) = prefix_width_from_run(run, prefix_bytes) {
+                (value, Some(AnchorProjectionSource::CharAdvances))
+            } else if let Some(value) = measure_text_width_from_sources(
+                &TypographyMeasureInput {
+                    page_index,
+                    font_key: &run.font_key,
+                    font_name: &run.font_name,
+                    font_size_pt: run.font_size_pt,
+                    h_scale_pct: run.h_scale_pct,
+                    text: prefix,
+                    metrics_dpi: DEFAULT_FONT_METRICS_DPI,
+                },
+                asset,
+                typography_profile,
+            )
+            .map(|value| value.pt)
+            {
+                (value, Some(AnchorProjectionSource::MeasuredTypography))
+            } else {
                 let run_chars = run_text.chars().count().max(1) as f64;
                 let prefix_chars = prefix.chars().count() as f64;
-                ((run.bbox.x1 - run.bbox.x0).abs() as f64) * (prefix_chars / run_chars)
-            });
-        return (hint_text.to_owned(), run.bbox.x0 as f64 + offset);
+                (
+                    ((run.bbox.x1 - run.bbox.x0).abs() as f64) * (prefix_chars / run_chars),
+                    Some(AnchorProjectionSource::ProportionalBbox),
+                )
+            };
+        let selected_x = run_x + offset;
+        return to_anchor_side_resolution(
+            hint_text.to_owned(),
+            selected_x,
+            AnchorSourceLabel::RunPrefixProjection,
+            projection_source,
+            hint_x,
+        );
     }
     if hint_text.contains(run_text) {
-        let normalized_hint = hint_text.trim_end();
-        if normalized_hint.ends_with(',') {
-            let prefix_chars = normalized_hint
-                .find(run_text)
-                .map(|offset| {
-                    normalized_hint[..offset]
-                        .chars()
-                        .filter(|ch| !ch.is_whitespace())
-                        .count()
-                })
-                .unwrap_or(0);
-            if prefix_chars >= HINT_SUPERSET_MIN_PREFIX_CHARS {
-                return (hint_text.to_owned(), hint_x.unwrap_or(run.bbox.x0 as f64));
-            }
-        }
-        return (run_text.to_owned(), run.bbox.x0 as f64);
+        return to_anchor_side_resolution(
+            run_text.to_owned(),
+            run_x,
+            AnchorSourceLabel::RunExact,
+            None,
+            hint_x,
+        );
     }
-    (hint_text.to_owned(), hint_x.unwrap_or(run.bbox.x0 as f64))
+    let selected_x = hint_x.unwrap_or(run_x);
+    to_anchor_side_resolution(
+        hint_text.to_owned(),
+        selected_x,
+        AnchorSourceLabel::HintOnlyFallback,
+        None,
+        Some(run_x),
+    )
+}
+
+fn to_anchor_side_resolution(
+    text: String,
+    selected_x: f64,
+    source: AnchorSourceLabel,
+    projection_source: Option<AnchorProjectionSource>,
+    alternate_x: Option<f64>,
+) -> AnchorSideResolution {
+    let delta = alternate_x.and_then(|value| {
+        let diff = selected_x - value;
+        diff.is_finite().then_some(diff)
+    });
+    AnchorSideResolution {
+        text,
+        x: selected_x,
+        source,
+        projection_source,
+        alternate_x,
+        selected_minus_alternate_delta_pt: delta,
+    }
 }
 
 fn prefix_width_from_run(run: &FontTextRun, prefix_bytes: usize) -> Option<f64> {
@@ -2660,10 +2967,31 @@ fn collect_row_runs_for_anchor<'a>(
 }
 
 fn text_matches(run_text: &str, target: &str) -> bool {
-    if run_text == target {
+    let normalized_run = normalize_transport_text(run_text);
+    let normalized_target = normalize_transport_text(target);
+    if normalized_run == normalized_target {
         return true;
     }
-    run_text.contains(target) || target.contains(run_text)
+    normalized_run.contains(&normalized_target) || normalized_target.contains(&normalized_run)
+}
+
+fn normalize_transport_text(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn anchor_side_confidence(
+    source: AnchorSourceLabel,
+    projection: Option<AnchorProjectionSource>,
+) -> f32 {
+    match source {
+        AnchorSourceLabel::RunExact => 1.0_f32,
+        AnchorSourceLabel::RunPrefixProjection => match projection {
+            Some(AnchorProjectionSource::CharAdvances) => 0.92_f32,
+            Some(AnchorProjectionSource::MeasuredTypography) => 0.82_f32,
+            Some(AnchorProjectionSource::ProportionalBbox) | None => 0.72_f32,
+        },
+        AnchorSourceLabel::HintOnlyFallback => 0.55_f32,
+    }
 }
 
 fn candidate_width_entries_in_range(
@@ -2779,6 +3107,7 @@ fn curated_name_prior_set() -> &'static BTreeSet<String> {
 mod tests {
     use super::resolve_anchor_text_and_x;
     use crate::types::file_types::{FontTextRun, Rect};
+    use crate::types::guess_types::AnchorSourceLabel;
     use crate::types::typography_types::TypographyProfile;
 
     fn make_run(text: &str, x0: f32, x1: f32) -> FontTextRun {
@@ -2802,7 +3131,7 @@ mod tests {
     fn resolve_anchor_prefers_full_hint_when_run_text_is_substring() {
         let run = make_run("Maxwell,", 180.0_f32, 236.0_f32);
         let profile = TypographyProfile::default();
-        let (text, x) = resolve_anchor_text_and_x(
+        let resolution = resolve_anchor_text_and_x(
             0,
             &run,
             Some("Ghislaine Maxwell,"),
@@ -2810,15 +3139,17 @@ mod tests {
             None,
             &profile,
         );
-        assert_eq!(text, "Ghislaine Maxwell,");
-        assert_eq!(x, 130.0_f64);
+        assert_eq!(resolution.text, "Maxwell,");
+        assert_eq!(resolution.x, 180.0_f64);
+        assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
+        assert_eq!(resolution.projection_source, None);
     }
 
     #[test]
     fn resolve_anchor_keeps_run_text_when_superset_prefix_is_too_short() {
         let run = make_run("Brunel,", 180.0_f32, 236.0_f32);
         let profile = TypographyProfile::default();
-        let (text, x) = resolve_anchor_text_and_x(
+        let resolution = resolve_anchor_text_and_x(
             0,
             &run,
             Some("Luc Brunel,"),
@@ -2826,15 +3157,17 @@ mod tests {
             None,
             &profile,
         );
-        assert_eq!(text, "Brunel,");
-        assert_eq!(x, 180.0_f64);
+        assert_eq!(resolution.text, "Brunel,");
+        assert_eq!(resolution.x, 180.0_f64);
+        assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
+        assert_eq!(resolution.projection_source, None);
     }
 
     #[test]
     fn resolve_anchor_keeps_run_text_when_hint_does_not_end_with_comma() {
         let run = make_run("including", 90.0_f32, 150.0_f32);
         let profile = TypographyProfile::default();
-        let (text, x) = resolve_anchor_text_and_x(
+        let resolution = resolve_anchor_text_and_x(
             0,
             &run,
             Some("EPSTEIN, including"),
@@ -2842,7 +3175,9 @@ mod tests {
             None,
             &profile,
         );
-        assert_eq!(text, "including");
-        assert_eq!(x, 90.0_f64);
+        assert_eq!(resolution.text, "including");
+        assert_eq!(resolution.x, 90.0_f64);
+        assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
+        assert_eq!(resolution.projection_source, None);
     }
 }

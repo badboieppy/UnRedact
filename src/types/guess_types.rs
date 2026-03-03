@@ -25,7 +25,28 @@ pub struct GuessReport {
     pub input_redactions: String,
     pub input_fonts: String,
     pub guesses: Vec<RedactionGuess>,
+    #[serde(default)]
+    pub anchors: Vec<AnchorDecisionRecord>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnchorReport {
+    pub input_redactions: String,
+    pub decisions: Vec<AnchorDecisionRecord>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+impl GuessReport {
+    #[inline]
+    pub fn to_anchor_report(&self) -> AnchorReport {
+        AnchorReport {
+            input_redactions: self.input_redactions.clone(),
+            decisions: self.anchors.clone(),
+            diagnostics: self.diagnostics.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +115,26 @@ pub struct GuessContext {
     pub confidence_score: Option<f32>,
     #[serde(default)]
     pub confidence_factors: Option<String>,
+    #[serde(default)]
+    pub anchor_row_id: Option<String>,
+    #[serde(default)]
+    pub left_anchor_id: Option<String>,
+    #[serde(default)]
+    pub right_anchor_id: Option<String>,
+    #[serde(default)]
+    pub left_anchor_type: Option<AnchorType>,
+    #[serde(default)]
+    pub right_anchor_type: Option<AnchorType>,
+    #[serde(default)]
+    pub left_anchor_selected_source: Option<AnchorSourceLabel>,
+    #[serde(default)]
+    pub right_anchor_selected_source: Option<AnchorSourceLabel>,
+    #[serde(default)]
+    pub left_anchor_confidence: Option<f32>,
+    #[serde(default)]
+    pub right_anchor_confidence: Option<f32>,
+    #[serde(default)]
+    pub row_anchor_confidence: Option<f32>,
     #[serde(
         rename = "guessable",
         alias = "has_anchor_pair",
@@ -101,4 +142,93 @@ pub struct GuessContext {
         default
     )]
     pub has_anchor_pair: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorType {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorSourceLabel {
+    RunExact,
+    RunPrefixProjection,
+    HintOnlyFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorProjectionSource {
+    CharAdvances,
+    MeasuredTypography,
+    ProportionalBbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorSelectionReasonCode {
+    SelectedSameRunTwoSided,
+    SelectedPairTwoSided,
+    SelectedLeftOnlyFallback,
+    SelectedRightOnlyFallback,
+    RejectedMissingAnchor,
+    RejectedLowerPriorityCandidate,
+    RejectedInvalidSpan,
+    RejectedEmptyAnchorText,
+    RejectedOutOfBounds,
+    RejectedUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnchorSideDecision {
+    pub anchor_id: String,
+    pub anchor_type: AnchorType,
+    pub text: String,
+    pub x: f32,
+    pub selected_source: AnchorSourceLabel,
+    #[serde(default)]
+    pub projection_source: Option<AnchorProjectionSource>,
+    #[serde(default)]
+    pub alternate_x: Option<f32>,
+    #[serde(default)]
+    pub selected_minus_alternate_delta_pt: Option<f32>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnchorCandidateDecision {
+    pub candidate_id: String,
+    pub anchor_mode: String,
+    pub was_selected: bool,
+    pub reason_code: AnchorSelectionReasonCode,
+    #[serde(default)]
+    pub tie_break_rank: Option<u32>,
+    #[serde(default)]
+    pub left: Option<AnchorSideDecision>,
+    #[serde(default)]
+    pub right: Option<AnchorSideDecision>,
+    #[serde(default)]
+    pub anchor_font_key: Option<String>,
+    #[serde(default)]
+    pub anchor_font_name: Option<String>,
+    #[serde(default)]
+    pub anchor_font_size_pt: Option<f32>,
+    #[serde(default)]
+    pub anchor_h_scale_pct: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnchorDecisionRecord {
+    pub anchor_row_id: String,
+    pub page_index: u32,
+    pub bbox: Rect,
+    #[serde(default)]
+    pub selected_candidate_id: Option<String>,
+    #[serde(default)]
+    pub selected_mode: Option<String>,
+    pub candidates: Vec<AnchorCandidateDecision>,
 }
