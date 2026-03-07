@@ -123,3 +123,46 @@ Generated: 2026-03-02
 - `.local-agent/series/ContextDigest.md`
 - `.local-agent/series/RequirementsLedger.md`
 - `.local-agent/series/ContractLedger.md`
+
+## Implementation Cycle Update (2026-03-03)
+- Active bundle: anchor-contract-schema-foundation.
+- Validation matrix executed: cargo test, guess_accuracy_benchmark, synthetic_overfitting_benchmark, visual_score_impact_benchmark, evidence_first_change_gate.
+- Hard regression detected versus locked baseline (.local-agent/runtime/investigations/baseline_guess_accuracy.json).
+- Execution stopped per user directive: stop on regression.
+- Regression evidence: .local-agent/runtime/investigations/regression_stop_anchor-contract-schema-foundation.md
+
+## Incident Bundle Execution Update (2026-03-03)
+- Approved incident bundle sequence started.
+- Bundle 1 `incident-baseline-and-evidence-lock`: completed.
+- Locked baseline artifacts created at `.local-agent/runtime/investigations/incident_cycle_20260303/baseline/`.
+- Local regression gate runner created: `.local-agent/runtime/investigations/incident_cycle_20260303/run_locked_gate.ps1`.
+- Bundle 2 `black-only-raster-redaction-filter`: attempted, then failed hard regression gate.
+- Regression symptom: known-target rows collapsed to zero (`guess_accuracy` rows_total=0 for both benchmark datasets).
+- Root-cause/evidence report: `.local-agent/runtime/investigations/incident_cycle_20260303/regression_bundle2_black_only_filter.md`.
+- Bundle 2 code was rolled back per no-retry rollback policy.
+- Post-rollback locked gate re-run passed; sequence halted after first regression as directed.
+
+## Incident Bundle Execution Update (2026-03-03, Retry)
+- Active bundle: `black-only-raster-redaction-filter` (re-entry).
+- Implemented deterministic component-mask black filter in raster scanner.
+- Added per-occurrence selection diagnostics: decision, reason code, fill ratio, black/dark ratios, channel spread stats.
+- Added hard invariant: return explicit failure when pre-filter candidates exist but all are rejected by black filter.
+- Added raster scanner unit tests for selected/rejected component profiles.
+- Validation run passed: `cargo test` and `.local-agent/runtime/investigations/incident_cycle_20260303/run_locked_gate.ps1 -Intent neutral`.
+
+## Incident Bundle Execution Update (2026-03-03, Determinism Gate Bundle)
+- Active bundle: `determinism-and-hard-gate-enforcement`.
+- Implemented binding determinism checks in `evidence_first_change_gate` using `guess_accuracy.json.determinism_gate`.
+- Benchmark gate now fails when guess determinism section is missing, not enforced, failed, or has non-zero mismatch count.
+- Validation run passed: `cargo test` and `.local-agent/runtime/investigations/incident_cycle_20260303/run_locked_gate.ps1 -Intent neutral`.
+
+## Incident Bundle Execution Update (2026-03-03, Local Set Hinting Attempt)
+- Active bundle: `local-redaction-set-hinting`.
+- Attempted to replace transitive cluster hint merge with direct local redaction-set hinting and directional same-line linking guard.
+- Regression detected in integration gate:
+  - `tests/integration_guessing.rs::efta00038617_page2_served_names_have_loose_exact_accuracy_with_default_dictionary`
+  - observed `recall@5=0.111` below required `>=0.2`.
+- Regression artifact written:
+  - `.local-agent/runtime/investigations/incident_cycle_20260303/regression_bundle_local_redaction_set_hinting.md`.
+- Bundle code rolled back.
+- Post-rollback validation run passed: `cargo test` and `.local-agent/runtime/investigations/incident_cycle_20260303/run_locked_gate.ps1 -Intent neutral`.

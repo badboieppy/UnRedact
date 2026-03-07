@@ -1,0 +1,16 @@
+{
+  "contract_id": "C-REDACTION-DETECTION-TARGETS-V1",
+  "schema_version": 1,
+  "datasets": [
+    {
+      "name": "EFTA00038617",
+      "input_pdf": "test_data/EFTA00038617.pdf",
+      "ground_truth_redactions": "benchmark/inspection_efta00038617/EFTA00038617.redactions.json"
+    },
+    {
+      "name": "EFTA00101126",
+      "input_pdf": "test_data/EFTA00101126.pdf",
+      "ground_truth_redactions": "benchmark/user_issue_default_baseline/EFTA00101126.redactions.json"
+    }
+  ]
+}

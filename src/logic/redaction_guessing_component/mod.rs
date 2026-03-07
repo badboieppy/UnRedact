@@ -18,6 +18,8 @@ pub(crate) mod guess_logic;
 pub(crate) mod joint_assignment;
 pub(crate) mod visual_logic;
 
+#[cfg(feature = "cli-entry")]
+pub use guess_logic::{run_anchor_from_bytes, RunAnchorFromBytesRequest};
 pub use guess_logic::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
 
 const INCLUDE_FULL_PAGE_RECTS: bool = false;

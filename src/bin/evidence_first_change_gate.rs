@@ -81,6 +81,7 @@ struct BenchmarkGateDecision {
     margin_ratio: f64,
     passed: bool,
     intent_gate: IntentThresholdGate,
+    determinism_gate: DeterminismGateDecision,
     synthetic_gate: SyntheticGateDecision,
     visual_gate: VisualGateDecision,
 }
@@ -117,6 +118,18 @@ struct SyntheticGateDecision {
     multi_seed_panel_seed_count: Option<usize>,
     multi_seed_panel_required_min_seed_count: Option<usize>,
     passed: bool,
+    failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeterminismGateDecision {
+    current_path: String,
+    section_present: bool,
+    enforced: bool,
+    passed: bool,
+    required_repeats: Option<usize>,
+    evaluated_repeats: Option<usize>,
+    mismatch_count: Option<usize>,
     failures: Vec<String>,
 }
 
@@ -160,6 +173,8 @@ struct RegressionActionArtifact {
 #[derive(Debug, Clone, Deserialize)]
 struct GuessAccuracyReport {
     overall: GuessBenchmarkSummary,
+    #[serde(default)]
+    determinism_gate: Option<GuessDeterminismGateSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +184,15 @@ struct GuessBenchmarkSummary {
     recall_at_20: f64,
     mrr: f64,
     mean_rank_found: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GuessDeterminismGateSummary {
+    enforced: bool,
+    required_repeats: usize,
+    evaluated_repeats: usize,
+    passed: bool,
+    mismatch_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -264,6 +288,7 @@ fn run(options: CliOptions) -> Result<(), String> {
     if !benchmark_gate.passed {
         let mut reasons = Vec::<String>::new();
         reasons.extend(benchmark_gate.intent_gate.failures.iter().cloned());
+        reasons.extend(benchmark_gate.determinism_gate.failures.iter().cloned());
         reasons.extend(benchmark_gate.synthetic_gate.failures.iter().cloned());
         reasons.extend(benchmark_gate.visual_gate.failures.iter().cloned());
         if reasons.is_empty() {
@@ -320,14 +345,19 @@ fn evaluate_benchmark_gate(options: &CliOptions) -> Result<BenchmarkGateDecision
         &options.guess_current,
         &options.guess_baseline,
     )?;
+    let determinism_gate = evaluate_determinism_gate(&options.guess_current)?;
     let synthetic_gate = evaluate_synthetic_gate(&options.synthetic_current)?;
     let visual_gate = evaluate_visual_gate(options.margin_ratio, &options.visual_current)?;
     Ok(BenchmarkGateDecision {
         policy: INTENT_THRESHOLD_POLICY.to_owned(),
         intent: options.intent,
         margin_ratio: options.margin_ratio,
-        passed: intent_gate.passed && synthetic_gate.passed && visual_gate.passed,
+        passed: intent_gate.passed
+            && determinism_gate.passed
+            && synthetic_gate.passed
+            && visual_gate.passed,
         intent_gate,
+        determinism_gate,
         synthetic_gate,
         visual_gate,
     })
@@ -535,6 +565,58 @@ fn evaluate_synthetic_gate(current_path: &Path) -> Result<SyntheticGateDecision,
     })
 }
 
+fn evaluate_determinism_gate(current_path: &Path) -> Result<DeterminismGateDecision, String> {
+    let current = read_json::<GuessAccuracyReport>(current_path)?;
+    let mut failures = Vec::<String>::new();
+
+    let Some(section) = current.determinism_gate.as_ref() else {
+        failures.push("guess determinism_gate section missing".to_owned());
+        return Ok(DeterminismGateDecision {
+            current_path: current_path.display().to_string(),
+            section_present: false,
+            enforced: false,
+            passed: false,
+            required_repeats: None,
+            evaluated_repeats: None,
+            mismatch_count: None,
+            failures,
+        });
+    };
+
+    if !section.enforced {
+        failures.push("guess determinism gate not enforced".to_owned());
+    }
+    if section.evaluated_repeats < section.required_repeats {
+        failures.push(format!(
+            "guess determinism repeats below required observed={} required={}",
+            section.evaluated_repeats, section.required_repeats
+        ));
+    }
+    if !section.passed {
+        failures.push(format!(
+            "guess determinism gate failed mismatch_count={}",
+            section.mismatch_count
+        ));
+    }
+    if section.mismatch_count > 0 {
+        failures.push(format!(
+            "guess determinism mismatch_count must be zero observed={}",
+            section.mismatch_count
+        ));
+    }
+
+    Ok(DeterminismGateDecision {
+        current_path: current_path.display().to_string(),
+        section_present: true,
+        enforced: section.enforced,
+        passed: failures.is_empty(),
+        required_repeats: Some(section.required_repeats),
+        evaluated_repeats: Some(section.evaluated_repeats),
+        mismatch_count: Some(section.mismatch_count),
+        failures,
+    })
+}
+
 fn evaluate_visual_gate(
     margin_ratio: f64,
     current_path: &Path,
@@ -587,6 +669,16 @@ fn empty_benchmark_gate(intent: BundleIntent, margin_ratio: f64) -> BenchmarkGat
             improvement_observed: intent != BundleIntent::Improve,
             passed: true,
             metrics: Vec::new(),
+            failures: Vec::new(),
+        },
+        determinism_gate: DeterminismGateDecision {
+            current_path: String::new(),
+            section_present: true,
+            enforced: true,
+            passed: true,
+            required_repeats: None,
+            evaluated_repeats: None,
+            mismatch_count: Some(0),
             failures: Vec::new(),
         },
         synthetic_gate: SyntheticGateDecision {
@@ -683,12 +775,13 @@ fn print_decision(decision: &EvidenceGateDecision) {
         decision.errors.len()
     );
     println!(
-        "BENCHMARK_GATE policy={} intent={:?} margin_ratio={} passed={} intent_passed={} synthetic_passed={} visual_passed={}",
+        "BENCHMARK_GATE policy={} intent={:?} margin_ratio={} passed={} intent_passed={} determinism_passed={} synthetic_passed={} visual_passed={}",
         decision.benchmark_gate.policy,
         decision.benchmark_gate.intent,
         decision.benchmark_gate.margin_ratio,
         decision.benchmark_gate.passed,
         decision.benchmark_gate.intent_gate.passed,
+        decision.benchmark_gate.determinism_gate.passed,
         decision.benchmark_gate.synthetic_gate.passed,
         decision.benchmark_gate.visual_gate.passed
     );

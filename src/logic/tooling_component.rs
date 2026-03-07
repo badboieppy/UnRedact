@@ -4,12 +4,15 @@ use crate::data::dictionary_data::DictionaryData;
 use crate::data::redactions_data::{
     PdfFileRetriever, PdfPageRenderer, RedactionDataRetriever as _, RedactionsData,
 };
-use crate::types::guess_types::{GuessConfig, GuessReport};
+use crate::types::guess_types::{AnchorReport, GuessConfig, GuessReport};
 use crate::types::redaction_types::{
     PdfRenderer as _, RedactionReport, RenderedPage, UnderlyingTextHit,
 };
 
-use super::redaction_guessing_component::{run_guess_from_bytes, RunGuessFromBytesRequest};
+use super::redaction_guessing_component::{
+    run_anchor_from_bytes, run_guess_from_bytes, RunAnchorFromBytesRequest,
+    RunGuessFromBytesRequest,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolingDictionaryInputs {
@@ -24,6 +27,13 @@ pub struct ToolingGuessRequest<'a> {
     pub dictionary: &'a [String],
     pub dictionary_diagnostics: &'a [String],
     pub guess: &'a GuessConfig,
+}
+
+pub struct ToolingAnchorRequest<'a> {
+    pub input_name: &'a str,
+    pub pdf_bytes: &'a [u8],
+    pub redactions: &'a RedactionReport,
+    pub diagnostics: &'a [String],
 }
 
 pub struct ToolingPdfRenderer {
@@ -90,5 +100,17 @@ pub fn run_guess_from_redactions(req: ToolingGuessRequest<'_>) -> Result<GuessRe
         preloaded_font_runs: None,
         preloaded_font_runs_elapsed_ms: None,
         cfg: req.guess,
+    })
+}
+
+#[inline]
+pub fn run_anchor_from_redactions(req: ToolingAnchorRequest<'_>) -> Result<AnchorReport, String> {
+    run_anchor_from_bytes(RunAnchorFromBytesRequest {
+        pdf_name: req.input_name,
+        pdf_bytes: req.pdf_bytes,
+        redactions: req.redactions,
+        diagnostics: req.diagnostics,
+        preloaded_font_runs: None,
+        preloaded_font_runs_elapsed_ms: None,
     })
 }

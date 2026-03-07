@@ -1,0 +1,10 @@
+{
+  "contract_id": "C-ANCHOR-SYNTHETIC-CONFIG-V1",
+  "schema_version": 1,
+  "seeds": [12345, 424242, 98765],
+  "samples_per_pdf": 24,
+  "max_pdfs": 0,
+  "min_gap_pt": 6.0,
+  "max_gap_pt": 160.0,
+  "max_center_y_delta_pt": 4.0
+}

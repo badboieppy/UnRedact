@@ -187,33 +187,32 @@ On push to `main` (or manual dispatch), it:
 If Pages is not already enabled, enable it in repository settings and select GitHub Actions as the source.
 
 ## Accuracy Benchmark
-Use this benchmark to track quality and consistency over time:
+Use these benchmarks to track quality over time.
 
+### End-to-End Guessing Benchmark
 ```bash
-cargo run --bin guess_accuracy_benchmark -- --out benchmark/guess_accuracy.json --repeats 2 --consistency-out benchmark/guess_consistency.json
+cargo run --bin guess_accuracy_benchmark -- --out benchmark/guess_accuracy.json --repeats 2
 ```
 
-Current benchmark parameters:
-- `--out <path>`: output JSON path (default: `benchmark/guess_accuracy.json`)
-- `--repeats <n>`: number of repeated runs (default: `2`)
-- `--single-run`: shorthand for `--repeats 1`
-- `--determinism`: shorthand for `--repeats 3`
-- `--require-deterministic`: exits with error if repeated runs differ
-- `--consistency-out <path>`: optional consistency report path
-
-This reports:
-- recall and ranking metrics,
-- visual error metrics,
-- stage timing metrics,
-- run-to-run consistency metrics.
-
-Use `--determinism` as shorthand for `--repeats 3`.
-
-Show benchmark options:
+### Stage-Decoupled Benchmarks
+Run the combined benchmark by default:
 
 ```bash
-cargo run --bin guess_accuracy_benchmark -- --help
+cargo run --bin combined_accuracy_benchmark -- --repeats 2
 ```
+
+Stage behavior:
+- `redaction_accuracy_benchmark`: detector metrics against curated redaction ground truth.
+- `anchor_accuracy_benchmark`: anchor metrics using `run_anchor_from_redactions(...)` with locked redaction inputs (curated headline) plus deterministic synthetic telemetry.
+- `combined_accuracy_benchmark`: runs the redaction and anchor stage benchmarks, writes `benchmark/redaction_benchmark_report.json`, `benchmark/anchor_benchmark_report.json`, and then writes `benchmark/combined_benchmark_report.json` automatically.
+- Each benchmark writes:
+  - a full JSON artifact,
+  - a Markdown sidecar summary (`*.summary.md`),
+  - and a structured human-readable summary to stdout.
+
+Architecture notes: see `docs/stage_decoupled_benchmarking.md`.
+
+All benchmarks are non-gating by default and report absolute metrics, baseline deltas, and trend direction without hard thresholds.
 
 ## PDF to PNG Helper
 Use this to convert PDF pages into PNG images (useful for documentation and visual checks):

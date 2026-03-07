@@ -156,7 +156,7 @@ pub enum AnchorType {
 pub enum AnchorSourceLabel {
     RunExact,
     RunPrefixProjection,
-    HintOnlyFallback,
+    SyntheticBoundary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

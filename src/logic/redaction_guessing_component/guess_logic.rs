@@ -12,6 +12,8 @@ use crate::data::typography_width_data::{
     measure_text_width_from_profile,
 };
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
+#[cfg(feature = "cli-entry")]
+use crate::types::guess_types::AnchorReport;
 use crate::types::guess_types::{
     AnchorCandidateDecision, AnchorDecisionRecord, AnchorProjectionSource,
     AnchorSelectionReasonCode, AnchorSideDecision, AnchorSourceLabel, AnchorType, GuessCandidate,
@@ -23,7 +25,6 @@ use crate::types::time::Instant;
 use crate::types::typography_types::{
     TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
 };
-use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -36,6 +37,37 @@ pub struct RunGuessFromBytesRequest<'a> {
     pub preloaded_font_runs: Option<&'a FontRunReport>,
     pub preloaded_font_runs_elapsed_ms: Option<u128>,
     pub cfg: &'a GuessConfig,
+}
+
+#[cfg(feature = "cli-entry")]
+pub struct RunAnchorFromBytesRequest<'a> {
+    pub pdf_name: &'a str,
+    pub pdf_bytes: &'a [u8],
+    pub redactions: &'a RedactionReport,
+    pub diagnostics: &'a [String],
+    pub preloaded_font_runs: Option<&'a FontRunReport>,
+    pub preloaded_font_runs_elapsed_ms: Option<u128>,
+}
+
+#[cfg(feature = "cli-entry")]
+#[inline]
+pub fn run_anchor_from_bytes(req: RunAnchorFromBytesRequest<'_>) -> Result<AnchorReport, String> {
+    let cfg = GuessConfig {
+        visual_score: false,
+        ..GuessConfig::default()
+    };
+    let empty_dictionary = Vec::<String>::new();
+    let report = run_from_bytes(RunGuessFromBytesRequest {
+        pdf_name: req.pdf_name,
+        pdf_bytes: req.pdf_bytes,
+        redactions: req.redactions,
+        dictionary: empty_dictionary.as_slice(),
+        diagnostics: req.diagnostics,
+        preloaded_font_runs: req.preloaded_font_runs,
+        preloaded_font_runs_elapsed_ms: req.preloaded_font_runs_elapsed_ms,
+        cfg: &cfg,
+    })?;
+    Ok(report.to_anchor_report())
 }
 
 #[inline]
@@ -98,6 +130,12 @@ struct BuildReportWithFontsInputs<'a> {
     pdf_bytes: Option<&'a [u8]>,
 }
 
+struct AnchorResolutionBundle {
+    guesses: Vec<RedactionGuess>,
+    anchors: Vec<AnchorDecisionRecord>,
+    diagnostics: Vec<String>,
+}
+
 fn build_report_from_parts_with_fonts_inputs(
     inputs: BuildReportWithFontsInputs<'_>,
     cfg: &GuessConfig,
@@ -107,7 +145,7 @@ fn build_report_from_parts_with_fonts_inputs(
         .iter()
         .any(|line| line == "dictionary_source=default_names");
     let guess_anchor_started = Instant::now();
-    let (mut guesses, anchors, guess_diagnostics) = build_anchor_validated_guesses(
+    let anchor_resolution = resolve_anchors_from_redactions(
         &inputs.redactions.redactions,
         &inputs.dictionary,
         inputs.font_runs,
@@ -115,6 +153,7 @@ fn build_report_from_parts_with_fonts_inputs(
         cfg,
         use_curated_name_prior,
     );
+    let (mut guesses, anchors, guess_diagnostics) = rank_candidates_from_anchors(anchor_resolution);
     let guess_anchor_ms = guess_anchor_started.elapsed().as_millis();
     let mut all_diagnostics = inputs.diagnostics;
     all_diagnostics.extend(guess_diagnostics);
@@ -309,7 +348,6 @@ struct PairCandidate {
     left_idx: usize,
     right_idx: usize,
     font_penalty: u8,
-    hint_penalty: u8,
     straddle_penalty: u8,
     overlap_penalty: u8,
     contains_center_penalty: u8,
@@ -328,19 +366,23 @@ const CLUSTER_CONSENSUS_MAX_GAP_RATIO: f64 = 1.9_f64;
 const SINGLE_SPAN_WIDTH_BAND_LIMIT: usize = 700;
 const CURATED_NAME_PRIOR_BONUS_PT: f64 = 1.10_f64;
 const LIST_CONTEXT_MAX_CANDIDATES: usize = 200;
-const TWO_SIDED_MAX_CANDIDATES: usize = 600;
+const TWO_SIDED_MAX_CANDIDATES: usize = 1000;
 const EXACT_MATCH_RAW_ERROR_EPSILON_PT: f64 = 0.0001_f64;
-const ANCHOR_PAIR_STRADDLE_TOLERANCE_PT: f64 = 2.0_f64;
+const ANCHOR_PAIR_STRADDLE_TOLERANCE_PT: f64 = 8.0_f64;
 const ANCHOR_PAIR_MAX_OVERLAP_PT: f64 = 1.0_f64;
-const ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT: f32 = 4.0_f32;
+const ANCHOR_PAIR_NEAR_SIDE_GAP_PT: f64 = 12.0_f64;
+const ANCHOR_PAIR_BRIDGED_SIDE_GAP_PT: f64 = 24.0_f64;
+const ONE_SIDED_ANCHOR_EDGE_TOLERANCE_PT: f32 = 12.0_f32;
 const ONE_SIDED_LIST_CONTEXT_SIDE_ALIGNMENT_MIN_PT: f64 = 24.0_f64;
-const CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT: f32 = 8.0_f32;
-const CLUSTER_ANCHOR_HINT_MAX_GAP_PT: f32 = 240.0_f32;
 const ROW_CONTEXT_MAX_GROUP_GAP_PT: f64 = 96.0_f64;
 const ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT: f64 = 18.0_f64;
 const ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT: f64 = 4.0_f64;
 const ROW_CONTEXT_WRAP_RESET_X_DELTA_PT: f64 = 16.0_f64;
 const ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT: f64 = 28.0_f64;
+const RUN_RICHNESS_MAX_NEIGHBOR_RUNS: usize = 3;
+const RUN_RICHNESS_MAX_TEXT_CHARS: usize = 96;
+const RUN_RICHNESS_MAX_GAP_PT: f64 = 20.0_f64;
+const RUN_RICHNESS_MAX_Y_DELTA_PT: f64 = 6.0_f64;
 const ANCHOR_CANDIDATE_MODE_ORDER: [&str; 3] = ["two_sided", "left_only", "right_only"];
 type MeasuredWidth = TypographyMeasuredWidth;
 type WidthSource = TypographyWidthSource;
@@ -355,32 +397,6 @@ struct WidthMeasureContext<'a> {
 struct RowCalibration {
     epsilon_pt: f64,
     bias_pt: f64,
-}
-
-struct AnchorHints<'a> {
-    left_text: Option<&'a str>,
-    left_x: Option<f64>,
-    right_text: Option<&'a str>,
-    right_x: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ContextSpanRecord {
-    text: String,
-    bbox: Rect,
-    line_bucket: i32,
-    role_hint: String,
-    #[serde(default)]
-    source: String,
-}
-
-#[derive(Debug, Clone)]
-struct ClusterAnchorHint {
-    text: String,
-    bbox: Rect,
-    line_bucket: i32,
-    role_hint: String,
-    source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -403,10 +419,42 @@ struct SharedClusterTypography {
 struct GuessClusterKey {
     page_index: u32,
     left_anchor_text: String,
-    right_anchor_text: String,
     font_key: String,
     font_size_bits: u32,
     h_scale_bits: u32,
+}
+
+fn resolve_anchors_from_redactions(
+    redactions: &[RedactionOccurrence],
+    dictionary: &[String],
+    font_runs: &FontRunReport,
+    typography_profile: &TypographyProfile,
+    cfg: &GuessConfig,
+    use_curated_name_prior: bool,
+) -> AnchorResolutionBundle {
+    let (guesses, anchors, diagnostics) = build_anchor_validated_guesses(
+        redactions,
+        dictionary,
+        font_runs,
+        typography_profile,
+        cfg,
+        use_curated_name_prior,
+    );
+    AnchorResolutionBundle {
+        guesses,
+        anchors,
+        diagnostics,
+    }
+}
+
+fn rank_candidates_from_anchors(
+    resolution: AnchorResolutionBundle,
+) -> (Vec<RedactionGuess>, Vec<AnchorDecisionRecord>, Vec<String>) {
+    (
+        resolution.guesses,
+        resolution.anchors,
+        resolution.diagnostics,
+    )
 }
 
 fn build_anchor_validated_guesses(
@@ -453,7 +501,6 @@ fn build_anchor_validated_guesses(
     )];
     let mut guesses = Vec::with_capacity(redactions.len());
     let mut anchor_records = Vec::with_capacity(redactions.len());
-    let shared_context_hints = build_shared_context_hints(redactions);
 
     for (index, redaction) in redactions.iter().enumerate() {
         let (left_text, right_text, left_bbox, right_bbox) = extract_context(redaction);
@@ -461,17 +508,7 @@ fn build_anchor_validated_guesses(
             .get(&redaction.page_index)
             .cloned()
             .unwrap_or_default();
-        let cluster_hints = shared_context_hints
-            .get(index)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let anchor = select_anchor_pair(
-            redaction,
-            &page_runs,
-            cluster_hints,
-            &assets,
-            typography_profile,
-        );
+        let anchor = select_anchor_pair(redaction, &page_runs, &assets, typography_profile);
         let anchor_row_id = format!("page{}_row{index}", redaction.page_index);
         let left_anchor_id = format!("{anchor_row_id}_left");
         let right_anchor_id = format!("{anchor_row_id}_right");
@@ -1094,7 +1131,6 @@ fn apply_cluster_consensus(guesses: &mut [RedactionGuess], use_effective_candida
         let key = GuessClusterKey {
             page_index: guess.page_index,
             left_anchor_text: guess.context.left_anchor_text.clone(),
-            right_anchor_text: guess.context.right_anchor_text.clone(),
             font_key,
             font_size_bits: font_size_pt.to_bits(),
             h_scale_bits: h_scale_pct.to_bits(),
@@ -1313,6 +1349,8 @@ fn build_guess_for_anchor(
     let anchor_gap_pt = (anchor.right_x - anchor.left_x).abs().max(1.0_f64);
     let gap_ratio = anchor_gap_pt / redaction_width_pt;
     let has_two_sided_anchor = matches!(anchor.mode, AnchorMode::TwoSided);
+    let list_like_context =
+        is_list_like_context(&anchor.left_anchor_text, &anchor.right_anchor_text);
     let anchor_target_guess_width_pt = if has_two_sided_anchor {
         (anchor.right_x
             - anchor.left_x
@@ -1394,19 +1432,8 @@ fn build_guess_for_anchor(
     let mut scored = Vec::new();
     let anchor_filter_limit_pt =
         (anchor.epsilon_pt.max(1.0_f64) * 4.0_f64).max(FIXED_TOLERANCE_PT.max(4.0_f64));
-    let list_like_context =
-        is_list_like_context(&anchor.left_anchor_text, &anchor.right_anchor_text);
-    let raw_left_context = redaction
-        .underlying_text
-        .first()
-        .map(|hit| hit.text.as_str())
-        .unwrap_or("");
-    let raw_right_context = redaction
-        .underlying_text
-        .get(1)
-        .map(|hit| hit.text.as_str())
-        .unwrap_or("");
-    let raw_list_like_context = is_list_like_context(raw_left_context, raw_right_context);
+    let (raw_left_context, raw_right_context) = expanded_raw_context(redaction);
+    let raw_list_like_context = is_list_like_context(&raw_left_context, &raw_right_context);
     if has_two_sided_anchor {
         let band = candidate_width_index.as_slice();
         for entry in band {
@@ -1454,7 +1481,11 @@ fn build_guess_for_anchor(
             );
             let candidate_word_count = trimmed.split_whitespace().count();
             let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
-                anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
+                anchor_overlap_penalty_pt(
+                    raw_left_context.as_str(),
+                    raw_right_context.as_str(),
+                    trimmed,
+                )
             } else {
                 0.0_f64
             };
@@ -1581,7 +1612,11 @@ fn build_guess_for_anchor(
             );
             let candidate_word_count = trimmed.split_whitespace().count();
             let raw_context_overlap_penalty = if use_curated_name_prior && raw_list_like_context {
-                anchor_overlap_penalty_pt(raw_left_context, raw_right_context, trimmed)
+                anchor_overlap_penalty_pt(
+                    raw_left_context.as_str(),
+                    raw_right_context.as_str(),
+                    trimmed,
+                )
             } else {
                 0.0_f64
             };
@@ -1638,6 +1673,12 @@ fn build_guess_for_anchor(
             .effective_error_pt
             .partial_cmp(&right_candidate.effective_error_pt)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left_candidate
+                    .raw_error_pt
+                    .partial_cmp(&right_candidate.raw_error_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left_candidate.word_count.cmp(&right_candidate.word_count))
             .then_with(|| left_candidate.text.cmp(&right_candidate.text))
     });
@@ -1741,320 +1782,22 @@ fn build_guess_for_anchor(
     (guess, funnel)
 }
 
-fn build_shared_context_hints(redactions: &[RedactionOccurrence]) -> Vec<Vec<ClusterAnchorHint>> {
-    let mut out = vec![Vec::<ClusterAnchorHint>::new(); redactions.len()];
-    let mut by_page = std::collections::BTreeMap::<u32, Vec<usize>>::new();
-    for (index, redaction) in redactions.iter().enumerate() {
-        by_page.entry(redaction.page_index).or_default().push(index);
-    }
-    for page_indices in by_page.values_mut() {
-        page_indices.sort_by(|left_index, right_index| {
-            let left = &redactions[*left_index];
-            let right = &redactions[*right_index];
-            let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
-            let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
-            left_center_y
-                .partial_cmp(&right_center_y)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    left.bbox
-                        .x0
-                        .partial_cmp(&right.bbox.x0)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        let mut visited = std::collections::BTreeSet::<usize>::new();
-        for seed_index in page_indices.iter().copied() {
-            if visited.contains(&seed_index) {
-                continue;
-            }
-            let mut cluster = Vec::<usize>::new();
-            let mut queue = vec![seed_index];
-            visited.insert(seed_index);
-            while let Some(current_index) = queue.pop() {
-                cluster.push(current_index);
-                for other_index in page_indices.iter().copied() {
-                    if visited.contains(&other_index) {
-                        continue;
-                    }
-                    if redaction_rows_are_linked(
-                        &redactions[current_index],
-                        &redactions[other_index],
-                    ) {
-                        visited.insert(other_index);
-                        queue.push(other_index);
-                    }
-                }
-            }
-            let mut merged = Vec::<ClusterAnchorHint>::new();
-            let mut seen = BTreeSet::<String>::new();
-            for redaction_index in cluster.iter().copied() {
-                for span in parse_context_spans_from_meta(&redactions[redaction_index]) {
-                    let key = format!(
-                        "{:.1}:{:.1}:{:.1}:{:.1}:{}",
-                        span.bbox.x0, span.bbox.y0, span.bbox.x1, span.bbox.y1, span.text
-                    );
-                    if seen.insert(key) {
-                        merged.push(ClusterAnchorHint {
-                            text: span.text,
-                            bbox: span.bbox,
-                            line_bucket: span.line_bucket,
-                            role_hint: span.role_hint,
-                            source: span.source,
-                        });
-                    }
-                }
-                for hit in redactions[redaction_index]
-                    .underlying_text
-                    .iter()
-                    .filter(|hit| {
-                        let value = hit.text.trim();
-                        !value.is_empty()
-                    })
-                {
-                    let key = format!(
-                        "{:.1}:{:.1}:{:.1}:{:.1}:{}",
-                        hit.bbox.x0,
-                        hit.bbox.y0,
-                        hit.bbox.x1,
-                        hit.bbox.y1,
-                        hit.text.trim()
-                    );
-                    if seen.insert(key) {
-                        let role_hint = if hit.bbox.x1 <= redactions[redaction_index].bbox.x0 {
-                            "left".to_owned()
-                        } else if hit.bbox.x0 >= redactions[redaction_index].bbox.x1 {
-                            "right".to_owned()
-                        } else {
-                            "center".to_owned()
-                        };
-                        merged.push(ClusterAnchorHint {
-                            text: hit.text.trim().to_owned(),
-                            bbox: hit.bbox,
-                            line_bucket: ((hit.bbox.y0 + hit.bbox.y1) * 0.5_f32 / 2.0_f32).round()
-                                as i32,
-                            role_hint,
-                            source: "legacy_hit".to_owned(),
-                        });
-                    }
-                }
-            }
-            merged.sort_by(|left, right| {
-                let left_center_y = (left.bbox.y0 + left.bbox.y1) * 0.5_f32;
-                let right_center_y = (right.bbox.y0 + right.bbox.y1) * 0.5_f32;
-                left_center_y
-                    .partial_cmp(&right_center_y)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        left.bbox
-                            .x0
-                            .partial_cmp(&right.bbox.x0)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .then_with(|| left.text.cmp(&right.text))
-            });
-            for redaction_index in cluster {
-                out[redaction_index] = merged.clone();
-            }
-        }
-    }
-    out
-}
-
-fn parse_context_spans_from_meta(redaction: &RedactionOccurrence) -> Vec<ContextSpanRecord> {
-    let Some(raw) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Vec<ContextSpanRecord>>(raw).unwrap_or_default()
-}
-
-fn redaction_rows_are_contiguous(left: &RedactionOccurrence, right: &RedactionOccurrence) -> bool {
-    let left_center_y = ((left.bbox.y0 + left.bbox.y1) * 0.5_f32) as f64;
-    let right_center_y = ((right.bbox.y0 + right.bbox.y1) * 0.5_f32) as f64;
-    let y_delta = (right_center_y - left_center_y).abs();
-    if y_delta <= ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT {
-        let x_gap = (right.bbox.x0 as f64 - left.bbox.x1 as f64).max(0.0_f64);
-        return x_gap <= ROW_CONTEXT_MAX_GROUP_GAP_PT;
-    }
-    if right_center_y <= left_center_y || y_delta > ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT {
-        return false;
-    }
-    let wraps_to_new_line =
-        right.bbox.x0 as f64 + ROW_CONTEXT_WRAP_RESET_X_DELTA_PT < left.bbox.x0 as f64;
-    let continues_forward =
-        right.bbox.x0 as f64 <= left.bbox.x1 as f64 + ROW_CONTEXT_WRAP_FORWARD_X_ALLOWANCE_PT;
-    wraps_to_new_line || continues_forward
-}
-
-fn redaction_rows_are_linked(left: &RedactionOccurrence, right: &RedactionOccurrence) -> bool {
-    redaction_rows_are_contiguous(left, right) || redaction_rows_are_contiguous(right, left)
-}
-
-fn select_cluster_hint(
-    redaction: &RedactionOccurrence,
-    cluster_hints: &[ClusterAnchorHint],
-    local_hint_hit: Option<&crate::types::redaction_types::UnderlyingTextHit>,
-    want_left: bool,
-) -> Option<ClusterAnchorHint> {
-    if let Some(local) = local_hint_hit {
-        let text = local.text.trim();
-        if !text.is_empty() {
-            let near_edge = if want_left {
-                let gap = (redaction.bbox.x0 - local.bbox.x1).max(0.0_f32);
-                gap <= CLUSTER_ANCHOR_HINT_MAX_GAP_PT
-                    || local.bbox.x1 <= redaction.bbox.x0 + CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT
-            } else {
-                let gap = (local.bbox.x0 - redaction.bbox.x1).max(0.0_f32);
-                gap <= CLUSTER_ANCHOR_HINT_MAX_GAP_PT
-                    || local.bbox.x0 >= redaction.bbox.x1 - CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT
-            };
-            if near_edge {
-                return Some(ClusterAnchorHint {
-                    text: text.to_owned(),
-                    bbox: local.bbox,
-                    line_bucket: ((local.bbox.y0 + local.bbox.y1) * 0.5_f32 / 2.0_f32).round()
-                        as i32,
-                    role_hint: "local".to_owned(),
-                    source: "local_hint".to_owned(),
-                });
-            }
-        }
-    }
-    let mut candidates = Vec::<(ClusterAnchorHint, f64, bool)>::new();
-    if let Some(local) = local_hint_hit {
-        let text = local.text.trim();
-        if !text.is_empty() {
-            candidates.push((
-                ClusterAnchorHint {
-                    text: text.to_owned(),
-                    bbox: local.bbox,
-                    line_bucket: ((local.bbox.y0 + local.bbox.y1) * 0.5_f32 / 2.0_f32).round()
-                        as i32,
-                    role_hint: "local".to_owned(),
-                    source: "local_hint".to_owned(),
-                },
-                0.0_f64,
-                true,
-            ));
-        }
-    }
-    for hint in cluster_hints {
-        let text = hint.text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        candidates.push((hint.clone(), 0.0_f64, false));
-    }
-    let red_center_y = ((redaction.bbox.y0 + redaction.bbox.y1) * 0.5_f32) as f64;
-    let mut best: Option<(ClusterAnchorHint, f64)> = None;
-    for (hint, _score, is_local) in candidates {
-        let hint_center_y = ((hint.bbox.y0 + hint.bbox.y1) * 0.5_f32) as f64;
-        let y_distance = (hint_center_y - red_center_y).abs();
-        if y_distance > ROW_CONTEXT_WRAP_LINE_MAX_Y_GAP_PT + 6.0_f64 {
-            continue;
-        }
-        let (edge_gap, overlap_penalty) = if want_left {
-            let gap = redaction.bbox.x0 as f64 - hint.bbox.x1 as f64;
-            let overlap_penalty =
-                if hint.bbox.x1 > redaction.bbox.x0 + CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT {
-                    60.0_f64
-                } else {
-                    0.0_f64
-                };
-            (gap, overlap_penalty)
-        } else {
-            let gap = hint.bbox.x0 as f64 - redaction.bbox.x1 as f64;
-            let overlap_penalty =
-                if hint.bbox.x0 < redaction.bbox.x1 - CLUSTER_ANCHOR_HINT_EDGE_TOLERANCE_PT {
-                    60.0_f64
-                } else {
-                    0.0_f64
-                };
-            (gap, overlap_penalty)
-        };
-        if edge_gap > CLUSTER_ANCHOR_HINT_MAX_GAP_PT as f64 {
-            continue;
-        }
-        let role_penalty = match hint.role_hint.as_str() {
-            "left" if want_left => 0.0_f64,
-            "right" if !want_left => 0.0_f64,
-            "center" => 8.0_f64,
-            "local" => 0.0_f64,
-            _ => 20.0_f64,
-        };
-        let source_penalty = match hint.source.as_str() {
-            "line_cluster" => 0.0_f64,
-            "local_hint" => -2.0_f64,
-            "legacy_hit" => 2.0_f64,
-            _ => 4.0_f64,
-        };
-        let local_bonus = if is_local { -12.0_f64 } else { 0.0_f64 };
-        let line_bucket_penalty = (hint.line_bucket.abs() as f64) * 0.001_f64;
-        let score = edge_gap.max(0.0_f64)
-            + (y_distance * 4.0_f64)
-            + overlap_penalty
-            + role_penalty
-            + source_penalty
-            + line_bucket_penalty
-            + local_bonus;
-        match best {
-            None => best = Some((hint, score)),
-            Some((_, best_score)) if score < best_score => best = Some((hint, score)),
-            _ => {}
-        }
-    }
-    best.map(|(hint, _)| hint)
-}
-
 fn select_anchor_pair(
     redaction: &RedactionOccurrence,
     runs: &[&FontTextRun],
-    cluster_hints: &[ClusterAnchorHint],
     assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let red_center_y = rect_center_y(&redaction.bbox);
     let red_center_x = ((redaction.bbox.x0 + redaction.bbox.x1) * 0.5) as f64;
-    let local_left_hint_hit = redaction
-        .underlying_text
-        .first()
-        .filter(|hit| !hit.text.trim().is_empty());
-    let local_right_hint_hit = redaction
-        .underlying_text
-        .get(1)
-        .filter(|hit| !hit.text.trim().is_empty());
-    let left_cluster_hint =
-        select_cluster_hint(redaction, cluster_hints, local_left_hint_hit, true);
-    let right_cluster_hint =
-        select_cluster_hint(redaction, cluster_hints, local_right_hint_hit, false);
-    let left_hint = left_cluster_hint.as_ref().map(|hit| hit.text.trim());
-    let right_hint = right_cluster_hint.as_ref().map(|hit| hit.text.trim());
-    let hints = AnchorHints {
-        left_text: left_hint,
-        left_x: left_cluster_hint.as_ref().map(|hit| hit.bbox.x0 as f64),
-        right_text: right_hint,
-        right_x: right_cluster_hint.as_ref().map(|hit| hit.bbox.x0 as f64),
-    };
     let row_runs = sorted_row_runs_for_anchor(redaction, runs);
     if row_runs.is_empty() {
         return None;
     }
-    if let Some(anchor) =
-        try_same_run_hint_anchor(redaction, &row_runs, &hints, assets, typography_profile)
-    {
-        return Some(anchor);
-    }
 
-    let mut pairs = build_pair_candidates(
-        &row_runs,
-        redaction,
-        left_hint,
-        right_hint,
-        red_center_x,
-        red_center_y,
-    );
+    let mut pairs = build_pair_candidates(&row_runs, redaction, red_center_x, red_center_y);
     if pairs.is_empty() {
-        return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile);
     }
     sort_pair_candidates(&mut pairs);
     let Some(selected_pair) = pairs
@@ -2062,27 +1805,38 @@ fn select_anchor_pair(
         .find(|pair| pair.font_penalty == 0)
         .or_else(|| pairs.first())
     else {
-        return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile);
     };
 
     build_two_sided_anchor_from_pair(
         selected_pair,
         redaction,
         &row_runs,
-        &hints,
         assets,
         typography_profile,
     )
-    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile))
+    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile))
 }
 
 fn sorted_row_runs_for_anchor<'a>(
     redaction: &RedactionOccurrence,
     runs: &[&'a FontTextRun],
 ) -> Vec<&'a FontTextRun> {
-    let mut row_runs = collect_row_runs_for_anchor(redaction, runs, true);
-    if row_runs.is_empty() {
-        row_runs = collect_row_runs_for_anchor(redaction, runs, false);
+    let tight_runs = collect_row_runs_for_anchor(redaction, runs, true);
+    let mut row_runs = if tight_runs.is_empty() {
+        collect_row_runs_for_anchor(redaction, runs, false)
+    } else {
+        tight_runs
+    };
+    if !row_runs.is_empty() {
+        for loose_run in collect_row_runs_for_anchor(redaction, runs, false) {
+            if !row_runs
+                .iter()
+                .any(|existing| std::ptr::eq(*existing, loose_run))
+            {
+                row_runs.push(loose_run);
+            }
+        }
     }
     row_runs.sort_by(|left_run, right_run| {
         left_run
@@ -2102,80 +1856,9 @@ fn sorted_row_runs_for_anchor<'a>(
     row_runs
 }
 
-fn try_same_run_hint_anchor(
-    redaction: &RedactionOccurrence,
-    row_runs: &[&FontTextRun],
-    hints: &AnchorHints<'_>,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
-    typography_profile: &TypographyProfile,
-) -> Option<AnchorPairData> {
-    let (Some(left_hint_text), Some(right_hint_text)) = (hints.left_text, hints.right_text) else {
-        return None;
-    };
-    let same_run = row_runs.iter().copied().find(|run| {
-        let run_text = run.text.trim();
-        text_matches(run_text, left_hint_text) && text_matches(run_text, right_hint_text)
-    })?;
-    let asset = assets.get(&same_run.font_key);
-    let left_resolution = resolve_anchor_text_and_x(
-        redaction.page_index,
-        same_run,
-        Some(left_hint_text),
-        hints.left_x,
-        asset,
-        typography_profile,
-    );
-    let right_resolution = resolve_anchor_text_and_x(
-        redaction.page_index,
-        same_run,
-        Some(right_hint_text),
-        hints.right_x,
-        asset,
-        typography_profile,
-    );
-    let left_x = left_resolution.x;
-    let right_x = right_resolution.x;
-    if right_x <= left_x {
-        return None;
-    }
-    let measure_ctx = WidthMeasureContext {
-        page_index: redaction.page_index,
-        asset,
-        typography_profile,
-        h_scale_pct: same_run.h_scale_pct,
-    };
-    let calibration = estimate_row_epsilon(row_runs, same_run, redaction, &measure_ctx);
-    Some(AnchorPairData {
-        left_anchor_text: left_resolution.text,
-        right_anchor_text: right_resolution.text,
-        left_x,
-        right_x,
-        left_source: left_resolution.source,
-        right_source: right_resolution.source,
-        left_projection_source: left_resolution.projection_source,
-        right_projection_source: right_resolution.projection_source,
-        left_alternate_x: left_resolution.alternate_x,
-        right_alternate_x: right_resolution.alternate_x,
-        left_delta_pt: left_resolution.selected_minus_alternate_delta_pt,
-        right_delta_pt: right_resolution.selected_minus_alternate_delta_pt,
-        font_key: same_run.font_key.clone(),
-        font_name: same_run.font_name.clone(),
-        font_size_pt: same_run.font_size_pt,
-        h_scale_pct: same_run.h_scale_pct,
-        left_bbox: same_run.bbox,
-        right_bbox: same_run.bbox,
-        epsilon_pt: calibration.epsilon_pt,
-        row_bias_pt: calibration.bias_pt,
-        mode: AnchorMode::TwoSided,
-        selection_reason_code: AnchorSelectionReasonCode::SelectedSameRunTwoSided,
-    })
-}
-
 fn build_pair_candidates(
     row_runs: &[&FontTextRun],
     redaction: &RedactionOccurrence,
-    left_hint: Option<&str>,
-    right_hint: Option<&str>,
     red_center_x: f64,
     red_center_y: f32,
 ) -> Vec<PairCandidate> {
@@ -2196,14 +1879,15 @@ fn build_pair_candidates(
             } else {
                 1_u8
             };
-            let left_hint_penalty = match left_hint {
-                Some(hint) => u8::from(!text_matches(left_run.text.trim(), hint)),
-                None => 0_u8,
-            };
-            let right_hint_penalty = match right_hint {
-                Some(hint) => u8::from(!text_matches(right_run.text.trim(), hint)),
-                None => 0_u8,
-            };
+            let left_side_gap = (redaction.bbox.x0 as f64 - left_end).max(0.0_f64);
+            let right_side_gap = (right_start - redaction.bbox.x1 as f64).max(0.0_f64);
+            let bridged_left = left_side_gap > ANCHOR_PAIR_BRIDGED_SIDE_GAP_PT
+                && right_side_gap <= ANCHOR_PAIR_NEAR_SIDE_GAP_PT;
+            let bridged_right = right_side_gap > ANCHOR_PAIR_BRIDGED_SIDE_GAP_PT
+                && left_side_gap <= ANCHOR_PAIR_NEAR_SIDE_GAP_PT;
+            if bridged_left || bridged_right {
+                continue;
+            }
             let left_straddle_penalty =
                 u8::from(left_end > redaction.bbox.x0 as f64 + ANCHOR_PAIR_STRADDLE_TOLERANCE_PT);
             let right_straddle_penalty = u8::from(
@@ -2228,7 +1912,6 @@ fn build_pair_candidates(
                 left_idx,
                 right_idx,
                 font_penalty,
-                hint_penalty: left_hint_penalty + right_hint_penalty,
                 straddle_penalty,
                 overlap_penalty,
                 contains_center_penalty,
@@ -2247,7 +1930,12 @@ fn sort_pair_candidates(pairs: &mut [PairCandidate]) {
         left_pair
             .font_penalty
             .cmp(&right_pair.font_penalty)
-            .then_with(|| left_pair.hint_penalty.cmp(&right_pair.hint_penalty))
+            .then_with(|| {
+                left_pair
+                    .x_distance
+                    .partial_cmp(&right_pair.x_distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left_pair.straddle_penalty.cmp(&right_pair.straddle_penalty))
             .then_with(|| left_pair.overlap_penalty.cmp(&right_pair.overlap_penalty))
             .then_with(|| {
@@ -2269,12 +1957,6 @@ fn sort_pair_candidates(pairs: &mut [PairCandidate]) {
             })
             .then_with(|| {
                 left_pair
-                    .x_distance
-                    .partial_cmp(&right_pair.x_distance)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                left_pair
                     .gap_width
                     .partial_cmp(&right_pair.gap_width)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -2286,7 +1968,6 @@ fn build_two_sided_anchor_from_pair(
     selected_pair: &PairCandidate,
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
-    hints: &AnchorHints<'_>,
     assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
@@ -2298,16 +1979,16 @@ fn build_two_sided_anchor_from_pair(
     let left_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         left_run,
-        hints.left_text,
-        hints.left_x,
+        row_runs,
+        AnchorType::Left,
         asset,
         typography_profile,
     );
     let right_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         right_run,
-        hints.right_text,
-        hints.right_x,
+        row_runs,
+        AnchorType::Right,
         asset,
         typography_profile,
     );
@@ -2362,7 +2043,6 @@ fn build_two_sided_anchor_from_pair(
 fn recover_one_sided_anchor(
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
-    hints: &AnchorHints<'_>,
     assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
@@ -2405,19 +2085,81 @@ fn recover_one_sided_anchor(
                 })
         });
 
+    if let (Some(left_run), Some(right_run)) = (left_only, right_only) {
+        if right_run.bbox.x0 as f64 > left_run.bbox.x1 as f64 {
+            let asset = assets
+                .get(&left_run.font_key)
+                .or_else(|| assets.get(&right_run.font_key));
+            let left_resolution = resolve_anchor_text_and_x(
+                redaction.page_index,
+                left_run,
+                row_runs,
+                AnchorType::Left,
+                asset,
+                typography_profile,
+            );
+            let right_resolution = resolve_anchor_text_and_x(
+                redaction.page_index,
+                right_run,
+                row_runs,
+                AnchorType::Right,
+                asset,
+                typography_profile,
+            );
+            let left_x = left_resolution.x;
+            let right_x = right_resolution.x;
+            if !left_resolution.text.trim().is_empty()
+                && !right_resolution.text.trim().is_empty()
+                && right_x > left_x
+            {
+                let measure_ctx = WidthMeasureContext {
+                    page_index: redaction.page_index,
+                    asset,
+                    typography_profile,
+                    h_scale_pct: left_run.h_scale_pct,
+                };
+                let calibration = estimate_row_epsilon(row_runs, left_run, redaction, &measure_ctx);
+                return Some(AnchorPairData {
+                    left_anchor_text: left_resolution.text,
+                    right_anchor_text: right_resolution.text,
+                    left_x,
+                    right_x,
+                    left_source: left_resolution.source,
+                    right_source: right_resolution.source,
+                    left_projection_source: left_resolution.projection_source,
+                    right_projection_source: right_resolution.projection_source,
+                    left_alternate_x: left_resolution.alternate_x,
+                    right_alternate_x: right_resolution.alternate_x,
+                    left_delta_pt: left_resolution.selected_minus_alternate_delta_pt,
+                    right_delta_pt: right_resolution.selected_minus_alternate_delta_pt,
+                    font_key: left_run.font_key.clone(),
+                    font_name: left_run.font_name.clone(),
+                    font_size_pt: left_run.font_size_pt,
+                    h_scale_pct: left_run.h_scale_pct,
+                    left_bbox: left_run.bbox,
+                    right_bbox: right_run.bbox,
+                    epsilon_pt: calibration.epsilon_pt,
+                    row_bias_pt: calibration.bias_pt,
+                    mode: AnchorMode::TwoSided,
+                    selection_reason_code: AnchorSelectionReasonCode::SelectedPairTwoSided,
+                });
+            }
+        }
+    }
+
     if let Some(left_run) = left_only {
         let asset = assets.get(&left_run.font_key);
         let left_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             left_run,
-            hints.left_text,
-            hints.left_x,
+            row_runs,
+            AnchorType::Left,
             asset,
             typography_profile,
         );
         let left_anchor_text = left_resolution.text.as_str();
         let left_x = left_resolution.x;
-        let right_anchor_text = hints.right_text.unwrap_or_default().to_owned();
+        let right_anchor_text = String::new();
         let right_x = (redaction.bbox.x1 as f64 + 0.5_f64).max(left_x + 1.0_f64);
         if !left_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
@@ -2434,7 +2176,7 @@ fn recover_one_sided_anchor(
                 left_x,
                 right_x,
                 left_source: left_resolution.source,
-                right_source: AnchorSourceLabel::HintOnlyFallback,
+                right_source: AnchorSourceLabel::SyntheticBoundary,
                 left_projection_source: left_resolution.projection_source,
                 right_projection_source: None,
                 left_alternate_x: left_resolution.alternate_x,
@@ -2460,14 +2202,14 @@ fn recover_one_sided_anchor(
         let right_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             right_run,
-            hints.right_text,
-            hints.right_x,
+            row_runs,
+            AnchorType::Right,
             asset,
             typography_profile,
         );
         let right_anchor_text = right_resolution.text.as_str();
         let right_x = right_resolution.x;
-        let left_anchor_text = hints.left_text.unwrap_or_default().to_owned();
+        let left_anchor_text = String::new();
         let left_x = (redaction.bbox.x0 as f64 - 0.5_f64).min(right_x - 1.0_f64);
         if !right_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
@@ -2484,7 +2226,7 @@ fn recover_one_sided_anchor(
                 right_anchor_text: right_resolution.text,
                 left_x,
                 right_x,
-                left_source: AnchorSourceLabel::HintOnlyFallback,
+                left_source: AnchorSourceLabel::SyntheticBoundary,
                 right_source: right_resolution.source,
                 left_projection_source: None,
                 right_projection_source: right_resolution.projection_source,
@@ -2510,109 +2252,146 @@ fn recover_one_sided_anchor(
 }
 
 fn resolve_anchor_text_and_x(
-    page_index: u32,
+    _page_index: u32,
     run: &FontTextRun,
-    hint: Option<&str>,
-    hint_x: Option<f64>,
-    asset: Option<&FontAsset>,
-    typography_profile: &TypographyProfile,
+    row_runs: &[&FontTextRun],
+    side: AnchorType,
+    _asset: Option<&FontAsset>,
+    _typography_profile: &TypographyProfile,
 ) -> AnchorSideResolution {
-    let run_text = run.text.as_str();
-    let run_x = run.bbox.x0 as f64;
-    let Some(hint_text) = hint else {
-        return to_anchor_side_resolution(
-            run_text.to_owned(),
-            run_x,
-            AnchorSourceLabel::RunExact,
-            None,
-            None,
-        );
-    };
-    if run_text.is_empty() {
-        let selected_x = hint_x.unwrap_or(run_x);
-        return to_anchor_side_resolution(
-            hint_text.to_owned(),
-            selected_x,
-            AnchorSourceLabel::HintOnlyFallback,
-            None,
-            Some(run_x),
-        );
-    }
-    if hint_text.is_empty() {
-        return to_anchor_side_resolution(
-            run_text.to_owned(),
-            run_x,
-            AnchorSourceLabel::RunExact,
-            None,
-            None,
-        );
-    }
-    let normalized_run = normalize_transport_text(run_text);
-    let normalized_hint = normalize_transport_text(hint_text);
-    if normalized_run == normalized_hint {
-        return to_anchor_side_resolution(
-            run_text.to_owned(),
-            run_x,
-            AnchorSourceLabel::RunExact,
-            None,
-            hint_x,
-        );
-    }
-    if let Some(prefix_bytes) = run_text.find(hint_text) {
-        let prefix = &run_text[..prefix_bytes];
-        let (offset, projection_source) =
-            if let Some(value) = prefix_width_from_run(run, prefix_bytes) {
-                (value, Some(AnchorProjectionSource::CharAdvances))
-            } else if let Some(value) = measure_text_width_from_sources(
-                &TypographyMeasureInput {
-                    page_index,
-                    font_key: &run.font_key,
-                    font_name: &run.font_name,
-                    font_size_pt: run.font_size_pt,
-                    h_scale_pct: run.h_scale_pct,
-                    text: prefix,
-                    metrics_dpi: DEFAULT_FONT_METRICS_DPI,
-                },
-                asset,
-                typography_profile,
-            )
-            .map(|value| value.pt)
-            {
-                (value, Some(AnchorProjectionSource::MeasuredTypography))
-            } else {
-                let run_chars = run_text.chars().count().max(1) as f64;
-                let prefix_chars = prefix.chars().count() as f64;
-                (
-                    ((run.bbox.x1 - run.bbox.x0).abs() as f64) * (prefix_chars / run_chars),
-                    Some(AnchorProjectionSource::ProportionalBbox),
-                )
-            };
-        let selected_x = run_x + offset;
-        return to_anchor_side_resolution(
-            hint_text.to_owned(),
-            selected_x,
-            AnchorSourceLabel::RunPrefixProjection,
-            projection_source,
-            hint_x,
-        );
-    }
-    if hint_text.contains(run_text) {
-        return to_anchor_side_resolution(
-            run_text.to_owned(),
-            run_x,
-            AnchorSourceLabel::RunExact,
-            None,
-            hint_x,
-        );
-    }
-    let selected_x = hint_x.unwrap_or(run_x);
+    let (selected_text, selected_x) = enrich_anchor_text_from_row_runs(run, row_runs, side);
     to_anchor_side_resolution(
-        hint_text.to_owned(),
+        selected_text,
         selected_x,
-        AnchorSourceLabel::HintOnlyFallback,
+        AnchorSourceLabel::RunExact,
         None,
-        Some(run_x),
+        None,
     )
+}
+
+fn enrich_anchor_text_from_row_runs(
+    run: &FontTextRun,
+    row_runs: &[&FontTextRun],
+    side: AnchorType,
+) -> (String, f64) {
+    let mut text = normalize_transport_text(run.text.as_str());
+    let mut x = run.bbox.x0 as f64;
+    let Some(run_index) = row_runs
+        .iter()
+        .position(|candidate| std::ptr::eq(*candidate, run))
+    else {
+        return (text, x);
+    };
+
+    match side {
+        AnchorType::Left => {
+            let mut cursor = run_index;
+            let mut merged = 0_usize;
+            while cursor > 0 && merged < RUN_RICHNESS_MAX_NEIGHBOR_RUNS {
+                let previous = row_runs[cursor - 1];
+                let current = row_runs[cursor];
+                if !runs_are_richness_neighbors(previous, current) {
+                    break;
+                }
+                let combined = join_adjacent_run_text(
+                    previous.text.as_str(),
+                    text.as_str(),
+                    (current.bbox.x0 as f64 - previous.bbox.x1 as f64).max(0.0_f64),
+                );
+                if combined.chars().count() > RUN_RICHNESS_MAX_TEXT_CHARS {
+                    break;
+                }
+                text = combined;
+                x = previous.bbox.x0 as f64;
+                cursor -= 1;
+                merged += 1;
+            }
+        }
+        AnchorType::Right => {
+            let mut cursor = run_index;
+            let mut merged = 0_usize;
+            while (cursor + 1) < row_runs.len() && merged < RUN_RICHNESS_MAX_NEIGHBOR_RUNS {
+                let current = row_runs[cursor];
+                let next = row_runs[cursor + 1];
+                if !runs_are_richness_neighbors(current, next) {
+                    break;
+                }
+                let combined = join_adjacent_run_text(
+                    text.as_str(),
+                    next.text.as_str(),
+                    (next.bbox.x0 as f64 - current.bbox.x1 as f64).max(0.0_f64),
+                );
+                if combined.chars().count() > RUN_RICHNESS_MAX_TEXT_CHARS {
+                    break;
+                }
+                text = combined;
+                cursor += 1;
+                merged += 1;
+            }
+        }
+    }
+
+    (text, x)
+}
+
+fn runs_are_richness_neighbors(left: &FontTextRun, right: &FontTextRun) -> bool {
+    if left.page_index != right.page_index {
+        return false;
+    }
+    if left.font_key != right.font_key {
+        return false;
+    }
+    if (left.font_size_pt - right.font_size_pt).abs() > 0.5_f32 {
+        return false;
+    }
+    if (left.h_scale_pct - right.h_scale_pct).abs() > 2.0_f32 {
+        return false;
+    }
+    if (run_center_y(left) - run_center_y(right)).abs() > RUN_RICHNESS_MAX_Y_DELTA_PT as f32 {
+        return false;
+    }
+    let gap = right.bbox.x0 as f64 - left.bbox.x1 as f64;
+    (-0.5_f64..=RUN_RICHNESS_MAX_GAP_PT).contains(&gap)
+}
+
+fn join_adjacent_run_text(left_text: &str, right_text: &str, gap_pt: f64) -> String {
+    let left = normalize_transport_text(left_text);
+    let right = normalize_transport_text(right_text);
+    if left.is_empty() {
+        return right;
+    }
+    if right.is_empty() {
+        return left;
+    }
+    if should_insert_join_space(&left, &right, gap_pt) {
+        format!("{left} {right}")
+    } else {
+        format!("{left}{right}")
+    }
+}
+
+fn should_insert_join_space(left: &str, right: &str, gap_pt: f64) -> bool {
+    let Some(left_last) = left.chars().last() else {
+        return false;
+    };
+    let Some(right_first) = right.chars().next() else {
+        return false;
+    };
+    if left_last.is_whitespace() || right_first.is_whitespace() {
+        return false;
+    }
+    if matches!(
+        right_first,
+        ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+    ) {
+        return false;
+    }
+    if matches!(left_last, '(' | '[' | '{' | '/') {
+        return false;
+    }
+    let left_wordish = left_last.is_alphanumeric() || left_last == ',';
+    let right_wordish = right_first.is_alphanumeric() || right_first == '(';
+    left_wordish && right_wordish && gap_pt >= 0.25_f64
 }
 
 fn to_anchor_side_resolution(
@@ -2634,29 +2413,6 @@ fn to_anchor_side_resolution(
         alternate_x,
         selected_minus_alternate_delta_pt: delta,
     }
-}
-
-fn prefix_width_from_run(run: &FontTextRun, prefix_bytes: usize) -> Option<f64> {
-    if run.char_advances_pt.is_empty() {
-        return None;
-    }
-    if prefix_bytes == 0 {
-        return Some(0.0_f64);
-    }
-    let prefix_char_count = run.text.get(..prefix_bytes)?.chars().count();
-    if prefix_char_count == 0 {
-        return Some(0.0_f64);
-    }
-    if prefix_char_count > run.char_advances_pt.len() {
-        return None;
-    }
-    let width_pt = run
-        .char_advances_pt
-        .iter()
-        .take(prefix_char_count)
-        .map(|value| *value as f64)
-        .sum::<f64>();
-    (width_pt.is_finite() && width_pt >= 0.0_f64).then_some(width_pt)
 }
 
 fn estimate_row_epsilon(
@@ -2822,6 +2578,61 @@ fn extract_context(
     (left_text, right_text, left_bbox, right_bbox)
 }
 
+fn expanded_raw_context(redaction: &RedactionOccurrence) -> (String, String) {
+    let mut left = redaction
+        .underlying_text
+        .first()
+        .map(|hit| normalize_transport_text(hit.text.as_str()))
+        .unwrap_or_default();
+    let mut right = redaction
+        .underlying_text
+        .get(1)
+        .map(|hit| normalize_transport_text(hit.text.as_str()))
+        .unwrap_or_default();
+    let Some(raw_spans) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
+        return (left, right);
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_spans) else {
+        return (left, right);
+    };
+    let Some(spans) = parsed.as_array() else {
+        return (left, right);
+    };
+    for span in spans.iter().take(24) {
+        let Some(text) = span
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let role = span
+            .get("role_hint")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if role == "left" {
+            append_context_token(&mut left, text);
+        } else if role == "right" {
+            append_context_token(&mut right, text);
+        }
+    }
+    (left, right)
+}
+
+fn append_context_token(target: &mut String, text: &str) {
+    if target
+        .split_whitespace()
+        .any(|existing| existing.eq_ignore_ascii_case(text))
+    {
+        return;
+    }
+    if !target.is_empty() {
+        target.push(' ');
+    }
+    target.push_str(text);
+}
+
 fn compute_gap_pt(
     red_bbox: Rect,
     left_bbox: Option<Rect>,
@@ -2966,15 +2777,6 @@ fn collect_row_runs_for_anchor<'a>(
         .collect::<Vec<_>>()
 }
 
-fn text_matches(run_text: &str, target: &str) -> bool {
-    let normalized_run = normalize_transport_text(run_text);
-    let normalized_target = normalize_transport_text(target);
-    if normalized_run == normalized_target {
-        return true;
-    }
-    normalized_run.contains(&normalized_target) || normalized_target.contains(&normalized_run)
-}
-
 fn normalize_transport_text(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -2990,7 +2792,7 @@ fn anchor_side_confidence(
             Some(AnchorProjectionSource::MeasuredTypography) => 0.82_f32,
             Some(AnchorProjectionSource::ProportionalBbox) | None => 0.72_f32,
         },
-        AnchorSourceLabel::HintOnlyFallback => 0.55_f32,
+        AnchorSourceLabel::SyntheticBoundary => 0.45_f32,
     }
 }
 
@@ -3105,9 +2907,9 @@ fn curated_name_prior_set() -> &'static BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_anchor_text_and_x;
+    use super::{anchor_side_confidence, resolve_anchor_text_and_x};
     use crate::types::file_types::{FontTextRun, Rect};
-    use crate::types::guess_types::AnchorSourceLabel;
+    use crate::types::guess_types::{AnchorProjectionSource, AnchorSourceLabel, AnchorType};
     use crate::types::typography_types::TypographyProfile;
 
     fn make_run(text: &str, x0: f32, x1: f32) -> FontTextRun {
@@ -3128,56 +2930,73 @@ mod tests {
     }
 
     #[test]
-    fn resolve_anchor_prefers_full_hint_when_run_text_is_substring() {
-        let run = make_run("Maxwell,", 180.0_f32, 236.0_f32);
+    fn resolve_anchor_enriches_left_with_previous_run() {
+        let runs = [
+            make_run("Ghislaine", 130.0_f32, 178.0_f32),
+            make_run("Maxwell,", 180.0_f32, 236.0_f32),
+        ];
+        let row_runs = runs.iter().collect::<Vec<_>>();
         let profile = TypographyProfile::default();
-        let resolution = resolve_anchor_text_and_x(
-            0,
-            &run,
-            Some("Ghislaine Maxwell,"),
-            Some(130.0_f64),
-            None,
-            &profile,
-        );
-        assert_eq!(resolution.text, "Maxwell,");
-        assert_eq!(resolution.x, 180.0_f64);
+        let resolution =
+            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, None, &profile);
+        assert_eq!(resolution.text, "Ghislaine Maxwell,");
+        assert_eq!(resolution.x, 130.0_f64);
         assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
         assert_eq!(resolution.projection_source, None);
     }
 
     #[test]
-    fn resolve_anchor_keeps_run_text_when_superset_prefix_is_too_short() {
-        let run = make_run("Brunel,", 180.0_f32, 236.0_f32);
+    fn resolve_anchor_enriches_right_with_next_run() {
+        let runs = [
+            make_run("(JE/GM", 234.0_f32, 274.0_f32),
+            make_run("chief", 276.0_f32, 305.0_f32),
+        ];
+        let row_runs = runs.iter().collect::<Vec<_>>();
         let profile = TypographyProfile::default();
-        let resolution = resolve_anchor_text_and_x(
-            0,
-            &run,
-            Some("Luc Brunel,"),
-            Some(130.0_f64),
-            None,
-            &profile,
-        );
+        let resolution =
+            resolve_anchor_text_and_x(0, &runs[0], &row_runs, AnchorType::Right, None, &profile);
+        assert_eq!(resolution.text, "(JE/GM chief");
+        assert_eq!(resolution.x, 234.0_f64);
+        assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
+        assert_eq!(resolution.projection_source, None);
+    }
+
+    #[test]
+    fn resolve_anchor_does_not_join_across_large_gap() {
+        let runs = [
+            make_run("Luc", 90.0_f32, 106.0_f32),
+            make_run("Brunel,", 130.0_f32, 176.0_f32),
+        ];
+        let row_runs = runs.iter().collect::<Vec<_>>();
+        let profile = TypographyProfile::default();
+        let resolution =
+            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, None, &profile);
         assert_eq!(resolution.text, "Brunel,");
-        assert_eq!(resolution.x, 180.0_f64);
+        assert_eq!(resolution.x, 130.0_f64);
         assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
         assert_eq!(resolution.projection_source, None);
     }
 
     #[test]
-    fn resolve_anchor_keeps_run_text_when_hint_does_not_end_with_comma() {
-        let run = make_run("including", 90.0_f32, 150.0_f32);
-        let profile = TypographyProfile::default();
-        let resolution = resolve_anchor_text_and_x(
-            0,
-            &run,
-            Some("EPSTEIN, including"),
-            Some(40.0_f64),
-            None,
-            &profile,
+    fn anchor_side_confidence_follows_source_priority() {
+        let run_exact = anchor_side_confidence(AnchorSourceLabel::RunExact, None);
+        let run_prefix_char = anchor_side_confidence(
+            AnchorSourceLabel::RunPrefixProjection,
+            Some(AnchorProjectionSource::CharAdvances),
         );
-        assert_eq!(resolution.text, "including");
-        assert_eq!(resolution.x, 90.0_f64);
-        assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
-        assert_eq!(resolution.projection_source, None);
+        let run_prefix_measured = anchor_side_confidence(
+            AnchorSourceLabel::RunPrefixProjection,
+            Some(AnchorProjectionSource::MeasuredTypography),
+        );
+        let run_prefix_proportional = anchor_side_confidence(
+            AnchorSourceLabel::RunPrefixProjection,
+            Some(AnchorProjectionSource::ProportionalBbox),
+        );
+        let synthetic = anchor_side_confidence(AnchorSourceLabel::SyntheticBoundary, None);
+
+        assert!((run_exact - 1.0_f32).abs() <= f32::EPSILON);
+        assert!(run_prefix_char > run_prefix_measured);
+        assert!(run_prefix_measured > run_prefix_proportional);
+        assert!(run_prefix_proportional > synthetic);
     }
 }

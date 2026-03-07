@@ -2,7 +2,7 @@ use crate::types::redaction_types::{
     PdfRenderer, Rect, RedactionFinderConfig, RedactionKind, RedactionOccurrence,
 };
 use lopdf::{Document, Object, ObjectId};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::dependency::pdf_redaction::{
     normalized_rect_from_pixels, object_to_rect, rect_is_near_full_page_with_size,
@@ -44,6 +44,84 @@ struct DarkRunProfile {
     max_gap_px: u32,
     split_confidence: f32,
     dark_ratio: f32,
+}
+
+const COMPONENT_MASK_MIN_LUMINANCE: u8 = 40;
+const COMPONENT_MASK_MAX_LUMINANCE: u8 = 150;
+const COMPONENT_MASK_MARGIN_LUMINANCE: f32 = 20.0;
+const COMPONENT_ALPHA_MIN: u8 = 16;
+const COMPONENT_BLACK_CHANNEL_MAX: u8 = 72;
+const COMPONENT_DARK_CHANNEL_MAX: u8 = 116;
+const COMPONENT_MIN_FILL_RATIO_IN_BBOX: f32 = 0.46;
+const COMPONENT_MIN_BLACK_RATIO: f32 = 0.72;
+const COMPONENT_MIN_DARK_RATIO: f32 = 0.90;
+const COMPONENT_MAX_CHANNEL_SPREAD_MEAN: f32 = 12.0;
+const COMPONENT_MAX_CHANNEL_SPREAD_P95: f32 = 32.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RasterSelectionDecision {
+    Selected,
+    Rejected,
+}
+
+impl RasterSelectionDecision {
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RasterSelectionReasonCode {
+    SelectedBlackComponent,
+    RejectedNoDarkComponent,
+    RejectedLowFillRatio,
+    RejectedLowBlackRatio,
+    RejectedLowDarkRatio,
+    RejectedHighChannelSpread,
+}
+
+impl RasterSelectionReasonCode {
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelectedBlackComponent => "selected_black_component",
+            Self::RejectedNoDarkComponent => "rejected_no_dark_component",
+            Self::RejectedLowFillRatio => "rejected_low_fill_ratio",
+            Self::RejectedLowBlackRatio => "rejected_low_black_ratio",
+            Self::RejectedLowDarkRatio => "rejected_low_dark_ratio",
+            Self::RejectedHighChannelSpread => "rejected_high_channel_spread",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RasterComponentProfile {
+    component_pixel_count: u32,
+    bbox_pixel_count: u32,
+    component_fill_ratio_in_bbox: f32,
+    component_black_ratio: f32,
+    component_dark_ratio: f32,
+    component_channel_spread_mean: f32,
+    component_channel_spread_p95: f32,
+    decision: RasterSelectionDecision,
+    reason_code: RasterSelectionReasonCode,
+}
+
+impl RasterComponentProfile {
+    #[inline]
+    fn is_selected(&self) -> bool {
+        self.decision == RasterSelectionDecision::Selected
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SplitMetaPosition {
+    index: usize,
+    count: usize,
 }
 
 #[expect(
@@ -480,6 +558,319 @@ fn split_dark_region_by_profile(region: &DarkRegion, profile: &DarkRunProfile) -
     split
 }
 
+#[derive(Debug, Clone)]
+struct ConnectedComponentMeasurement {
+    pixel_count: u32,
+    black_pixel_count: u32,
+    dark_pixel_count: u32,
+    channel_spread_sum: u64,
+    channel_spread_histogram: [u32; 256],
+}
+
+fn profile_raster_component(
+    rgba: &[u8],
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    region: &DarkRegion,
+) -> RasterComponentProfile {
+    if width == 0 || height == 0 {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count: 0,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    }
+    let total_pixels = width.saturating_mul(height);
+    if gray.len() < total_pixels || rgba.len() < total_pixels.saturating_mul(4) {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count: 0,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    }
+
+    let x0 = region.x0_px.min(width as u32) as usize;
+    let y0 = region.y0_px.min(height as u32) as usize;
+    let x1 = region.x1_px.min(width as u32) as usize;
+    let y1 = region.y1_px.min(height as u32) as usize;
+    if x1 <= x0 || y1 <= y0 {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count: 0,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    }
+
+    let region_w = x1 - x0;
+    let region_h = y1 - y0;
+    let bbox_pixel_count = region_w.saturating_mul(region_h) as u32;
+    let mask_luminance_max = (region.avg_luminance + COMPONENT_MASK_MARGIN_LUMINANCE).clamp(
+        COMPONENT_MASK_MIN_LUMINANCE as f32,
+        COMPONENT_MASK_MAX_LUMINANCE as f32,
+    ) as u8;
+
+    let area = region_w.saturating_mul(region_h);
+    let mut dark_mask = vec![false; area];
+    let mut has_mask_pixel = false;
+    for local_y in 0..region_h {
+        let global_y = y0 + local_y;
+        let row_offset = global_y.saturating_mul(width);
+        for local_x in 0..region_w {
+            let global_x = x0 + local_x;
+            let pixel_index = row_offset + global_x;
+            let rgba_offset = pixel_index.saturating_mul(4);
+            let alpha = rgba[rgba_offset + 3];
+            if alpha < COMPONENT_ALPHA_MIN {
+                continue;
+            }
+            let is_dark = gray[pixel_index] <= mask_luminance_max;
+            if !is_dark {
+                continue;
+            }
+            dark_mask[local_y * region_w + local_x] = true;
+            has_mask_pixel = true;
+        }
+    }
+
+    if !has_mask_pixel {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    }
+
+    let mut visited = vec![false; area];
+    let mut queue = VecDeque::<(usize, usize)>::new();
+    let mut largest_component: Option<ConnectedComponentMeasurement> = None;
+
+    for start_y in 0..region_h {
+        for start_x in 0..region_w {
+            let start_index = start_y * region_w + start_x;
+            if !dark_mask[start_index] || visited[start_index] {
+                continue;
+            }
+            visited[start_index] = true;
+            queue.clear();
+            queue.push_back((start_x, start_y));
+
+            let mut measurement = ConnectedComponentMeasurement {
+                pixel_count: 0,
+                black_pixel_count: 0,
+                dark_pixel_count: 0,
+                channel_spread_sum: 0,
+                channel_spread_histogram: [0_u32; 256],
+            };
+
+            while let Some((local_x, local_y)) = queue.pop_front() {
+                let global_x = x0 + local_x;
+                let global_y = y0 + local_y;
+                let pixel_index = global_y * width + global_x;
+                let rgba_offset = pixel_index * 4;
+
+                let red = rgba[rgba_offset];
+                let green = rgba[rgba_offset + 1];
+                let blue = rgba[rgba_offset + 2];
+
+                measurement.pixel_count += 1;
+
+                if red <= COMPONENT_BLACK_CHANNEL_MAX
+                    && green <= COMPONENT_BLACK_CHANNEL_MAX
+                    && blue <= COMPONENT_BLACK_CHANNEL_MAX
+                {
+                    measurement.black_pixel_count += 1;
+                }
+
+                if red <= COMPONENT_DARK_CHANNEL_MAX
+                    && green <= COMPONENT_DARK_CHANNEL_MAX
+                    && blue <= COMPONENT_DARK_CHANNEL_MAX
+                {
+                    measurement.dark_pixel_count += 1;
+                }
+
+                let channel_max = red.max(green).max(blue);
+                let channel_min = red.min(green).min(blue);
+                let spread = channel_max.saturating_sub(channel_min);
+                measurement.channel_spread_sum += spread as u64;
+                measurement.channel_spread_histogram[spread as usize] += 1;
+
+                if local_y > 0 {
+                    let up_y = local_y - 1;
+                    let up_index = up_y * region_w + local_x;
+                    if dark_mask[up_index] && !visited[up_index] {
+                        visited[up_index] = true;
+                        queue.push_back((local_x, up_y));
+                    }
+                }
+                if local_y + 1 < region_h {
+                    let down_y = local_y + 1;
+                    let down_index = down_y * region_w + local_x;
+                    if dark_mask[down_index] && !visited[down_index] {
+                        visited[down_index] = true;
+                        queue.push_back((local_x, down_y));
+                    }
+                }
+                if local_x > 0 {
+                    let left_x = local_x - 1;
+                    let left_index = local_y * region_w + left_x;
+                    if dark_mask[left_index] && !visited[left_index] {
+                        visited[left_index] = true;
+                        queue.push_back((left_x, local_y));
+                    }
+                }
+                if local_x + 1 < region_w {
+                    let right_x = local_x + 1;
+                    let right_index = local_y * region_w + right_x;
+                    if dark_mask[right_index] && !visited[right_index] {
+                        visited[right_index] = true;
+                        queue.push_back((right_x, local_y));
+                    }
+                }
+            }
+
+            let is_larger = match &largest_component {
+                Some(existing) => measurement.pixel_count > existing.pixel_count,
+                None => true,
+            };
+            if is_larger {
+                largest_component = Some(measurement);
+            }
+        }
+    }
+
+    let Some(component) = largest_component else {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    };
+    if component.pixel_count == 0 {
+        return RasterComponentProfile {
+            component_pixel_count: 0,
+            bbox_pixel_count,
+            component_fill_ratio_in_bbox: 0.0,
+            component_black_ratio: 0.0,
+            component_dark_ratio: 0.0,
+            component_channel_spread_mean: 0.0,
+            component_channel_spread_p95: 0.0,
+            decision: RasterSelectionDecision::Rejected,
+            reason_code: RasterSelectionReasonCode::RejectedNoDarkComponent,
+        };
+    }
+
+    let component_fill_ratio_in_bbox =
+        (component.pixel_count as f32 / bbox_pixel_count.max(1) as f32).clamp(0.0, 1.0);
+    let component_black_ratio =
+        (component.black_pixel_count as f32 / component.pixel_count as f32).clamp(0.0, 1.0);
+    let component_dark_ratio =
+        (component.dark_pixel_count as f32 / component.pixel_count as f32).clamp(0.0, 1.0);
+    let component_channel_spread_mean =
+        (component.channel_spread_sum as f32 / component.pixel_count as f32).clamp(0.0, 255.0);
+    let component_channel_spread_p95 = histogram_percentile_u8(
+        &component.channel_spread_histogram,
+        component.pixel_count,
+        95,
+        100,
+    ) as f32;
+
+    let reason_code = if component_fill_ratio_in_bbox < COMPONENT_MIN_FILL_RATIO_IN_BBOX {
+        RasterSelectionReasonCode::RejectedLowFillRatio
+    } else if component_black_ratio < COMPONENT_MIN_BLACK_RATIO {
+        RasterSelectionReasonCode::RejectedLowBlackRatio
+    } else if component_dark_ratio < COMPONENT_MIN_DARK_RATIO {
+        RasterSelectionReasonCode::RejectedLowDarkRatio
+    } else if component_channel_spread_mean > COMPONENT_MAX_CHANNEL_SPREAD_MEAN
+        || component_channel_spread_p95 > COMPONENT_MAX_CHANNEL_SPREAD_P95
+    {
+        RasterSelectionReasonCode::RejectedHighChannelSpread
+    } else {
+        RasterSelectionReasonCode::SelectedBlackComponent
+    };
+    let decision = if reason_code == RasterSelectionReasonCode::SelectedBlackComponent {
+        RasterSelectionDecision::Selected
+    } else {
+        RasterSelectionDecision::Rejected
+    };
+
+    RasterComponentProfile {
+        component_pixel_count: component.pixel_count,
+        bbox_pixel_count,
+        component_fill_ratio_in_bbox,
+        component_black_ratio,
+        component_dark_ratio,
+        component_channel_spread_mean,
+        component_channel_spread_p95,
+        decision,
+        reason_code,
+    }
+}
+
+fn histogram_percentile_u8(
+    histogram: &[u32; 256],
+    total_samples: u32,
+    numerator: u32,
+    denominator: u32,
+) -> u8 {
+    if total_samples == 0 || denominator == 0 {
+        return 0;
+    }
+    let target =
+        ((total_samples as u64 * numerator as u64).div_ceil(denominator as u64)).max(1) as u32;
+    let mut cumulative = 0_u32;
+    for (index, count) in histogram.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= target {
+            return index as u8;
+        }
+    }
+    255
+}
+
+fn format_rejection_breakdown(
+    rejected_reason_counts: &BTreeMap<RasterSelectionReasonCode, usize>,
+) -> String {
+    if rejected_reason_counts.is_empty() {
+        return "none".to_owned();
+    }
+    rejected_reason_counts
+        .iter()
+        .map(|(reason, count)| format!("{}={count}", reason.as_str()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub fn page_render_box_from_page(doc: &Document, page_id: ObjectId) -> Option<Rect> {
     inherited_page_rect(doc, page_id, b"CropBox")
         .or_else(|| inherited_page_rect(doc, page_id, b"MediaBox"))
@@ -526,6 +917,7 @@ struct RasterRenderCapture {
     effective_dpi: f32,
     width_px: u32,
     height_px: u32,
+    rgba: Vec<u8>,
     gray: Vec<u8>,
 }
 
@@ -546,6 +938,7 @@ fn capture_raster_render(
         effective_dpi,
         width_px: rendered.width_px,
         height_px: rendered.height_px,
+        rgba: rendered.pixels,
         gray,
     }))
 }
@@ -572,6 +965,8 @@ pub fn extract_raster_page_redactions(
     let regions = image_detections_to_dark_regions(&detection, capture.width_px, capture.height_px);
 
     let mut out = Vec::new();
+    let mut pre_filter_candidate_count = 0_usize;
+    let mut rejected_reason_counts = BTreeMap::<RasterSelectionReasonCode, usize>::new();
     for det in regions.regions {
         let profile = dark_run_profile_for_region(
             &capture.gray,
@@ -605,7 +1000,16 @@ pub fn extract_raster_page_redactions(
                 continue;
             }
 
+            pre_filter_candidate_count += 1;
+
             let split_profile = dark_run_profile_for_region(
+                &capture.gray,
+                capture.width_px as usize,
+                capture.height_px as usize,
+                &split_region,
+            );
+            let component_profile = profile_raster_component(
+                &capture.rgba,
                 &capture.gray,
                 capture.width_px as usize,
                 capture.height_px as usize,
@@ -618,9 +1022,19 @@ pub fn extract_raster_page_redactions(
                 &capture,
                 &split_region,
                 &split_profile,
-                split_index,
-                split_count,
+                &component_profile,
+                SplitMetaPosition {
+                    index: split_index,
+                    count: split_count,
+                },
             );
+
+            if !component_profile.is_selected() {
+                *rejected_reason_counts
+                    .entry(component_profile.reason_code)
+                    .or_insert(0) += 1;
+                continue;
+            }
 
             out.push(RedactionOccurrence {
                 page_index,
@@ -633,6 +1047,13 @@ pub fn extract_raster_page_redactions(
         }
     }
 
+    if pre_filter_candidate_count > 0 && out.is_empty() {
+        let rejected_breakdown = format_rejection_breakdown(&rejected_reason_counts);
+        return Err(format!(
+            "raster_black_filter_rejected_all_candidates page_index={page_index} pre_filter_candidate_count={pre_filter_candidate_count} rejected_breakdown={rejected_breakdown}"
+        ));
+    }
+
     Ok(out)
 }
 
@@ -642,8 +1063,8 @@ fn build_raster_redaction_meta(
     capture: &RasterRenderCapture,
     split_region: &DarkRegion,
     split_profile: &DarkRunProfile,
-    split_index: usize,
-    split_count: usize,
+    component_profile: &RasterComponentProfile,
+    split_position: SplitMetaPosition,
 ) -> std::collections::BTreeMap<String, String> {
     let mut meta = detail.new_meta();
     detail.insert_owned(
@@ -689,6 +1110,42 @@ fn build_raster_redaction_meta(
         "profile_dark_ratio".to_owned(),
         format!("{:.3}", split_profile.dark_ratio),
     );
+    meta.insert(
+        "component_pixel_count".to_owned(),
+        component_profile.component_pixel_count.to_string(),
+    );
+    meta.insert(
+        "component_bbox_pixel_count".to_owned(),
+        component_profile.bbox_pixel_count.to_string(),
+    );
+    meta.insert(
+        "component_fill_ratio_in_bbox".to_owned(),
+        format!("{:.4}", component_profile.component_fill_ratio_in_bbox),
+    );
+    meta.insert(
+        "component_black_ratio".to_owned(),
+        format!("{:.4}", component_profile.component_black_ratio),
+    );
+    meta.insert(
+        "component_dark_ratio".to_owned(),
+        format!("{:.4}", component_profile.component_dark_ratio),
+    );
+    meta.insert(
+        "component_channel_spread_mean".to_owned(),
+        format!("{:.3}", component_profile.component_channel_spread_mean),
+    );
+    meta.insert(
+        "component_channel_spread_p95".to_owned(),
+        format!("{:.3}", component_profile.component_channel_spread_p95),
+    );
+    meta.insert(
+        "black_filter_decision".to_owned(),
+        component_profile.decision.as_str().to_owned(),
+    );
+    meta.insert(
+        "black_filter_reason_code".to_owned(),
+        component_profile.reason_code.as_str().to_owned(),
+    );
     let run_labels = split_profile
         .dark_runs
         .iter()
@@ -696,9 +1153,15 @@ fn build_raster_redaction_meta(
         .collect::<Vec<_>>()
         .join(",");
     meta.insert("profile_dark_runs".to_owned(), run_labels);
-    if split_count > 1 {
-        meta.insert("profile_split_index".to_owned(), split_index.to_string());
-        meta.insert("profile_split_count".to_owned(), split_count.to_string());
+    if split_position.count > 1 {
+        meta.insert(
+            "profile_split_index".to_owned(),
+            split_position.index.to_string(),
+        );
+        meta.insert(
+            "profile_split_count".to_owned(),
+            split_position.count.to_string(),
+        );
     }
     meta
 }
@@ -724,4 +1187,116 @@ fn rgba_to_grayscale(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
         gray.push(y.clamp(0.0, 255.0) as u8);
     }
     gray
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_rgba_canvas(width: usize, height: usize, color: (u8, u8, u8, u8)) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for _ in 0..(width * height) {
+            rgba.push(color.0);
+            rgba.push(color.1);
+            rgba.push(color.2);
+            rgba.push(color.3);
+        }
+        rgba
+    }
+
+    fn paint_rect(
+        rgba: &mut [u8],
+        width: usize,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        color: (u8, u8, u8, u8),
+    ) {
+        for y in y0..y1 {
+            let row_offset = y * width;
+            for x in x0..x1 {
+                let idx = (row_offset + x) * 4;
+                rgba[idx] = color.0;
+                rgba[idx + 1] = color.1;
+                rgba[idx + 2] = color.2;
+                rgba[idx + 3] = color.3;
+            }
+        }
+    }
+
+    #[test]
+    fn component_profile_selects_dense_black_component() {
+        let width = 16_usize;
+        let height = 8_usize;
+        let mut rgba = make_rgba_canvas(width, height, (255, 255, 255, 255));
+        paint_rect(&mut rgba, width, 4, 2, 12, 6, (0, 0, 0, 255));
+        let gray = rgba_to_grayscale(&rgba, width as u32, height as u32);
+        let region = DarkRegion {
+            x0_px: 3,
+            y0_px: 1,
+            x1_px: 13,
+            y1_px: 7,
+            avg_luminance: 70.0,
+            area_fraction: 0.1,
+            score: 0.8,
+        };
+
+        let profile = profile_raster_component(&rgba, &gray, width, height, &region);
+        assert!(profile.is_selected());
+        assert_eq!(
+            profile.reason_code,
+            RasterSelectionReasonCode::SelectedBlackComponent
+        );
+    }
+
+    #[test]
+    fn component_profile_rejects_sparse_component_by_fill_ratio() {
+        let width = 20_usize;
+        let height = 10_usize;
+        let mut rgba = make_rgba_canvas(width, height, (255, 255, 255, 255));
+        paint_rect(&mut rgba, width, 6, 2, 7, 9, (0, 0, 0, 255));
+        let gray = rgba_to_grayscale(&rgba, width as u32, height as u32);
+        let region = DarkRegion {
+            x0_px: 4,
+            y0_px: 1,
+            x1_px: 12,
+            y1_px: 9,
+            avg_luminance: 90.0,
+            area_fraction: 0.05,
+            score: 0.4,
+        };
+
+        let profile = profile_raster_component(&rgba, &gray, width, height, &region);
+        assert!(!profile.is_selected());
+        assert_eq!(
+            profile.reason_code,
+            RasterSelectionReasonCode::RejectedLowFillRatio
+        );
+    }
+
+    #[test]
+    fn component_profile_rejects_high_spread_component() {
+        let width = 18_usize;
+        let height = 10_usize;
+        let mut rgba = make_rgba_canvas(width, height, (255, 255, 255, 255));
+        paint_rect(&mut rgba, width, 4, 2, 14, 8, (70, 20, 20, 255));
+        let gray = rgba_to_grayscale(&rgba, width as u32, height as u32);
+        let region = DarkRegion {
+            x0_px: 3,
+            y0_px: 1,
+            x1_px: 15,
+            y1_px: 9,
+            avg_luminance: 60.0,
+            area_fraction: 0.2,
+            score: 0.7,
+        };
+
+        let profile = profile_raster_component(&rgba, &gray, width, height, &region);
+        assert!(!profile.is_selected());
+        assert_eq!(
+            profile.reason_code,
+            RasterSelectionReasonCode::RejectedHighChannelSpread
+        );
+    }
 }

@@ -88,3 +88,18 @@ required-features = ["cli-entry"]
 name = "evidence_first_change_gate"
 path = "src/bin/evidence_first_change_gate.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "redaction_accuracy_benchmark"
+path = "src/bin/redaction_accuracy_benchmark.rs"
+required-features = ["cli-entry"]
+
+[[bin]]
+name = "anchor_accuracy_benchmark"
+path = "src/bin/anchor_accuracy_benchmark.rs"
+required-features = ["cli-entry"]
+
+[[bin]]
+name = "combined_accuracy_benchmark"
+path = "src/bin/combined_accuracy_benchmark.rs"
+required-features = ["cli-entry"]
