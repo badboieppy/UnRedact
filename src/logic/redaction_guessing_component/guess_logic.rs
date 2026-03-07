@@ -11,7 +11,7 @@ use crate::data::typography_width_data::{
     build_typography_profile_from_pdf_bytes, fallback_typography_width,
     measure_text_width_from_profile,
 };
-use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
+use crate::types::file_types::{FontRunReport, FontTextRun, Rect as FontRect};
 #[cfg(feature = "cli-entry")]
 use crate::types::guess_types::AnchorReport;
 use crate::types::guess_types::{
@@ -225,7 +225,6 @@ fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
             .as_deref()
             .or(guess.context.anchor_width_source.as_deref())
         {
-            Some("asset") => 1.0_f64,
             Some("pdf_width_table") => 0.93_f64,
             Some("core_font") => 0.82_f64,
             Some("fallback") => 0.64_f64,
@@ -389,7 +388,6 @@ type WidthSource = TypographyWidthSource;
 
 struct WidthMeasureContext<'a> {
     page_index: u32,
-    asset: Option<&'a FontAsset>,
     typography_profile: &'a TypographyProfile,
     h_scale_pct: f32,
 }
@@ -466,11 +464,6 @@ fn build_anchor_validated_guesses(
     use_curated_name_prior: bool,
 ) -> (Vec<RedactionGuess>, Vec<AnchorDecisionRecord>, Vec<String>) {
     let dictionary_variants = build_dictionary_variants(dictionary);
-    let assets = font_runs
-        .assets
-        .iter()
-        .map(|asset| (asset.font_key.clone(), asset.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
     let mut by_page = std::collections::BTreeMap::<u32, Vec<&FontTextRun>>::new();
     for run in &font_runs.runs {
         by_page.entry(run.page_index).or_default().push(run);
@@ -508,7 +501,7 @@ fn build_anchor_validated_guesses(
             .get(&redaction.page_index)
             .cloned()
             .unwrap_or_default();
-        let anchor = select_anchor_pair(redaction, &page_runs, &assets, typography_profile);
+        let anchor = select_anchor_pair(redaction, &page_runs, typography_profile);
         let anchor_row_id = format!("page{}_row{index}", redaction.page_index);
         let left_anchor_id = format!("{anchor_row_id}_left");
         let right_anchor_id = format!("{anchor_row_id}_right");
@@ -635,7 +628,6 @@ fn build_anchor_validated_guesses(
             &dictionary_variants,
             cfg,
             &anchor,
-            &assets,
             typography_profile,
             use_curated_name_prior,
         );
@@ -1277,12 +1269,10 @@ fn build_guess_for_anchor(
     dictionary_variants: &[String],
     _cfg: &GuessConfig,
     anchor: &AnchorPairData,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
     use_curated_name_prior: bool,
 ) -> (RedactionGuess, CandidateFunnelMetrics) {
     let mut funnel = CandidateFunnelMetrics::default();
-    let asset = assets.get(&anchor.font_key);
     let fallback_char_width = estimate_char_width_pt(
         &anchor.left_anchor_text,
         &anchor.right_anchor_text,
@@ -1313,7 +1303,6 @@ fn build_guess_for_anchor(
                 text,
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            asset,
             typography_profile,
         );
         measured.or_else(|| {
@@ -1716,18 +1705,8 @@ fn build_guess_for_anchor(
     let candidate_width_source = selected
         .first()
         .map(|candidate| candidate.width_source.as_str().to_owned());
-    let mut width_fallback_parts = Vec::<&str>::new();
-    if asset.is_none() {
-        width_fallback_parts.push("font_asset_missing");
-    }
-    if !has_width_table_for_anchor {
-        width_fallback_parts.push("width_table_missing");
-    }
-    let width_fallback_reason = if width_fallback_parts.is_empty() {
-        None
-    } else {
-        Some(width_fallback_parts.join("+"))
-    };
+    let width_fallback_reason =
+        (!has_width_table_for_anchor).then(|| "width_table_missing".to_owned());
 
     let char_width = if !anchor.left_anchor_text.trim().is_empty() {
         let chars = anchor.left_anchor_text.trim().chars().count().max(1) as f64;
@@ -1785,7 +1764,6 @@ fn build_guess_for_anchor(
 fn select_anchor_pair(
     redaction: &RedactionOccurrence,
     runs: &[&FontTextRun],
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let red_center_y = rect_center_y(&redaction.bbox);
@@ -1797,7 +1775,7 @@ fn select_anchor_pair(
 
     let mut pairs = build_pair_candidates(&row_runs, redaction, red_center_x, red_center_y);
     if pairs.is_empty() {
-        return recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, typography_profile);
     }
     sort_pair_candidates(&mut pairs);
     let Some(selected_pair) = pairs
@@ -1805,17 +1783,16 @@ fn select_anchor_pair(
         .find(|pair| pair.font_penalty == 0)
         .or_else(|| pairs.first())
     else {
-        return recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, typography_profile);
     };
 
     build_two_sided_anchor_from_pair(
         selected_pair,
         redaction,
         &row_runs,
-        assets,
         typography_profile,
     )
-    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, assets, typography_profile))
+    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, typography_profile))
 }
 
 fn sorted_row_runs_for_anchor<'a>(
@@ -1968,20 +1945,15 @@ fn build_two_sided_anchor_from_pair(
     selected_pair: &PairCandidate,
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let left_run = row_runs[selected_pair.left_idx];
     let right_run = row_runs[selected_pair.right_idx];
-    let asset = assets
-        .get(&left_run.font_key)
-        .or_else(|| assets.get(&right_run.font_key));
     let left_resolution = resolve_anchor_text_and_x(
         redaction.page_index,
         left_run,
         row_runs,
         AnchorType::Left,
-        asset,
         typography_profile,
     );
     let right_resolution = resolve_anchor_text_and_x(
@@ -1989,7 +1961,6 @@ fn build_two_sided_anchor_from_pair(
         right_run,
         row_runs,
         AnchorType::Right,
-        asset,
         typography_profile,
     );
     let left_anchor_text = left_resolution.text.as_str();
@@ -2009,7 +1980,6 @@ fn build_two_sided_anchor_from_pair(
     }
     let measure_ctx = WidthMeasureContext {
         page_index: redaction.page_index,
-        asset,
         typography_profile,
         h_scale_pct: left_run.h_scale_pct,
     };
@@ -2043,7 +2013,6 @@ fn build_two_sided_anchor_from_pair(
 fn recover_one_sided_anchor(
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let left_only = row_runs
@@ -2087,15 +2056,11 @@ fn recover_one_sided_anchor(
 
     if let (Some(left_run), Some(right_run)) = (left_only, right_only) {
         if right_run.bbox.x0 as f64 > left_run.bbox.x1 as f64 {
-            let asset = assets
-                .get(&left_run.font_key)
-                .or_else(|| assets.get(&right_run.font_key));
             let left_resolution = resolve_anchor_text_and_x(
                 redaction.page_index,
                 left_run,
                 row_runs,
                 AnchorType::Left,
-                asset,
                 typography_profile,
             );
             let right_resolution = resolve_anchor_text_and_x(
@@ -2103,7 +2068,6 @@ fn recover_one_sided_anchor(
                 right_run,
                 row_runs,
                 AnchorType::Right,
-                asset,
                 typography_profile,
             );
             let left_x = left_resolution.x;
@@ -2114,7 +2078,6 @@ fn recover_one_sided_anchor(
             {
                 let measure_ctx = WidthMeasureContext {
                     page_index: redaction.page_index,
-                    asset,
                     typography_profile,
                     h_scale_pct: left_run.h_scale_pct,
                 };
@@ -2148,13 +2111,11 @@ fn recover_one_sided_anchor(
     }
 
     if let Some(left_run) = left_only {
-        let asset = assets.get(&left_run.font_key);
         let left_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             left_run,
             row_runs,
             AnchorType::Left,
-            asset,
             typography_profile,
         );
         let left_anchor_text = left_resolution.text.as_str();
@@ -2164,7 +2125,6 @@ fn recover_one_sided_anchor(
         if !left_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
                 page_index: redaction.page_index,
-                asset,
                 typography_profile,
                 h_scale_pct: left_run.h_scale_pct,
             };
@@ -2198,13 +2158,11 @@ fn recover_one_sided_anchor(
     }
 
     if let Some(right_run) = right_only {
-        let asset = assets.get(&right_run.font_key);
         let right_resolution = resolve_anchor_text_and_x(
             redaction.page_index,
             right_run,
             row_runs,
             AnchorType::Right,
-            asset,
             typography_profile,
         );
         let right_anchor_text = right_resolution.text.as_str();
@@ -2214,7 +2172,6 @@ fn recover_one_sided_anchor(
         if !right_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
                 page_index: redaction.page_index,
-                asset,
                 typography_profile,
                 h_scale_pct: right_run.h_scale_pct,
             };
@@ -2256,7 +2213,6 @@ fn resolve_anchor_text_and_x(
     run: &FontTextRun,
     row_runs: &[&FontTextRun],
     side: AnchorType,
-    _asset: Option<&FontAsset>,
     _typography_profile: &TypographyProfile,
 ) -> AnchorSideResolution {
     let (selected_text, selected_x) = enrich_anchor_text_from_row_runs(run, row_runs, side);
@@ -2444,7 +2400,6 @@ fn estimate_row_epsilon(
             text: " ",
             metrics_dpi: DEFAULT_FONT_METRICS_DPI,
         },
-        measure_ctx.asset,
         measure_ctx.typography_profile,
     )
     .map(|value| value.pt)
@@ -2485,7 +2440,6 @@ fn estimate_row_epsilon(
                 text: current_text,
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            measure_ctx.asset,
             measure_ctx.typography_profile,
         )
         .map(|value| value.pt)
@@ -2503,7 +2457,6 @@ fn estimate_row_epsilon(
                 text: " ",
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            measure_ctx.asset,
             measure_ctx.typography_profile,
         )
         .map(|value| value.pt)
@@ -2552,10 +2505,9 @@ fn estimate_row_epsilon(
 
 fn measure_text_width_from_sources(
     input: &TypographyMeasureInput<'_>,
-    asset: Option<&FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<MeasuredWidth> {
-    measure_text_width_from_profile(input, asset, typography_profile)
+    measure_text_width_from_profile(input, typography_profile)
 }
 
 fn run_center_y(run: &FontTextRun) -> f32 {
@@ -2938,7 +2890,7 @@ mod tests {
         let row_runs = runs.iter().collect::<Vec<_>>();
         let profile = TypographyProfile::default();
         let resolution =
-            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, None, &profile);
+            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, &profile);
         assert_eq!(resolution.text, "Ghislaine Maxwell,");
         assert_eq!(resolution.x, 130.0_f64);
         assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
@@ -2954,7 +2906,7 @@ mod tests {
         let row_runs = runs.iter().collect::<Vec<_>>();
         let profile = TypographyProfile::default();
         let resolution =
-            resolve_anchor_text_and_x(0, &runs[0], &row_runs, AnchorType::Right, None, &profile);
+            resolve_anchor_text_and_x(0, &runs[0], &row_runs, AnchorType::Right, &profile);
         assert_eq!(resolution.text, "(JE/GM chief");
         assert_eq!(resolution.x, 234.0_f64);
         assert_eq!(resolution.source, AnchorSourceLabel::RunExact);
@@ -2970,7 +2922,7 @@ mod tests {
         let row_runs = runs.iter().collect::<Vec<_>>();
         let profile = TypographyProfile::default();
         let resolution =
-            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, None, &profile);
+            resolve_anchor_text_and_x(0, &runs[1], &row_runs, AnchorType::Left, &profile);
         assert_eq!(resolution.text, "Brunel,");
         assert_eq!(resolution.x, 130.0_f64);
         assert_eq!(resolution.source, AnchorSourceLabel::RunExact);

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypographyWidthSource {
-    Asset,
     PdfWidthTable,
     CoreFont,
     Fallback,
@@ -12,7 +11,6 @@ impl TypographyWidthSource {
     #[inline]
     pub fn as_str(self) -> &'static str {
         match self {
-            TypographyWidthSource::Asset => "asset",
             TypographyWidthSource::PdfWidthTable => "pdf_width_table",
             TypographyWidthSource::CoreFont => "core_font",
             TypographyWidthSource::Fallback => "fallback",

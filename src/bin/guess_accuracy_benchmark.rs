@@ -148,7 +148,6 @@ struct MetricDefinitions {
     quality_anchored_rows: &'static str,
     quality_anchor_two_sided_rows: &'static str,
     quality_anchor_one_sided_rows: &'static str,
-    quality_width_asset_rows: &'static str,
     quality_width_table_rows: &'static str,
     quality_width_core_rows: &'static str,
     quality_width_fallback_rows: &'static str,
@@ -231,7 +230,6 @@ struct QualitySummary {
     anchored_rows: usize,
     anchor_two_sided_rows: usize,
     anchor_one_sided_rows: usize,
-    width_asset_rows: usize,
     width_table_rows: usize,
     width_core_rows: usize,
     width_fallback_rows: usize,
@@ -800,7 +798,6 @@ fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
             .as_deref()
             .or(guess.context.anchor_width_source.as_deref());
         match width_source {
-            Some("asset") => out.width_asset_rows += 1,
             Some("pdf_width_table") => out.width_table_rows += 1,
             Some("core_font") => out.width_core_rows += 1,
             Some("fallback") => out.width_fallback_rows += 1,
@@ -836,7 +833,6 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
         merged.anchored_rows += summary.anchored_rows;
         merged.anchor_two_sided_rows += summary.anchor_two_sided_rows;
         merged.anchor_one_sided_rows += summary.anchor_one_sided_rows;
-        merged.width_asset_rows += summary.width_asset_rows;
         merged.width_table_rows += summary.width_table_rows;
         merged.width_core_rows += summary.width_core_rows;
         merged.width_fallback_rows += summary.width_fallback_rows;
@@ -1398,12 +1394,11 @@ fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
 
 fn print_quality_summary(label: &str, summary: &QualitySummary) {
     println!(
-        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_asset={} width_table={} width_core={} width_fallback={} fallback_reason_rows={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
+        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_table={} width_core={} width_fallback={} fallback_reason_rows={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
         summary.rows_total,
         summary.anchored_rows,
         summary.anchor_two_sided_rows,
         summary.anchor_one_sided_rows,
-        summary.width_asset_rows,
         summary.width_table_rows,
         summary.width_core_rows,
         summary.width_fallback_rows,
@@ -1476,8 +1471,6 @@ fn metric_definitions() -> MetricDefinitions {
             "Rows where anchor_mode is two_sided (full left/right anchor).",
         quality_anchor_one_sided_rows:
             "Rows where anchor_mode is left_only or right_only.",
-        quality_width_asset_rows:
-            "Rows whose primary candidate width source is embedded font asset shaping.",
         quality_width_table_rows:
             "Rows whose primary candidate width source is PDF width table lookup.",
         quality_width_core_rows:
@@ -2198,10 +2191,6 @@ fn main() {
     println!(
         "  quality_anchor_one_sided_rows: {}",
         payload.definitions.quality_anchor_one_sided_rows
-    );
-    println!(
-        "  quality_width_asset_rows: {}",
-        payload.definitions.quality_width_asset_rows
     );
     println!(
         "  quality_width_table_rows: {}",

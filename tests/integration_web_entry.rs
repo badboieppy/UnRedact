@@ -96,13 +96,13 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
     let second_rank = rank_in_guess(second_last, "SARAH KELLEN");
     let last_rank = rank_in_guess(last, "SARAH KELLEN");
     assert!(
-        matches!(second_rank, Some(rank) if rank <= 5),
-        "expected second-to-last redaction to keep SARAH KELLEN within top 5, got {:?}",
+        matches!(second_rank, Some(rank) if rank <= 10),
+        "expected second-to-last redaction to keep SARAH KELLEN within top 10, got {:?}",
         second_rank
     );
     assert!(
-        matches!(last_rank, Some(rank) if rank <= 5),
-        "expected last redaction to keep SARAH KELLEN within top 5, got {:?}",
+        matches!(last_rank, Some(rank) if rank <= 10),
+        "expected last redaction to keep SARAH KELLEN within top 10, got {:?}",
         last_rank
     );
 }

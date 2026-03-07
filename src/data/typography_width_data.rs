@@ -1,9 +1,6 @@
 use lopdf::{Dictionary, Document, Object};
 use std::collections::BTreeMap;
 
-use crate::types::file_types::FontAsset;
-use crate::types::runtime_defaults::GLYPH_UNITS_SCALE;
-use crate::types::typography_shaping::shaping_features;
 use crate::types::typography_types::{
     TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
     TypographyWidthTable, TypographyWidthTableKey,
@@ -76,7 +73,6 @@ pub fn build_typography_profile_from_pdf_bytes(
 #[inline]
 pub fn measure_text_width_from_profile(
     input: &TypographyMeasureInput<'_>,
-    asset: Option<&FontAsset>,
     profile: &TypographyProfile,
 ) -> Option<TypographyMeasuredWidth> {
     if input.text.is_empty() {
@@ -85,20 +81,6 @@ pub fn measure_text_width_from_profile(
             input.metrics_dpi,
             TypographyWidthSource::Fallback,
         ));
-    }
-
-    if let Some(asset_value) = asset {
-        if let Some(width) = measure_text_width_pt(
-            asset_value,
-            input.text,
-            input.font_size_pt,
-            input.h_scale_pct,
-            input.metrics_dpi,
-        ) {
-            if width.pt.is_finite() && width.pt > 0.0_f64 {
-                return Some(width);
-            }
-        }
     }
 
     if let Some(table) = profile.width_table(input.page_index, input.font_key) {
@@ -143,28 +125,6 @@ pub fn fallback_typography_width(
         })
         .sum::<f64>();
     measured_width_from_points(width_pt, metrics_dpi, TypographyWidthSource::Fallback)
-}
-
-fn measure_text_width_pt(
-    asset: &FontAsset,
-    text: &str,
-    font_size_pt: f32,
-    h_scale_pct: f32,
-    metrics_dpi: f32,
-) -> Option<TypographyMeasuredWidth> {
-    let face = rustybuzz::Face::from_slice(&asset.bytes, 0)?;
-    let units_per_em = asset.units_per_em.max(1) as f32;
-    let scale = (h_scale_pct as f64 / 100.0_f64).max(0.01_f64);
-    let font_size = font_size_pt.abs().max(1.0_f32);
-    let width_pt = (advance_pt(&face, text, font_size, units_per_em) as f64) * scale;
-    if !width_pt.is_finite() || width_pt <= 0.0_f64 {
-        return None;
-    }
-    Some(measured_width_from_points(
-        width_pt,
-        metrics_dpi,
-        TypographyWidthSource::Asset,
-    ))
 }
 
 fn measured_width_from_points(
@@ -307,19 +267,6 @@ fn deref_to_width_dict<'doc>(
         Object::Dictionary(dictionary) => Some(dictionary),
         _ => None,
     }
-}
-
-fn advance_pt(face: &rustybuzz::Face<'_>, text: &str, font_size: f32, units_per_em: f32) -> f32 {
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(text);
-    let out = rustybuzz::shape(face, shaping_features(), buffer);
-    let units = out
-        .glyph_positions()
-        .iter()
-        .map(|position| position.x_advance as f32)
-        .sum::<f32>()
-        / GLYPH_UNITS_SCALE as f32;
-    units * (font_size / units_per_em.max(1.0_f32))
 }
 
 fn times_roman_width(ch: char) -> i32 {
