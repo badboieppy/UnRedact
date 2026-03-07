@@ -74,6 +74,10 @@ struct TrialSummary {
     no_visual: RankSummary,
     visual: RankSummary,
     pairwise: PairwiseSummary,
+    visual_summary: VisualSummary,
+    visual_rerank_summary: VisualRerankSummary,
+    visual_reason_counts: BTreeMap<String, usize>,
+    visual_rerank_gate_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +102,46 @@ struct PairwiseSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct VisualSummary {
+    rows_total: usize,
+    rows_with_top_guess: usize,
+    rows_scored: usize,
+    rows_dropped: usize,
+    mean_abs_diff: Option<f64>,
+    median_abs_diff: Option<f64>,
+    p90_abs_diff: Option<f64>,
+    mean_changed_pixel_ratio: Option<f64>,
+    mean_compared_pixels: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VisualRerankSummary {
+    rows_considered: usize,
+    rows_scored: usize,
+    top1_changed: usize,
+    top1_changed_ratio: Option<f64>,
+    mean_gain: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VisualAccumulator {
+    rows_total: usize,
+    rows_with_top_guess: usize,
+    rows_dropped: usize,
+    abs_diff: Vec<f64>,
+    changed_ratio: Vec<f64>,
+    compared_pixels: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VisualRerankAccumulator {
+    rows_considered: usize,
+    rows_scored: usize,
+    top1_changed: usize,
+    weighted_gain_sum: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct VisualScoreImpactReport {
     input_pdf: String,
     page_number: u32,
@@ -109,6 +153,10 @@ struct VisualScoreImpactReport {
     no_visual_overall: RankSummary,
     visual_overall: RankSummary,
     pairwise_overall: PairwiseSummary,
+    visual_summary_overall: VisualSummary,
+    visual_rerank_overall: VisualRerankSummary,
+    visual_reason_counts_overall: BTreeMap<String, usize>,
+    visual_rerank_gate_counts_overall: BTreeMap<String, usize>,
     trial_summaries: Vec<TrialSummary>,
 }
 
@@ -206,6 +254,10 @@ fn run(options: CliOptions) -> Result<(), String> {
     let mut rng = LcgRng::new(options.seed);
     let mut all_no_visual_ranks = Vec::<Option<usize>>::new();
     let mut all_visual_ranks = Vec::<Option<usize>>::new();
+    let mut all_visual_accumulators = Vec::<VisualAccumulator>::new();
+    let mut all_visual_rerank_accumulators = Vec::<VisualRerankAccumulator>::new();
+    let mut all_visual_reason_counts = Vec::<BTreeMap<String, usize>>::new();
+    let mut all_visual_rerank_gate_counts = Vec::<BTreeMap<String, usize>>::new();
     let mut trial_summaries = Vec::<TrialSummary>::new();
 
     for trial_index in 0..options.trials {
@@ -243,9 +295,19 @@ fn run(options: CliOptions) -> Result<(), String> {
             .iter()
             .map(|target| best_rank_for_target(&visual_report.guesses, target))
             .collect::<Vec<_>>();
+        let visual_acc = visual_accumulator_from_guesses(&visual_report.guesses);
+        let visual_rerank_acc =
+            visual_rerank_accumulator_from_diagnostics(&visual_report.diagnostics);
+        let visual_reason_counts = visual_reason_counts_from_guesses(&visual_report.guesses);
+        let visual_rerank_gate_counts =
+            visual_rerank_gate_counts_from_diagnostics(&visual_report.diagnostics);
 
         all_no_visual_ranks.extend(no_visual_ranks.iter().copied());
         all_visual_ranks.extend(visual_ranks.iter().copied());
+        all_visual_accumulators.push(visual_acc.clone());
+        all_visual_rerank_accumulators.push(visual_rerank_acc.clone());
+        all_visual_reason_counts.push(visual_reason_counts.clone());
+        all_visual_rerank_gate_counts.push(visual_rerank_gate_counts.clone());
 
         trial_summaries.push(TrialSummary {
             trial_index: trial_index + 1,
@@ -253,12 +315,23 @@ fn run(options: CliOptions) -> Result<(), String> {
             no_visual: summarize_ranks(&no_visual_ranks),
             visual: summarize_ranks(&visual_ranks),
             pairwise: summarize_pairwise(&no_visual_ranks, &visual_ranks),
+            visual_summary: summarize_visual_accumulator(visual_acc),
+            visual_rerank_summary: summarize_visual_rerank_accumulator(&visual_rerank_acc),
+            visual_reason_counts,
+            visual_rerank_gate_counts,
         });
     }
 
     let no_visual_overall = summarize_ranks(&all_no_visual_ranks);
     let visual_overall = summarize_ranks(&all_visual_ranks);
     let pairwise_overall = summarize_pairwise(&all_no_visual_ranks, &all_visual_ranks);
+    let visual_summary_overall =
+        summarize_visual_accumulator(merge_visual_accumulators(&all_visual_accumulators));
+    let visual_rerank_overall = summarize_visual_rerank_accumulator(
+        &merge_visual_rerank_accumulators(&all_visual_rerank_accumulators),
+    );
+    let visual_reason_counts_overall = merge_string_counts(&all_visual_reason_counts);
+    let visual_rerank_gate_counts_overall = merge_string_counts(&all_visual_rerank_gate_counts);
     let report = VisualScoreImpactReport {
         input_pdf: options.input.display().to_string(),
         page_number: options.page,
@@ -270,6 +343,10 @@ fn run(options: CliOptions) -> Result<(), String> {
         no_visual_overall,
         visual_overall,
         pairwise_overall,
+        visual_summary_overall,
+        visual_rerank_overall,
+        visual_reason_counts_overall,
+        visual_rerank_gate_counts_overall,
         trial_summaries,
     };
 
@@ -650,6 +727,183 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> RankSummary {
     }
 }
 
+fn percentile_sorted(values: &[f64], q: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let quantile = q.clamp(0.0_f64, 1.0_f64);
+    let idx = ((values.len().saturating_sub(1) as f64) * quantile).round() as usize;
+    values.get(idx).copied()
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn visual_accumulator_from_guesses(guesses: &[RedactionGuess]) -> VisualAccumulator {
+    let mut acc = VisualAccumulator {
+        rows_total: guesses.len(),
+        ..VisualAccumulator::default()
+    };
+    for guess in guesses {
+        if !guess.candidates.is_empty() {
+            acc.rows_with_top_guess += 1;
+        }
+        if guess.visual_dropped {
+            acc.rows_dropped += 1;
+        }
+        if let Some(value) = guess.visual_mean_abs_diff {
+            acc.abs_diff.push(value as f64);
+        }
+        if let Some(value) = guess.visual_changed_pixel_ratio {
+            acc.changed_ratio.push(value as f64);
+        }
+        if let Some(value) = guess.visual_compared_pixels {
+            acc.compared_pixels.push(value as f64);
+        }
+    }
+    acc
+}
+
+fn summarize_visual_accumulator(mut acc: VisualAccumulator) -> VisualSummary {
+    acc.abs_diff
+        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    VisualSummary {
+        rows_total: acc.rows_total,
+        rows_with_top_guess: acc.rows_with_top_guess,
+        rows_scored: acc.abs_diff.len(),
+        rows_dropped: acc.rows_dropped,
+        mean_abs_diff: mean(&acc.abs_diff),
+        median_abs_diff: percentile_sorted(&acc.abs_diff, 0.5_f64),
+        p90_abs_diff: percentile_sorted(&acc.abs_diff, 0.9_f64),
+        mean_changed_pixel_ratio: mean(&acc.changed_ratio),
+        mean_compared_pixels: mean(&acc.compared_pixels),
+    }
+}
+
+fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumulator {
+    let mut merged = VisualAccumulator::default();
+    for acc in accumulators {
+        merged.rows_total += acc.rows_total;
+        merged.rows_with_top_guess += acc.rows_with_top_guess;
+        merged.rows_dropped += acc.rows_dropped;
+        merged.abs_diff.extend_from_slice(&acc.abs_diff);
+        merged.changed_ratio.extend_from_slice(&acc.changed_ratio);
+        merged
+            .compared_pixels
+            .extend_from_slice(&acc.compared_pixels);
+    }
+    merged
+}
+
+fn visual_rerank_accumulator_from_diagnostics(diagnostics: &[String]) -> VisualRerankAccumulator {
+    let mut acc = VisualRerankAccumulator::default();
+    for line in diagnostics {
+        let Some(rest) = line.strip_prefix("visual_rerank=") else {
+            continue;
+        };
+        let mut rows_considered = None::<usize>;
+        let mut rows_scored = None::<usize>;
+        let mut top1_changed = None::<usize>;
+        let mut mean_gain = None::<f64>;
+        for token in rest.split_whitespace() {
+            if let Some(value) = token.strip_prefix("rows_considered=") {
+                rows_considered = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("rows_scored=") {
+                rows_scored = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("top1_changed=") {
+                top1_changed = value.parse::<usize>().ok();
+            } else if let Some(value) = token.strip_prefix("mean_gain=") {
+                mean_gain = value.parse::<f64>().ok();
+            }
+        }
+        let scored = rows_scored.unwrap_or(0_usize);
+        acc.rows_considered += rows_considered.unwrap_or(0_usize);
+        acc.rows_scored += scored;
+        acc.top1_changed += top1_changed.unwrap_or(0_usize);
+        if let Some(gain) = mean_gain {
+            acc.weighted_gain_sum += gain * scored as f64;
+        }
+    }
+    acc
+}
+
+fn summarize_visual_rerank_accumulator(acc: &VisualRerankAccumulator) -> VisualRerankSummary {
+    VisualRerankSummary {
+        rows_considered: acc.rows_considered,
+        rows_scored: acc.rows_scored,
+        top1_changed: acc.top1_changed,
+        top1_changed_ratio: if acc.rows_scored == 0 {
+            None
+        } else {
+            Some(acc.top1_changed as f64 / acc.rows_scored as f64)
+        },
+        mean_gain: if acc.rows_scored == 0 {
+            None
+        } else {
+            Some(acc.weighted_gain_sum / acc.rows_scored as f64)
+        },
+    }
+}
+
+fn merge_visual_rerank_accumulators(
+    accumulators: &[VisualRerankAccumulator],
+) -> VisualRerankAccumulator {
+    let mut merged = VisualRerankAccumulator::default();
+    for acc in accumulators {
+        merged.rows_considered += acc.rows_considered;
+        merged.rows_scored += acc.rows_scored;
+        merged.top1_changed += acc.top1_changed;
+        merged.weighted_gain_sum += acc.weighted_gain_sum;
+    }
+    merged
+}
+
+fn visual_reason_counts_from_guesses(guesses: &[RedactionGuess]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for guess in guesses {
+        if let Some(reason) = guess.visual_reason.as_deref() {
+            *counts.entry(reason.to_owned()).or_insert(0_usize) += 1;
+        }
+    }
+    counts
+}
+
+fn visual_rerank_gate_counts_from_diagnostics(diagnostics: &[String]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for line in diagnostics {
+        let Some(rest) = line.strip_prefix("visual_rerank_gates=") else {
+            continue;
+        };
+        if rest == "none" {
+            continue;
+        }
+        for token in rest.split_whitespace() {
+            let Some((reason, count)) = token.split_once('=') else {
+                continue;
+            };
+            let Ok(parsed) = count.parse::<usize>() else {
+                continue;
+            };
+            *counts.entry(reason.to_owned()).or_insert(0_usize) += parsed;
+        }
+    }
+    counts
+}
+
+fn merge_string_counts(items: &[BTreeMap<String, usize>]) -> BTreeMap<String, usize> {
+    let mut merged = BTreeMap::<String, usize>::new();
+    for counts in items {
+        for (key, value) in counts {
+            *merged.entry(key.clone()).or_insert(0_usize) += *value;
+        }
+    }
+    merged
+}
+
 fn summarize_pairwise(no_visual: &[Option<usize>], visual: &[Option<usize>]) -> PairwiseSummary {
     let mut visual_better = 0_usize;
     let mut visual_worse = 0_usize;
@@ -748,4 +1002,66 @@ fn print_report_summary(report: &VisualScoreImpactReport) {
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "-".to_owned())
     );
+    println!(
+        "VISUAL_META rows_scored={}/{} mean_abs_diff={} median_abs_diff={} p90_abs_diff={} mean_changed={} mean_pixels={}",
+        report.visual_summary_overall.rows_scored,
+        report.visual_summary_overall.rows_total,
+        report
+            .visual_summary_overall
+            .mean_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        report
+            .visual_summary_overall
+            .median_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        report
+            .visual_summary_overall
+            .p90_abs_diff
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        report
+            .visual_summary_overall
+            .mean_changed_pixel_ratio
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        report
+            .visual_summary_overall
+            .mean_compared_pixels
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "-".to_owned())
+    );
+    println!(
+        "RERANK      considered={} scored={} top1_changed={} top1_changed_ratio={} mean_gain={} gates={}",
+        report.visual_rerank_overall.rows_considered,
+        report.visual_rerank_overall.rows_scored,
+        report.visual_rerank_overall.top1_changed,
+        report
+            .visual_rerank_overall
+            .top1_changed_ratio
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        report
+            .visual_rerank_overall
+            .mean_gain
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "-".to_owned()),
+        format_count_map(&report.visual_rerank_gate_counts_overall)
+    );
+    println!(
+        "REASONS     {}",
+        format_count_map(&report.visual_reason_counts_overall)
+    );
+}
+
+fn format_count_map(counts: &BTreeMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return "none".to_owned();
+    }
+    counts
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
