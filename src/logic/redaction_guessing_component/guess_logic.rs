@@ -11,7 +11,7 @@ use crate::data::typography_width_data::{
     build_typography_profile_from_pdf_bytes, fallback_typography_width,
     measure_text_width_from_profile,
 };
-use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
+use crate::types::file_types::{FontRunReport, FontTextRun, Rect as FontRect};
 use crate::types::guess_types::{
     GuessCandidate, GuessConfig, GuessContext, GuessReport, RedactionGuess,
 };
@@ -181,7 +181,6 @@ fn annotate_guess_confidence(guesses: &mut [RedactionGuess]) {
             .as_deref()
             .or(guess.context.anchor_width_source.as_deref())
         {
-            Some("asset") => 1.0_f64,
             Some("pdf_width_table") => 0.93_f64,
             Some("core_font") => 0.82_f64,
             Some("fallback") => 0.64_f64,
@@ -305,7 +304,6 @@ type WidthSource = TypographyWidthSource;
 
 struct WidthMeasureContext<'a> {
     page_index: u32,
-    asset: Option<&'a FontAsset>,
     typography_profile: &'a TypographyProfile,
     h_scale_pct: f32,
 }
@@ -376,11 +374,6 @@ fn build_anchor_validated_guesses(
     use_curated_name_prior: bool,
 ) -> (Vec<RedactionGuess>, Vec<String>) {
     let dictionary_variants = build_dictionary_variants(dictionary);
-    let assets = font_runs
-        .assets
-        .iter()
-        .map(|asset| (asset.font_key.clone(), asset.clone()))
-        .collect::<std::collections::BTreeMap<_, _>>();
     let mut by_page = std::collections::BTreeMap::<u32, Vec<&FontTextRun>>::new();
     for run in &font_runs.runs {
         by_page.entry(run.page_index).or_default().push(run);
@@ -426,7 +419,6 @@ fn build_anchor_validated_guesses(
             redaction,
             &page_runs,
             cluster_hints,
-            &assets,
             typography_profile,
         );
         let Some(anchor) = anchor else {
@@ -510,7 +502,6 @@ fn build_anchor_validated_guesses(
             &dictionary_variants,
             cfg,
             &anchor,
-            &assets,
             typography_profile,
             use_curated_name_prior,
         );
@@ -1059,12 +1050,10 @@ fn build_guess_for_anchor(
     dictionary_variants: &[String],
     _cfg: &GuessConfig,
     anchor: &AnchorPairData,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
     use_curated_name_prior: bool,
 ) -> (RedactionGuess, CandidateFunnelMetrics) {
     let mut funnel = CandidateFunnelMetrics::default();
-    let asset = assets.get(&anchor.font_key);
     let fallback_char_width = estimate_char_width_pt(
         &anchor.left_anchor_text,
         &anchor.right_anchor_text,
@@ -1095,7 +1084,6 @@ fn build_guess_for_anchor(
                 text,
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            asset,
             typography_profile,
         );
         measured.or_else(|| {
@@ -1483,18 +1471,8 @@ fn build_guess_for_anchor(
     let candidate_width_source = selected
         .first()
         .map(|candidate| candidate.width_source.as_str().to_owned());
-    let mut width_fallback_parts = Vec::<&str>::new();
-    if asset.is_none() {
-        width_fallback_parts.push("font_asset_missing");
-    }
-    if !has_width_table_for_anchor {
-        width_fallback_parts.push("width_table_missing");
-    }
-    let width_fallback_reason = if width_fallback_parts.is_empty() {
-        None
-    } else {
-        Some(width_fallback_parts.join("+"))
-    };
+    let width_fallback_reason =
+        (!has_width_table_for_anchor).then(|| "width_table_missing".to_owned());
 
     let char_width = if !anchor.left_anchor_text.trim().is_empty() {
         let chars = anchor.left_anchor_text.trim().chars().count().max(1) as f64;
@@ -1808,7 +1786,6 @@ fn select_anchor_pair(
     redaction: &RedactionOccurrence,
     runs: &[&FontTextRun],
     cluster_hints: &[ClusterAnchorHint],
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let red_center_y = rect_center_y(&redaction.bbox);
@@ -1838,7 +1815,7 @@ fn select_anchor_pair(
         return None;
     }
     if let Some(anchor) =
-        try_same_run_hint_anchor(redaction, &row_runs, &hints, assets, typography_profile)
+        try_same_run_hint_anchor(redaction, &row_runs, &hints, typography_profile)
     {
         return Some(anchor);
     }
@@ -1852,7 +1829,7 @@ fn select_anchor_pair(
         red_center_y,
     );
     if pairs.is_empty() {
-        return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, &hints, typography_profile);
     }
     sort_pair_candidates(&mut pairs);
     let Some(selected_pair) = pairs
@@ -1860,7 +1837,7 @@ fn select_anchor_pair(
         .find(|pair| pair.font_penalty == 0)
         .or_else(|| pairs.first())
     else {
-        return recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile);
+        return recover_one_sided_anchor(redaction, &row_runs, &hints, typography_profile);
     };
 
     build_two_sided_anchor_from_pair(
@@ -1868,10 +1845,9 @@ fn select_anchor_pair(
         redaction,
         &row_runs,
         &hints,
-        assets,
         typography_profile,
     )
-    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, &hints, assets, typography_profile))
+    .or_else(|| recover_one_sided_anchor(redaction, &row_runs, &hints, typography_profile))
 }
 
 fn sorted_row_runs_for_anchor<'a>(
@@ -1904,7 +1880,6 @@ fn try_same_run_hint_anchor(
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
     hints: &AnchorHints<'_>,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let (Some(left_hint_text), Some(right_hint_text)) = (hints.left_text, hints.right_text) else {
@@ -1914,13 +1889,11 @@ fn try_same_run_hint_anchor(
         let run_text = run.text.trim();
         text_matches(run_text, left_hint_text) && text_matches(run_text, right_hint_text)
     })?;
-    let asset = assets.get(&same_run.font_key);
     let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
         redaction.page_index,
         same_run,
         Some(left_hint_text),
         hints.left_x,
-        asset,
         typography_profile,
     );
     let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
@@ -1928,7 +1901,6 @@ fn try_same_run_hint_anchor(
         same_run,
         Some(right_hint_text),
         hints.right_x,
-        asset,
         typography_profile,
     );
     if right_x <= left_x {
@@ -1936,7 +1908,6 @@ fn try_same_run_hint_anchor(
     }
     let measure_ctx = WidthMeasureContext {
         page_index: redaction.page_index,
-        asset,
         typography_profile,
         h_scale_pct: same_run.h_scale_pct,
     };
@@ -2074,20 +2045,15 @@ fn build_two_sided_anchor_from_pair(
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
     hints: &AnchorHints<'_>,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let left_run = row_runs[selected_pair.left_idx];
     let right_run = row_runs[selected_pair.right_idx];
-    let asset = assets
-        .get(&left_run.font_key)
-        .or_else(|| assets.get(&right_run.font_key));
     let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
         redaction.page_index,
         left_run,
         hints.left_text,
         hints.left_x,
-        asset,
         typography_profile,
     );
     let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
@@ -2095,7 +2061,6 @@ fn build_two_sided_anchor_from_pair(
         right_run,
         hints.right_text,
         hints.right_x,
-        asset,
         typography_profile,
     );
     if left_anchor_text.trim().is_empty() || right_anchor_text.trim().is_empty() {
@@ -2111,7 +2076,6 @@ fn build_two_sided_anchor_from_pair(
     }
     let measure_ctx = WidthMeasureContext {
         page_index: redaction.page_index,
-        asset,
         typography_profile,
         h_scale_pct: left_run.h_scale_pct,
     };
@@ -2137,7 +2101,6 @@ fn recover_one_sided_anchor(
     redaction: &RedactionOccurrence,
     row_runs: &[&FontTextRun],
     hints: &AnchorHints<'_>,
-    assets: &std::collections::BTreeMap<String, FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<AnchorPairData> {
     let left_only = row_runs
@@ -2180,13 +2143,11 @@ fn recover_one_sided_anchor(
         });
 
     if let Some(left_run) = left_only {
-        let asset = assets.get(&left_run.font_key);
         let (left_anchor_text, left_x) = resolve_anchor_text_and_x(
             redaction.page_index,
             left_run,
             hints.left_text,
             hints.left_x,
-            asset,
             typography_profile,
         );
         let right_anchor_text = hints.right_text.unwrap_or_default().to_owned();
@@ -2194,7 +2155,6 @@ fn recover_one_sided_anchor(
         if !left_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
                 page_index: redaction.page_index,
-                asset,
                 typography_profile,
                 h_scale_pct: left_run.h_scale_pct,
             };
@@ -2219,13 +2179,11 @@ fn recover_one_sided_anchor(
     }
 
     if let Some(right_run) = right_only {
-        let asset = assets.get(&right_run.font_key);
         let (right_anchor_text, right_x) = resolve_anchor_text_and_x(
             redaction.page_index,
             right_run,
             hints.right_text,
             hints.right_x,
-            asset,
             typography_profile,
         );
         let left_anchor_text = hints.left_text.unwrap_or_default().to_owned();
@@ -2233,7 +2191,6 @@ fn recover_one_sided_anchor(
         if !right_anchor_text.trim().is_empty() && right_x > left_x {
             let measure_ctx = WidthMeasureContext {
                 page_index: redaction.page_index,
-                asset,
                 typography_profile,
                 h_scale_pct: right_run.h_scale_pct,
             };
@@ -2266,7 +2223,6 @@ fn resolve_anchor_text_and_x(
     run: &FontTextRun,
     hint: Option<&str>,
     hint_x: Option<f64>,
-    asset: Option<&FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> (String, f64) {
     let run_text = run.text.trim();
@@ -2296,7 +2252,6 @@ fn resolve_anchor_text_and_x(
                         text: prefix,
                         metrics_dpi: DEFAULT_FONT_METRICS_DPI,
                     },
-                    asset,
                     typography_profile,
                 )
                 .map(|value| value.pt)
@@ -2381,7 +2336,6 @@ fn estimate_row_epsilon(
             text: " ",
             metrics_dpi: DEFAULT_FONT_METRICS_DPI,
         },
-        measure_ctx.asset,
         measure_ctx.typography_profile,
     )
     .map(|value| value.pt)
@@ -2422,7 +2376,6 @@ fn estimate_row_epsilon(
                 text: current_text,
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            measure_ctx.asset,
             measure_ctx.typography_profile,
         )
         .map(|value| value.pt)
@@ -2440,7 +2393,6 @@ fn estimate_row_epsilon(
                 text: " ",
                 metrics_dpi: DEFAULT_FONT_METRICS_DPI,
             },
-            measure_ctx.asset,
             measure_ctx.typography_profile,
         )
         .map(|value| value.pt)
@@ -2489,10 +2441,9 @@ fn estimate_row_epsilon(
 
 fn measure_text_width_from_sources(
     input: &TypographyMeasureInput<'_>,
-    asset: Option<&FontAsset>,
     typography_profile: &TypographyProfile,
 ) -> Option<MeasuredWidth> {
-    measure_text_width_from_profile(input, asset, typography_profile)
+    measure_text_width_from_profile(input, typography_profile)
 }
 
 fn run_center_y(run: &FontTextRun) -> f32 {
@@ -2807,7 +2758,6 @@ mod tests {
             &run,
             Some("Ghislaine Maxwell,"),
             Some(130.0_f64),
-            None,
             &profile,
         );
         assert_eq!(text, "Ghislaine Maxwell,");
@@ -2823,7 +2773,6 @@ mod tests {
             &run,
             Some("Luc Brunel,"),
             Some(130.0_f64),
-            None,
             &profile,
         );
         assert_eq!(text, "Brunel,");
@@ -2839,7 +2788,6 @@ mod tests {
             &run,
             Some("EPSTEIN, including"),
             Some(40.0_f64),
-            None,
             &profile,
         );
         assert_eq!(text, "including");
