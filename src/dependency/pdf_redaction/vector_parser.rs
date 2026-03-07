@@ -215,6 +215,7 @@ fn extract_drawn_from_ops(
                             score,
                             meta,
                             underlying_text: vec![],
+                            flow_membership: None,
                         });
                     }
                 }
@@ -253,6 +254,7 @@ fn extract_drawn_from_ops(
                             score,
                             meta,
                             underlying_text: vec![],
+                            flow_membership: None,
                         });
                     }
                 }

@@ -812,7 +812,7 @@ fn profile_raster_component(
     } else if component_dark_ratio < COMPONENT_MIN_DARK_RATIO {
         RasterSelectionReasonCode::RejectedLowDarkRatio
     } else if component_channel_spread_mean > COMPONENT_MAX_CHANNEL_SPREAD_MEAN
-        || component_channel_spread_p95 > COMPONENT_MAX_CHANNEL_SPREAD_P95
+        && component_channel_spread_p95 > COMPONENT_MAX_CHANNEL_SPREAD_P95
     {
         RasterSelectionReasonCode::RejectedHighChannelSpread
     } else {
@@ -1043,6 +1043,7 @@ pub fn extract_raster_page_redactions(
                 score,
                 meta,
                 underlying_text: Vec::new(),
+                flow_membership: None,
             });
         }
     }

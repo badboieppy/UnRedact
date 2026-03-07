@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::data::redaction_grouping_data::{
+    collect_redaction_flow_memberships, PreparedFlowContext,
+};
 use crate::data::redactions_data::{PdfFileRetriever, RedactionDataRetriever};
+use crate::types::redaction_grouping_types::FlowVisibleSpan;
 use crate::types::redaction_types::{
     PdfRenderer, Rect, RedactionFinderConfig, RedactionFinderOutput, RedactionMode,
     RedactionOccurrence, RedactionReport, UnderlyingTextHit,
 };
 use crate::types::runtime_defaults::{RASTER_HIGHPASS_DPI, RASTER_PREPASS_DPI};
 use crate::types::time::Instant;
-use serde::Serialize;
 
 const LINE_BUCKET_PT: f32 = 2.0;
 const Y_BAND_PADDING_PT: f32 = 2.0;
@@ -23,15 +26,6 @@ const MAX_CONTEXT_SPANS_PER_REDACTION: usize = 48;
 pub(crate) const CONTEXT_SPANS_META_KEY: &str = "context_spans_json_v1";
 type LineMatchScore = (i32, i32, i32, i32);
 type LineMatch = (Vec<usize>, Option<usize>, Option<usize>, LineMatchScore);
-
-#[derive(Debug, Clone, Serialize)]
-struct ContextSpanRecord {
-    text: String,
-    bbox: Rect,
-    line_bucket: i32,
-    role_hint: String,
-    source: String,
-}
 
 #[derive(Debug, Clone, Copy)]
 struct ScanPlan {
@@ -285,12 +279,13 @@ fn attach_underlying_text(
     occs: &mut [RedactionOccurrence],
     diagnostics: &mut Vec<String>,
 ) {
-    let page_redactions = occs
-        .iter_mut()
-        .filter(|occurrence| occurrence.page_index == page_index)
+    let page_redaction_indices = occs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, occurrence)| (occurrence.page_index == page_index).then_some(index))
         .collect::<Vec<_>>();
 
-    if page_redactions.is_empty() {
+    if page_redaction_indices.is_empty() {
         return;
     }
 
@@ -306,10 +301,41 @@ fn attach_underlying_text(
         return;
     }
 
-    for redaction in page_redactions {
+    let mut prepared = Vec::<PreparedFlowContext>::with_capacity(page_redaction_indices.len());
+    let mut context_by_index =
+        Vec::<(usize, Vec<UnderlyingTextHit>, Vec<FlowVisibleSpan>)>::with_capacity(
+            page_redaction_indices.len(),
+        );
+    for index in page_redaction_indices {
+        let redaction = &occs[index];
         let (context_hits, context_spans) =
             collect_context_hits_for_redaction(&hits, &redaction.bbox);
+        let left_context = context_hits
+            .first()
+            .map(|hit| hit.text.clone())
+            .unwrap_or_default();
+        let right_context = context_hits
+            .get(1)
+            .map(|hit| hit.text.clone())
+            .unwrap_or_default();
+        prepared.push(PreparedFlowContext {
+            index,
+            page_index,
+            bbox: redaction.bbox,
+            kind: redaction.kind.clone(),
+            left_context,
+            right_context,
+            context_spans: context_spans.clone(),
+        });
+        context_by_index.push((index, context_hits, context_spans));
+    }
+
+    let (grouped_flow, flow_memberships) = collect_redaction_flow_memberships(&prepared);
+
+    for (index, context_hits, context_spans) in context_by_index {
+        let redaction = &mut occs[index];
         redaction.underlying_text = context_hits;
+        redaction.flow_membership = flow_memberships.get(&index).cloned();
         if !context_spans.is_empty() {
             match serde_json::to_string(&context_spans) {
                 Ok(encoded) => {
@@ -324,12 +350,25 @@ fn attach_underlying_text(
             }
         }
     }
+    diagnostics.push(format!(
+        "page_index={page_index} flow_groups={} trusted_flow_redactions={} compound_segments={} dropped_groups={} dropped_redactions={}",
+        grouped_flow.groups.len(),
+        flow_memberships.len(),
+        grouped_flow
+            .groups
+            .iter()
+            .flat_map(|group| group.segments.iter())
+            .filter(|segment| matches!(segment.kind(), crate::types::redaction_grouping_types::RedactionSegmentKind::Compound))
+            .count(),
+        grouped_flow.dropped_group_count,
+        grouped_flow.dropped_redaction_count
+    ));
 }
 
 fn collect_context_hits_for_redaction(
     hits: &[UnderlyingTextHit],
     red_bbox: &Rect,
-) -> (Vec<UnderlyingTextHit>, Vec<ContextSpanRecord>) {
+) -> (Vec<UnderlyingTextHit>, Vec<FlowVisibleSpan>) {
     let red_center_y = (red_bbox.y0 + red_bbox.y1) * 0.5;
     let by_line = collect_line_candidates(hits, red_bbox, red_center_y);
     let by_line_for_cluster = by_line.clone();
@@ -639,8 +678,8 @@ fn build_context_span_records(
     hits: &[UnderlyingTextHit],
     red_bbox: &Rect,
     lines: &[(i32, Vec<usize>)],
-) -> Vec<ContextSpanRecord> {
-    let mut out = Vec::<ContextSpanRecord>::new();
+) -> Vec<FlowVisibleSpan> {
+    let mut out = Vec::<FlowVisibleSpan>::new();
     let mut seen = BTreeSet::<String>::new();
     for (line_bucket, line_indices) in lines {
         for idx in line_indices {
@@ -655,12 +694,25 @@ fn build_context_span_records(
             if !seen.insert(key) {
                 continue;
             }
-            out.push(ContextSpanRecord {
+            let reading_order = out.len();
+            out.push(FlowVisibleSpan {
+                item_id: format!("line{}_span{}", line_bucket, reading_order),
                 text: text.to_owned(),
                 bbox: hit.bbox,
+                reading_order,
                 line_bucket: *line_bucket,
-                role_hint: context_span_role_hint(hit, red_bbox).to_owned(),
+                role_hint: if hit.bbox.x1 <= red_bbox.x0 + 0.5_f32 {
+                    "left".to_owned()
+                } else if hit.bbox.x0 >= red_bbox.x1 - 0.5_f32 {
+                    "right".to_owned()
+                } else {
+                    "center".to_owned()
+                },
                 source: "line_cluster".to_owned(),
+                font_key: None,
+                font_name: None,
+                font_size_pt: None,
+                h_scale_pct: None,
             });
         }
     }
@@ -682,16 +734,6 @@ fn build_context_span_records(
         out.truncate(MAX_CONTEXT_SPANS_PER_REDACTION);
     }
     out
-}
-
-fn context_span_role_hint(hit: &UnderlyingTextHit, red_bbox: &Rect) -> &'static str {
-    if hit.bbox.x1 <= red_bbox.x0 + 0.5_f32 {
-        "left"
-    } else if hit.bbox.x0 >= red_bbox.x1 - 0.5_f32 {
-        "right"
-    } else {
-        "center"
-    }
 }
 
 fn context_span_dedup_key(hit: &UnderlyingTextHit, line_bucket: i32) -> String {

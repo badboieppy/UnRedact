@@ -103,6 +103,7 @@ pub fn extract_annotation_redactions(
             score,
             meta,
             underlying_text: vec![],
+            flow_membership: None,
         });
     }
 

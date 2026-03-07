@@ -938,6 +938,18 @@ fn collect_overlay_anchor_candidates(
 fn parse_overlay_context_spans(
     redaction: &crate::types::redaction_types::RedactionOccurrence,
 ) -> Vec<OverlayContextSpanRecord> {
+    if let Some(flow_membership) = redaction.flow_membership.as_ref() {
+        return flow_membership
+            .context_spans
+            .iter()
+            .map(|span| OverlayContextSpanRecord {
+                text: span.text.clone(),
+                bbox: span.bbox,
+                line_bucket: span.line_bucket,
+                role_hint: span.role_hint.clone(),
+            })
+            .collect::<Vec<_>>();
+    }
     let Some(raw) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
         return Vec::new();
     };
@@ -1066,6 +1078,15 @@ fn build_dense_anchor_row_flags(report: &RedactionReport) -> Vec<bool> {
     let redactions = &report.redactions;
     let mut out = vec![false; redactions.len()];
     for (index, current) in redactions.iter().enumerate() {
+        if current.flow_membership.as_ref().is_some_and(|flow| {
+            matches!(
+                flow.segment_kind,
+                crate::types::redaction_grouping_types::RedactionSegmentKind::Compound
+            )
+        }) {
+            out[index] = true;
+            continue;
+        }
         out[index] = redactions
             .iter()
             .enumerate()
@@ -1531,6 +1552,7 @@ mod tests {
                 score: 1.0_f32,
                 meta: std::collections::BTreeMap::new(),
                 underlying_text: vec![],
+                flow_membership: None,
             }],
             count: 1_u32,
             page_counts: std::collections::BTreeMap::from([(0_u32, 1_u32)]),
@@ -1559,6 +1581,7 @@ mod tests {
                         text: "and".to_owned(),
                     },
                 ],
+                flow_membership: None,
             }],
             count: 1_u32,
             page_counts: std::collections::BTreeMap::from([(0_u32, 1_u32)]),
@@ -1588,6 +1611,7 @@ mod tests {
                             text: "and".to_owned(),
                         },
                     ],
+                    flow_membership: None,
                 },
                 RedactionOccurrence {
                     page_index: 0_u32,
@@ -1607,6 +1631,7 @@ mod tests {
                             text: "and".to_owned(),
                         },
                     ],
+                    flow_membership: None,
                 },
             ],
             count: 2_u32,
@@ -1664,6 +1689,12 @@ mod tests {
                     left_anchor_confidence: None,
                     right_anchor_confidence: None,
                     row_anchor_confidence: None,
+                    flow_group_id: None,
+                    flow_segment_id: None,
+                    flow_segment_kind: None,
+                    flow_redaction_order: None,
+                    flow_group_redaction_count: None,
+                    flow_segment_redaction_count: None,
                     has_anchor_pair: true,
                 },
                 visual_compared_pixels: None,

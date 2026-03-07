@@ -1,3 +1,4 @@
+use crate::types::redaction_grouping_types::RedactionFlowMembership;
 use crate::types::runtime_defaults::RASTER_HIGHPASS_DPI;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -54,6 +55,8 @@ pub struct RedactionOccurrence {
     pub score: f32,
     pub meta: BTreeMap<String, String>,
     pub underlying_text: Vec<UnderlyingTextHit>,
+    #[serde(default)]
+    pub flow_membership: Option<RedactionFlowMembership>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

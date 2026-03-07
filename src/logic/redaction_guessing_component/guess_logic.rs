@@ -6,7 +6,6 @@ use super::joint_assignment::{apply_row_joint_assignment, apply_row_sequence_con
 use super::visual_logic::{apply_visual_scores_from_bytes, VisualGuessScoreConfig};
 use crate::data::dictionary_variant_data::build_dictionary_variants;
 use crate::data::fonts_data::FontsData;
-use crate::data::redaction_scan_data::CONTEXT_SPANS_META_KEY;
 use crate::data::typography_width_data::{
     build_typography_profile_from_pdf_bytes, fallback_typography_width,
     measure_text_width_from_profile,
@@ -25,7 +24,7 @@ use crate::types::time::Instant;
 use crate::types::typography_types::{
     TypographyMeasureInput, TypographyMeasuredWidth, TypographyProfile, TypographyWidthSource,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 pub struct RunGuessFromBytesRequest<'a> {
@@ -348,9 +347,11 @@ struct PairCandidate {
     left_idx: usize,
     right_idx: usize,
     font_penalty: u8,
+    line_alignment_penalty: u8,
     straddle_penalty: u8,
     overlap_penalty: u8,
     contains_center_penalty: u8,
+    pair_line_delta: f64,
     baseline_distance: f64,
     y_distance: f64,
     x_distance: f64,
@@ -418,6 +419,7 @@ struct SharedClusterTypography {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct GuessClusterKey {
     page_index: u32,
+    flow_group_id: Option<String>,
     left_anchor_text: String,
     font_key: String,
     font_size_bits: u32,
@@ -587,6 +589,30 @@ fn build_anchor_validated_guesses(
                     left_anchor_confidence: None,
                     right_anchor_confidence: None,
                     row_anchor_confidence: None,
+                    flow_group_id: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.group_id.clone()),
+                    flow_segment_id: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_id.clone()),
+                    flow_segment_kind: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_kind),
+                    flow_redaction_order: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.redaction_reading_order as u32),
+                    flow_group_redaction_count: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.group_redaction_count as u32),
+                    flow_segment_redaction_count: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_redaction_count as u32),
                     has_anchor_pair: false,
                 },
                 visual_compared_pixels: None,
@@ -925,7 +951,20 @@ fn row_context_rows_are_contiguous(left: &RedactionGuess, right: &RedactionGuess
 }
 
 fn row_context_rows_are_linked(left: &RedactionGuess, right: &RedactionGuess) -> bool {
+    if !same_flow_group(&left.context, &right.context) {
+        return false;
+    }
     row_context_rows_are_contiguous(left, right) || row_context_rows_are_contiguous(right, left)
+}
+
+fn same_flow_group(left: &GuessContext, right: &GuessContext) -> bool {
+    match (
+        left.flow_group_id.as_deref(),
+        right.flow_group_id.as_deref(),
+    ) {
+        (Some(left_group_id), Some(right_group_id)) => left_group_id == right_group_id,
+        _ => true,
+    }
 }
 
 fn apply_row_context_cluster(guesses: &mut [RedactionGuess], cluster: &[usize]) {
@@ -1130,6 +1169,7 @@ fn apply_cluster_consensus(guesses: &mut [RedactionGuess], use_effective_candida
         };
         let key = GuessClusterKey {
             page_index: guess.page_index,
+            flow_group_id: guess.context.flow_group_id.clone(),
             left_anchor_text: guess.context.left_anchor_text.clone(),
             font_key,
             font_size_bits: font_size_pt.to_bits(),
@@ -1418,6 +1458,30 @@ fn build_guess_for_anchor(
                     left_anchor_confidence: None,
                     right_anchor_confidence: None,
                     row_anchor_confidence: None,
+                    flow_group_id: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.group_id.clone()),
+                    flow_segment_id: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_id.clone()),
+                    flow_segment_kind: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_kind),
+                    flow_redaction_order: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.redaction_reading_order as u32),
+                    flow_group_redaction_count: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.group_redaction_count as u32),
+                    flow_segment_redaction_count: redaction
+                        .flow_membership
+                        .as_ref()
+                        .map(|value| value.segment_redaction_count as u32),
                     has_anchor_pair: true,
                 },
                 visual_compared_pixels: None,
@@ -1696,6 +1760,11 @@ fn build_guess_for_anchor(
         .take(candidate_cap)
         .cloned()
         .collect::<Vec<_>>();
+    let selected = if use_curated_name_prior {
+        inject_curated_completion_aliases(&selected)
+    } else {
+        selected
+    };
     let exact_matches = selected
         .iter()
         .filter(|candidate| candidate.raw_error_pt <= EXACT_MATCH_RAW_ERROR_EPSILON_PT)
@@ -1771,6 +1840,30 @@ fn build_guess_for_anchor(
             left_anchor_confidence: None,
             right_anchor_confidence: None,
             row_anchor_confidence: None,
+            flow_group_id: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.group_id.clone()),
+            flow_segment_id: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.segment_id.clone()),
+            flow_segment_kind: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.segment_kind),
+            flow_redaction_order: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.redaction_reading_order as u32),
+            flow_group_redaction_count: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.group_redaction_count as u32),
+            flow_segment_redaction_count: redaction
+                .flow_membership
+                .as_ref()
+                .map(|value| value.segment_redaction_count as u32),
             has_anchor_pair: true,
         },
         visual_compared_pixels: None,
@@ -1904,6 +1997,9 @@ fn build_pair_candidates(
                 u8::from(red_center_x < left_end || red_center_x > right_start);
             let y_distance = (run_center_y(left_run) - red_center_y).abs()
                 + (run_center_y(right_run) - red_center_y).abs();
+            let pair_line_delta = (run_center_y(left_run) - run_center_y(right_run)).abs() as f64;
+            let line_alignment_penalty =
+                u8::from(pair_line_delta > ROW_CONTEXT_SAME_LINE_MAX_Y_DELTA_PT);
             let baseline_distance = (left_run.bbox.y1 - redaction.bbox.y1).abs()
                 + (right_run.bbox.y1 - redaction.bbox.y1).abs();
             let x_distance = (redaction.bbox.x0 as f64 - left_end).abs()
@@ -1912,9 +2008,11 @@ fn build_pair_candidates(
                 left_idx,
                 right_idx,
                 font_penalty,
+                line_alignment_penalty,
                 straddle_penalty,
                 overlap_penalty,
                 contains_center_penalty,
+                pair_line_delta,
                 baseline_distance: baseline_distance as f64,
                 y_distance: y_distance as f64,
                 x_distance,
@@ -1930,6 +2028,17 @@ fn sort_pair_candidates(pairs: &mut [PairCandidate]) {
         left_pair
             .font_penalty
             .cmp(&right_pair.font_penalty)
+            .then_with(|| {
+                left_pair
+                    .line_alignment_penalty
+                    .cmp(&right_pair.line_alignment_penalty)
+            })
+            .then_with(|| {
+                left_pair
+                    .pair_line_delta
+                    .partial_cmp(&right_pair.pair_line_delta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| {
                 left_pair
                     .x_distance
@@ -2589,28 +2698,15 @@ fn expanded_raw_context(redaction: &RedactionOccurrence) -> (String, String) {
         .get(1)
         .map(|hit| normalize_transport_text(hit.text.as_str()))
         .unwrap_or_default();
-    let Some(raw_spans) = redaction.meta.get(CONTEXT_SPANS_META_KEY) else {
+    let Some(flow_membership) = redaction.flow_membership.as_ref() else {
         return (left, right);
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_spans) else {
-        return (left, right);
-    };
-    let Some(spans) = parsed.as_array() else {
-        return (left, right);
-    };
-    for span in spans.iter().take(24) {
-        let Some(text) = span
-            .get("text")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
+    for span in flow_membership.context_spans.iter().take(24) {
+        let text = span.text.trim();
+        if text.is_empty() {
             continue;
-        };
-        let role = span
-            .get("role_hint")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        }
+        let role = span.role_hint.as_str();
         if role == "left" {
             append_context_token(&mut left, text);
         } else if role == "right" {
@@ -2905,9 +3001,84 @@ fn curated_name_prior_set() -> &'static BTreeSet<String> {
     })
 }
 
+fn curated_completion_alias_map() -> &'static BTreeMap<String, String> {
+    static ALIASES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    ALIASES.get_or_init(|| {
+        let curated = curated_name_prior_set();
+        let mut candidates = BTreeMap::<String, BTreeSet<String>>::new();
+        for full_name in curated {
+            let parts = full_name.split_whitespace().collect::<Vec<_>>();
+            let Some(last) = parts.last().copied() else {
+                continue;
+            };
+            if parts.len() < 2 || last.len() < 6 {
+                continue;
+            }
+            for trim in 1..=3 {
+                if last.len() <= trim + 2 {
+                    continue;
+                }
+                let mut shortened = parts[..parts.len() - 1].to_vec();
+                shortened.push(&last[..last.len() - trim]);
+                let shortened_key = shortened.join(" ");
+                candidates
+                    .entry(shortened_key)
+                    .or_default()
+                    .insert(full_name.clone());
+            }
+        }
+
+        candidates
+            .into_iter()
+            .filter_map(|(shortened, full_names)| {
+                if full_names.len() == 1 {
+                    full_names
+                        .into_iter()
+                        .next()
+                        .map(|full_name| (shortened, full_name))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>()
+    })
+}
+
+fn inject_curated_completion_aliases(
+    selected: &[ScoredDictionaryCandidate],
+) -> Vec<ScoredDictionaryCandidate> {
+    let mut out = Vec::<ScoredDictionaryCandidate>::with_capacity(selected.len());
+    let mut seen = BTreeSet::<String>::new();
+    let aliases = curated_completion_alias_map();
+
+    for candidate in selected {
+        let normalized = candidate.text.trim().to_ascii_uppercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if seen.insert(normalized.clone()) {
+            out.push(candidate.clone());
+        }
+        let Some(alias) = aliases.get(&normalized) else {
+            continue;
+        };
+        if !seen.insert(alias.clone()) {
+            continue;
+        }
+
+        let mut alias_candidate = candidate.clone();
+        alias_candidate.text = alias.clone();
+        alias_candidate.raw_error_pt = candidate.raw_error_pt + 0.0001_f64;
+        alias_candidate.effective_error_pt = candidate.effective_error_pt + 0.0001_f64;
+        out.push(alias_candidate);
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{anchor_side_confidence, resolve_anchor_text_and_x};
+    use super::{anchor_side_confidence, curated_completion_alias_map, resolve_anchor_text_and_x};
     use crate::types::file_types::{FontTextRun, Rect};
     use crate::types::guess_types::{AnchorProjectionSource, AnchorSourceLabel, AnchorType};
     use crate::types::typography_types::TypographyProfile;
@@ -2998,5 +3169,14 @@ mod tests {
         assert!(run_prefix_char > run_prefix_measured);
         assert!(run_prefix_measured > run_prefix_proportional);
         assert!(run_prefix_proportional > synthetic);
+    }
+
+    #[test]
+    fn curated_completion_alias_map_promotes_unique_surname_completions() {
+        let aliases = curated_completion_alias_map();
+        assert_eq!(
+            aliases.get("NADIA MARCINKO").map(String::as_str),
+            Some("NADIA MARCINKOVA")
+        );
     }
 }

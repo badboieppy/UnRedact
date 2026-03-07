@@ -1215,6 +1215,7 @@ fn build_synthetic_redaction_report(input: &Path, targets: &[TargetCandidate]) -
             score: 1.0_f32,
             meta: BTreeMap::new(),
             underlying_text: vec![target.left_context.clone(), target.right_context.clone()],
+            flow_membership: None,
         });
         *page_counts.entry(target.page_index).or_insert(0_u32) += 1_u32;
     }

@@ -887,6 +887,7 @@ fn source_hits_for_synthetic(
                     score: 1.0_f32,
                     meta: BTreeMap::new(),
                     underlying_text: vec![left.clone(), right.clone()],
+                    flow_membership: None,
                 });
             }
         }
@@ -1791,6 +1792,7 @@ mod tests {
             score: 1.0_f32,
             meta: BTreeMap::new(),
             underlying_text: Vec::new(),
+            flow_membership: None,
         }
     }
 

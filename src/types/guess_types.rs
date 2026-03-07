@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::types::redaction_grouping_types::RedactionSegmentKind;
 use crate::types::redaction_types::Rect;
 use crate::types::runtime_defaults::{DEFAULT_VISUAL_SCORE_DPI, DEFAULT_VISUAL_SCORE_ENABLED};
 
@@ -135,6 +136,18 @@ pub struct GuessContext {
     pub right_anchor_confidence: Option<f32>,
     #[serde(default)]
     pub row_anchor_confidence: Option<f32>,
+    #[serde(default)]
+    pub flow_group_id: Option<String>,
+    #[serde(default)]
+    pub flow_segment_id: Option<String>,
+    #[serde(default)]
+    pub flow_segment_kind: Option<RedactionSegmentKind>,
+    #[serde(default)]
+    pub flow_redaction_order: Option<u32>,
+    #[serde(default)]
+    pub flow_group_redaction_count: Option<u32>,
+    #[serde(default)]
+    pub flow_segment_redaction_count: Option<u32>,
     #[serde(
         rename = "guessable",
         alias = "has_anchor_pair",
