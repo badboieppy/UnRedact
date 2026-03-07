@@ -55,11 +55,28 @@ fn anchor_signature(decisions: &[AnchorDecisionRecord]) -> Vec<String> {
 #[test]
 fn run_anchor_from_redactions_is_deterministic_for_fixed_input() {
     let input = Path::new("test_data/EFTA00101126.pdf");
-    let redactions_path =
-        Path::new("benchmark/user_issue_default_baseline/EFTA00101126.redactions.json");
     let pdf_bytes = std::fs::read(input)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
-    let redactions = load_redaction_report(redactions_path);
+    let output_dir = test_output_dir("integration_anchor_determinism");
+    std::fs::create_dir_all(&output_dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+    let outputs = run_from_paths(
+        input,
+        &output_dir,
+        None,
+        UnredactServiceConfig {
+            include_details: false,
+            enable_image_analysis: true,
+            guess: unredact::types::guess_types::GuessConfig {
+                visual_score: false,
+                ..unredact::types::guess_types::GuessConfig::default()
+            },
+            visualize: false,
+            visualizer: VisualizerConfig::default(),
+        },
+    )
+    .expect("pipeline run should succeed");
+    let redactions = load_redaction_report(&outputs.redactions_path);
     let diagnostics = ["integration_anchor_service=determinism_probe".to_owned()];
 
     let first = run_anchor_from_redactions(ToolingAnchorRequest {
