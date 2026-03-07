@@ -74,6 +74,34 @@ struct CandidateVisualScore {
     combined_gain: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum VisualRerankGate {
+    Eligible,
+    InsufficientOverlays,
+    InsufficientCandidates,
+    MissingBoundaryText,
+    InsufficientCandidateTexts,
+    NonFiniteGeometric,
+    TopScoreTooHigh,
+    BaseGapTooLarge,
+}
+
+impl VisualRerankGate {
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::InsufficientOverlays => "insufficient_overlays",
+            Self::InsufficientCandidates => "insufficient_candidates",
+            Self::MissingBoundaryText => "missing_boundary_text",
+            Self::InsufficientCandidateTexts => "insufficient_candidate_texts",
+            Self::NonFiniteGeometric => "non_finite_geometric",
+            Self::TopScoreTooHigh => "top_score_too_high",
+            Self::BaseGapTooLarge => "base_gap_too_large",
+        }
+    }
+}
+
 struct RowCandidateScoringInput<'a> {
     pdf_bytes: &'a [u8],
     page_index: u32,
@@ -236,6 +264,7 @@ fn apply_visual_scores_with_inputs(
     let mut rerank_gain_sum = 0.0_f64;
     let mut rerank_candidate_evals = 0_usize;
     let mut rerank_eval_ms = 0_u128;
+    let mut rerank_gate_counts = BTreeMap::<&'static str, usize>::new();
     let row_scoring_started = Instant::now();
     for (index, (guess, redaction)) in guesses
         .iter_mut()
@@ -307,7 +336,11 @@ fn apply_visual_scores_with_inputs(
 
         let top_before = top_guess_text(guess).map(|value| value.to_owned());
         let mut row_scored = false;
-        if rerank_enabled && should_visual_rerank_row(guess, overlays) {
+        let rerank_gate = visual_rerank_gate(guess, overlays);
+        *rerank_gate_counts
+            .entry(rerank_gate.as_str())
+            .or_insert(0_usize) += 1;
+        if rerank_enabled && rerank_gate == VisualRerankGate::Eligible {
             rerank_rows_considered += 1;
             let rerank_eval_started = Instant::now();
             match score_top_k_candidates_for_row(RowCandidateScoringInput {
@@ -464,6 +497,16 @@ fn apply_visual_scores_with_inputs(
         VISUAL_RERANK_MAX_EVAL_CANDIDATES,
         VISUAL_RERANK_BLEND_WEIGHT
     ));
+    let rerank_gate_summary = if rerank_gate_counts.is_empty() {
+        "none".to_owned()
+    } else {
+        rerank_gate_counts
+            .iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    diagnostics.push(format!("visual_rerank_gates={rerank_gate_summary}"));
     let rerank_mean_eval_ms_per_candidate = if rerank_candidate_evals == 0 {
         0.0_f64
     } else {
@@ -659,12 +702,12 @@ fn rerank_candidate_texts(guess: &RedactionGuess) -> Vec<String> {
     out
 }
 
-fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) -> bool {
+fn visual_rerank_gate(guess: &RedactionGuess, overlays: &[TextOverlay]) -> VisualRerankGate {
     if overlays.len() < 3 {
-        return false;
+        return VisualRerankGate::InsufficientOverlays;
     }
     if guess.candidates.len() < 2 {
-        return false;
+        return VisualRerankGate::InsufficientCandidates;
     }
     let mut ordered = overlays.to_vec();
     ordered.sort_by(|left, right| {
@@ -673,28 +716,32 @@ fn should_visual_rerank_row(guess: &RedactionGuess, overlays: &[TextOverlay]) ->
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let Some(left) = ordered.first() else {
-        return false;
+        return VisualRerankGate::InsufficientOverlays;
     };
     let Some(right) = ordered.last() else {
-        return false;
+        return VisualRerankGate::InsufficientOverlays;
     };
     if left.text.trim().is_empty() || right.text.trim().is_empty() {
-        return false;
+        return VisualRerankGate::MissingBoundaryText;
     }
 
     let texts = rerank_candidate_texts(guess);
     if texts.len() < 2 {
-        return false;
+        return VisualRerankGate::InsufficientCandidateTexts;
     }
     let top = geometric_score_for_text(guess, &texts[0]);
     let second = geometric_score_for_text(guess, &texts[1]);
     if !top.is_finite() || !second.is_finite() {
-        return false;
+        return VisualRerankGate::NonFiniteGeometric;
     }
     if top > VISUAL_RERANK_MAX_TOP_SCORE {
-        return false;
+        return VisualRerankGate::TopScoreTooHigh;
     }
-    (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP
+    if (top - second).abs() <= VISUAL_RERANK_MAX_BASE_GAP {
+        VisualRerankGate::Eligible
+    } else {
+        VisualRerankGate::BaseGapTooLarge
+    }
 }
 
 fn visual_quality_from_score(score: &RowPixelScore) -> f32 {
