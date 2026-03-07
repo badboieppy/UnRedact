@@ -8,3 +8,6 @@
 /BUNDLES
 /BUNDLE_SERIES
 **/.local-agent
+**/worktree*
+**/.*
+**/AGENTS*
