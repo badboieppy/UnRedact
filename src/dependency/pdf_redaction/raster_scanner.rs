@@ -62,7 +62,7 @@ const COMPONENT_DARK_FALLBACK_MIN_DARK_RATIO: f32 = 0.98;
 const COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_MEAN: f32 = 24.0;
 const COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_P95: f32 = 64.0;
 const GRAYSCALE_PROFILE_FALLBACK_MIN_FILL_RATIO_IN_BBOX: f32 = 0.72;
-const GRAYSCALE_PROFILE_FALLBACK_MIN_DARK_RATIO: f32 = 0.85;
+const GRAYSCALE_PROFILE_FALLBACK_MIN_DARK_RATIO: f32 = 0.75;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RasterSelectionDecision {
@@ -1074,11 +1074,13 @@ pub fn extract_raster_page_redactions(
                     .or_insert(0) += 1;
                 if rejection_samples.len() < 4 {
                     rejection_samples.push(format!(
-                        "reason={} fill={:.4} black={:.4} dark={:.4} spread_mean={:.3} spread_p95={:.3}",
+                        "reason={} fill={:.4} black={:.4} dark={:.4} split_dark={:.4} split_conf={:.4} spread_mean={:.3} spread_p95={:.3}",
                         component_profile.reason_code.as_str(),
                         component_profile.component_fill_ratio_in_bbox,
                         component_profile.component_black_ratio,
                         component_profile.component_dark_ratio,
+                        split_profile.dark_ratio,
+                        split_profile.split_confidence,
                         component_profile.component_channel_spread_mean,
                         component_profile.component_channel_spread_p95
                     ));
