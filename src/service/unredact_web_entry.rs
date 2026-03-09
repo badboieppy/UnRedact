@@ -23,6 +23,7 @@ pub struct UnredactWebOutputs {
     pub fonts_json: Vec<u8>,
     pub guesses_json: Vec<u8>,
     pub anchors_json: Vec<u8>,
+    pub diagnostics_json: Vec<u8>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
 
@@ -49,10 +50,16 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
     } else {
         0_u128
     };
-    outputs
-        .guesses
-        .diagnostics
-        .push(format!("timing_ms stage=visualize value={visualize_ms}"));
+    let mut visualize_record = crate::types::diagnostic_types::DiagnosticRecord::info(
+        "service",
+        "visualize",
+        "timing_ms",
+    );
+    visualize_record.metrics.insert(
+        "value_ms".to_owned(),
+        crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
+    );
+    outputs.guesses.diagnostics.push(visualize_record);
     outputs.visualization_payload = None;
     let encoded: EncodedPipelineOutputs = encode_outputs(&outputs)?;
     Ok(UnredactWebOutputs {
@@ -60,6 +67,7 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
         fonts_json: encoded.fonts_json,
         guesses_json: encoded.guesses_json,
         anchors_json: encoded.anchors_json,
+        diagnostics_json: encoded.diagnostics_json,
         visualized_pdf_bytes: encoded.visualized_pdf_bytes,
     })
 }

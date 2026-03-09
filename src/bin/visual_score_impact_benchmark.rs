@@ -8,6 +8,7 @@ use unredact::service::tooling_entry::{
     collect_underlying_text_hits_by_page, load_dictionary_from_bytes, run_guess_from_redactions,
     ToolingGuessRequest,
 };
+use unredact::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::redaction_types::{
     Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,
@@ -799,27 +800,18 @@ fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumu
     merged
 }
 
-fn visual_rerank_accumulator_from_diagnostics(diagnostics: &[String]) -> VisualRerankAccumulator {
+fn visual_rerank_accumulator_from_diagnostics(
+    diagnostics: &[DiagnosticRecord],
+) -> VisualRerankAccumulator {
     let mut acc = VisualRerankAccumulator::default();
-    for line in diagnostics {
-        let Some(rest) = line.strip_prefix("visual_rerank=") else {
+    for record in diagnostics {
+        if record.stage != "guess_visual_score" || record.code != "visual_rerank_summary" {
             continue;
-        };
-        let mut rows_considered = None::<usize>;
-        let mut rows_scored = None::<usize>;
-        let mut top1_changed = None::<usize>;
-        let mut mean_gain = None::<f64>;
-        for token in rest.split_whitespace() {
-            if let Some(value) = token.strip_prefix("rows_considered=") {
-                rows_considered = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("rows_scored=") {
-                rows_scored = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("top1_changed=") {
-                top1_changed = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("mean_gain=") {
-                mean_gain = value.parse::<f64>().ok();
-            }
         }
+        let rows_considered = metric_usize(record, "rows_considered");
+        let rows_scored = metric_usize(record, "rows_scored");
+        let top1_changed = metric_usize(record, "top1_changed");
+        let mean_gain = metric_f64(record, "mean_gain");
         let scored = rows_scored.unwrap_or(0_usize);
         acc.rows_considered += rows_considered.unwrap_or(0_usize);
         acc.rows_scored += scored;
@@ -872,26 +864,46 @@ fn visual_reason_counts_from_guesses(guesses: &[RedactionGuess]) -> BTreeMap<Str
     counts
 }
 
-fn visual_rerank_gate_counts_from_diagnostics(diagnostics: &[String]) -> BTreeMap<String, usize> {
+fn visual_rerank_gate_counts_from_diagnostics(
+    diagnostics: &[DiagnosticRecord],
+) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::<String, usize>::new();
-    for line in diagnostics {
-        let Some(rest) = line.strip_prefix("visual_rerank_gates=") else {
+    for record in diagnostics {
+        if record.stage != "guess_visual_score" {
+            continue;
+        }
+        let Some(reason) = metric_text(record, "gate_reason") else {
             continue;
         };
-        if rest == "none" {
-            continue;
-        }
-        for token in rest.split_whitespace() {
-            let Some((reason, count)) = token.split_once('=') else {
-                continue;
-            };
-            let Ok(parsed) = count.parse::<usize>() else {
-                continue;
-            };
-            *counts.entry(reason.to_owned()).or_insert(0_usize) += parsed;
-        }
+        let count = metric_usize(record, "count").unwrap_or(1_usize);
+        *counts.entry(reason).or_insert(0_usize) += count;
     }
     counts
+}
+
+fn metric_usize(record: &DiagnosticRecord, key: &str) -> Option<usize> {
+    let value = record.metrics.get(key)?;
+    match value {
+        DiagnosticValue::Integer(value) => usize::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn metric_f64(record: &DiagnosticRecord, key: &str) -> Option<f64> {
+    let value = record.metrics.get(key)?;
+    match value {
+        DiagnosticValue::Float(value) => Some(*value),
+        DiagnosticValue::Integer(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn metric_text(record: &DiagnosticRecord, key: &str) -> Option<String> {
+    let value = record.metrics.get(key)?;
+    match value {
+        DiagnosticValue::Text(value) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn merge_string_counts(items: &[BTreeMap<String, usize>]) -> BTreeMap<String, usize> {
@@ -1064,4 +1076,73 @@ fn format_count_map(counts: &BTreeMap<String, usize>) -> String {
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod visual_diagnostic_tests {
+    use super::{
+        metric_f64, metric_text, metric_usize, visual_rerank_accumulator_from_diagnostics,
+        visual_rerank_gate_counts_from_diagnostics,
+    };
+    use std::collections::BTreeMap;
+    use unredact::types::diagnostic_types::{DiagnosticLevel, DiagnosticRecord, DiagnosticValue};
+
+    fn record(
+        stage: &str,
+        code: &str,
+        metrics: BTreeMap<String, DiagnosticValue>,
+    ) -> DiagnosticRecord {
+        DiagnosticRecord {
+            layer: "logic".to_owned(),
+            stage: stage.to_owned(),
+            code: code.to_owned(),
+            level: DiagnosticLevel::Info,
+            message: None,
+            row_id: None,
+            redaction_id: None,
+            page_index: None,
+            bbox: None,
+            metrics,
+        }
+    }
+
+    #[test]
+    fn visual_rerank_accumulator_reads_typed_metrics() {
+        let mut metrics = BTreeMap::new();
+        metrics.insert("rows_considered".to_owned(), DiagnosticValue::Integer(7));
+        metrics.insert("rows_scored".to_owned(), DiagnosticValue::Integer(5));
+        metrics.insert("top1_changed".to_owned(), DiagnosticValue::Integer(2));
+        metrics.insert("mean_gain".to_owned(), DiagnosticValue::Float(0.25_f64));
+        let diagnostics = vec![record("guess_visual_score", "visual_rerank_summary", metrics)];
+
+        let acc = visual_rerank_accumulator_from_diagnostics(&diagnostics);
+        assert_eq!(acc.rows_considered, 7);
+        assert_eq!(acc.rows_scored, 5);
+        assert_eq!(acc.top1_changed, 2);
+        assert!((acc.weighted_gain_sum - 1.25_f64).abs() < 0.0001_f64);
+    }
+
+    #[test]
+    fn visual_rerank_gate_counts_ignores_unrelated_records() {
+        let diagnostics = vec![record(
+            "guess_visual_score",
+            "visual_rerank_summary",
+            BTreeMap::new(),
+        )];
+        let counts = visual_rerank_gate_counts_from_diagnostics(&diagnostics);
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn metric_helpers_return_expected_types() {
+        let mut metrics = BTreeMap::new();
+        metrics.insert("count".to_owned(), DiagnosticValue::Integer(3));
+        metrics.insert("mean_gain".to_owned(), DiagnosticValue::Float(0.5_f64));
+        metrics.insert("gate_reason".to_owned(), DiagnosticValue::Text("eligible".to_owned()));
+        let record = record("guess_visual_score", "visual_rerank_summary", metrics);
+
+        assert_eq!(metric_usize(&record, "count"), Some(3));
+        assert_eq!(metric_f64(&record, "mean_gain"), Some(0.5_f64));
+        assert_eq!(metric_text(&record, "gate_reason"), Some("eligible".to_owned()));
+    }
 }

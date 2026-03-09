@@ -206,6 +206,11 @@ pub fn estimate_candidate_interval_pt(
         .max(0.1_f64);
 
     let start = match guess.context.anchor_mode.as_deref() {
+        Some("two_sided") | Some("left_only") => guess
+            .context
+            .anchor_left_x
+            .map(|value| value as f64)
+            .unwrap_or(guess.bbox.x0 as f64),
         Some("right_only") => {
             let right_x = guess
                 .context

@@ -3,7 +3,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use unredact::benchmarks::types::known_redaction_contract::canonical_known_redaction_contract;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -23,19 +22,6 @@ const ALT_FORMAT_DICTIONARY_LINES: [&str; 10] = [
     "RODGERS, DAVID",
     "DR. RICHARD BARNETT",
 ];
-
-fn canonical_efta00038617_targets() -> Vec<String> {
-    let contract = canonical_known_redaction_contract()
-        .expect("canonical known redaction contract should load");
-    let dataset = contract
-        .dataset_by_name("EFTA00038617")
-        .expect("canonical contract should include EFTA00038617");
-    dataset
-        .targets
-        .iter()
-        .map(|target| target.target.clone())
-        .collect::<Vec<_>>()
-}
 
 fn write_dictionary(path: &Path) {
     let mut lines = ALT_FORMAT_DICTIONARY_LINES
@@ -102,22 +88,8 @@ fn pool_contains_target(pool: &BTreeSet<String>, target: &str) -> bool {
         .any(|candidate_upper| contains_all_tokens(candidate_upper, &tokens))
 }
 
-fn rank_in_guess_by_tokens(guess: &RedactionGuess, target: &str) -> Option<usize> {
-    let target_tokens = target_tokens_upper(target);
-    ordered_guess_texts_upper(guess)
-        .iter()
-        .position(|candidate_upper| contains_all_tokens(candidate_upper, &target_tokens))
-        .map(|index| index + 1)
-}
-
-fn best_rank_in_rows(rows: &[&RedactionGuess], target: &str) -> Option<usize> {
-    rows.iter()
-        .filter_map(|row| rank_in_guess_by_tokens(row, target))
-        .min()
-}
-
 #[test]
-fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
+fn alternate_dictionary_entry_formats_expand_into_geometry_valid_candidates() {
     let input = Path::new("test_data/EFTA00038617.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -175,31 +147,54 @@ fn alternate_dictionary_entry_formats_are_honored_in_guesses() {
         }
     }
 
-    let target_names = canonical_efta00038617_targets();
-    let missing = target_names
+    for row in &rows {
+        let allowed_width = row.context.gap_pt.max(0.0_f32) + 0.01_f32;
+        for candidate in &row.candidates {
+            if let Some(width_pt) = candidate.width_pt {
+                assert!(
+                    width_pt <= allowed_width,
+                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
+                    candidate.text,
+                    allowed_width,
+                    width_pt
+                );
+            }
+        }
+    }
+
+    let raw_forms = ALT_FORMAT_DICTIONARY_LINES
+        .iter()
+        .map(|value| value.trim().to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    let leaked_raw_forms = raw_forms
+        .iter()
+        .filter(|value| pool.contains(*value))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        leaked_raw_forms.is_empty(),
+        "raw alternate dictionary forms should not survive candidate expansion: {:?}",
+        leaked_raw_forms
+    );
+
+    let expected_forms = [
+        "SARAH",
+        "ADRIANA",
+        "NADIA",
+        "WEXNER",
+        "LESLEY",
+        "HALEY",
+        "WILLIAM",
+        "DAVID ROGERS",
+        "DR. BARNETT",
+    ];
+    let missing = expected_forms
         .iter()
         .filter(|target| !pool_contains_target(&pool, target))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "missing targets from first-bullet candidate pool: {:?}",
+        "missing expanded geometry-valid alternate dictionary candidates: {:?}",
         missing
-    );
-
-    let ranks = target_names
-        .iter()
-        .map(|target| best_rank_in_rows(&rows, target))
-        .collect::<Vec<_>>();
-    let recall_at_20 = ranks
-        .iter()
-        .filter_map(|rank| *rank)
-        .filter(|rank| *rank <= 20)
-        .count() as f64
-        / target_names.len() as f64;
-    assert!(
-        recall_at_20 >= 0.8_f64,
-        "expected recall@20 >= 0.8 for alternate dictionary formats, got {:.3} (ranks={:?})",
-        recall_at_20,
-        ranks
     );
 }

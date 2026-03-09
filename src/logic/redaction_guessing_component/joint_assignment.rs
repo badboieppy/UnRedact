@@ -331,9 +331,9 @@ fn group_has_joint_assignment_signal(group: &[usize], guesses: &[RedactionGuess]
 }
 
 fn joint_assignment_rows_are_compatible(left: &RedactionGuess, right: &RedactionGuess) -> bool {
-    let same_font_key = match (
-        left.context.anchor_font_key.as_deref(),
-        right.context.anchor_font_key.as_deref(),
+    let same_font_name = match (
+        left.context.anchor_font_name.as_deref(),
+        right.context.anchor_font_name.as_deref(),
     ) {
         (Some(l), Some(r)) => l == r,
         _ => true,
@@ -359,7 +359,7 @@ fn joint_assignment_rows_are_compatible(left: &RedactionGuess, right: &Redaction
         (Some(l), Some(r)) => (l - r).abs() <= 5.0_f32,
         _ => true,
     };
-    same_font_key && similar_font_size && similar_h_scale && close_row_bias
+    same_font_name && similar_font_size && similar_h_scale && close_row_bias
 }
 
 fn solve_joint_assignment_group(

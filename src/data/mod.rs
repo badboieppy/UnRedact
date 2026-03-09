@@ -1,13 +1,16 @@
 pub(crate) mod dictionary_data;
 pub(crate) mod dictionary_variant_data;
 pub(crate) mod fonts_data;
+pub(crate) mod guess_candidate_data;
+pub(crate) mod helpers;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod local_file_workflow_data;
+pub(crate) mod redaction_evidence_data;
 pub(crate) mod model;
 pub(crate) mod redaction_scan_data;
 pub(crate) mod redactions_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod result_data_publisher;
-pub(crate) mod typography_width_data;
+pub(crate) mod types;
 pub(crate) mod visual_score_data;
 pub(crate) mod visualization_data;

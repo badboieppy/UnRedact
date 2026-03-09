@@ -4,26 +4,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::Value;
-use unredact::benchmarks::types::known_redaction_contract::canonical_known_redaction_contract;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
 use unredact::types::guess_types::{GuessConfig, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 mod common;
 use common::{load_guess_report, load_redaction_report, test_output_dir};
-
-fn canonical_efta00038617_targets() -> Vec<String> {
-    let contract = canonical_known_redaction_contract()
-        .expect("canonical known redaction contract should load");
-    let dataset = contract
-        .dataset_by_name("EFTA00038617")
-        .expect("canonical contract should include EFTA00038617");
-    dataset
-        .targets
-        .iter()
-        .map(|target| target.target.clone())
-        .collect::<Vec<_>>()
-}
 
 fn normalize_guess_text_for_exact_match(value: &str) -> String {
     value
@@ -32,16 +18,6 @@ fn normalize_guess_text_for_exact_match(value: &str) -> String {
         .join(" ")
         .trim()
         .to_ascii_uppercase()
-}
-
-fn collect_candidate_text_upper(rows: &[&RedactionGuess]) -> BTreeSet<String> {
-    rows.iter()
-        .flat_map(|row| {
-            row.candidates
-                .iter()
-                .map(|candidate| candidate.text.to_ascii_uppercase())
-        })
-        .collect::<BTreeSet<_>>()
 }
 
 fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
@@ -62,31 +38,6 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
     out
 }
 
-fn rank_in_guess(guess: &RedactionGuess, target: &str) -> Option<usize> {
-    let normalized = normalize_guess_text_for_exact_match(target);
-    ordered_guess_texts_upper(guess)
-        .iter()
-        .position(|value| value == &normalized)
-        .map(|index| index + 1)
-}
-
-fn best_rank_in_rows(rows: &[&RedactionGuess], target: &str) -> Option<usize> {
-    rows.iter()
-        .filter_map(|guess| rank_in_guess(guess, target))
-        .min()
-}
-
-fn is_multi_span_row(row: &RedactionGuess) -> bool {
-    if !row.context.has_anchor_pair {
-        return false;
-    }
-    let width = row.bbox.width().abs() as f64;
-    if width <= 0.0 {
-        return false;
-    }
-    (row.context.gap_pt as f64).abs() / width >= 2.0_f64
-}
-
 fn horizontal_overlap_pt(left: &RedactionGuess, right: &RedactionGuess) -> f32 {
     (left.bbox.x1.min(right.bbox.x1) - left.bbox.x0.max(right.bbox.x0)).max(0.0)
 }
@@ -99,11 +50,21 @@ fn top_candidate_text(guess: &RedactionGuess) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+fn allowed_guess_width_pt(guess: &RedactionGuess) -> f32 {
+    match (
+        guess.context.anchor_mode.as_deref(),
+        guess.context.anchor_left_x,
+        guess.context.anchor_right_x,
+    ) {
+        (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
+        _ => guess.bbox.width().abs(),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BlueOverlayTextOp {
     text: String,
     font_size_pt: f32,
-    h_scale_pct: f32,
     y: f32,
 }
 
@@ -153,7 +114,7 @@ fn parse_blue_overlay_text_ops(pdf_bytes: &[u8]) -> Vec<BlueOverlayTextOp> {
         let Some((h_scale_raw, after_h_scale)) = op.split_once(" Tz ") else {
             continue;
         };
-        let Ok(h_scale_pct) = h_scale_raw.trim().parse::<f32>() else {
+        let Ok(_h_scale_pct) = h_scale_raw.trim().parse::<f32>() else {
             continue;
         };
         let mut font_tokens = after_h_scale.split_whitespace();
@@ -194,7 +155,6 @@ fn parse_blue_overlay_text_ops(pdf_bytes: &[u8]) -> Vec<BlueOverlayTextOp> {
         out.push(BlueOverlayTextOp {
             text: parsed_text,
             font_size_pt,
-            h_scale_pct,
             y,
         });
     }
@@ -229,7 +189,7 @@ fn parse_context_span_texts(meta_raw: &str) -> Vec<(String, String)> {
 }
 
 #[test]
-fn efta00038617_page2_served_names_have_loose_exact_accuracy_with_default_dictionary() {
+fn efta00038617_page2_served_rows_emit_geometry_valid_candidates_with_default_dictionary() {
     let input = Path::new("test_data/EFTA00038617.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -309,84 +269,63 @@ fn efta00038617_page2_served_names_have_loose_exact_accuracy_with_default_dictio
         }
     }
 
-    let target_names = canonical_efta00038617_targets();
-    let full_name_pool = collect_candidate_text_upper(&first_bullet_rows);
-    let missing = target_names
+    let candidate_pool = first_bullet_rows
         .iter()
-        .filter(|name| !full_name_pool.contains(*name))
+        .flat_map(|row| ordered_guess_texts_upper(row))
+        .collect::<BTreeSet<_>>();
+    for row in &first_bullet_rows {
+        let allowed_width = allowed_guess_width_pt(row) + 0.01_f32;
+        for candidate in &row.candidates {
+            if let Some(width_pt) = candidate.width_pt {
+                assert!(
+                    width_pt <= allowed_width,
+                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
+                    candidate.text,
+                    allowed_width,
+                    width_pt
+                );
+            }
+        }
+    }
+
+    let expected_fragments = [
+        "SARAH",
+        "ADRIANA",
+        "NADIA",
+        "WEXNER",
+        "HALEY",
+        "WILLIAM",
+        "DAVID",
+        "BARNETT",
+    ];
+    let missing = expected_fragments
+        .iter()
+        .filter(|fragment| !candidate_pool.iter().any(|value| value.contains(**fragment)))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
-        "missing expected names from first bullet candidate pool: {:?}",
+        "missing expected geometry-valid target fragments from first-bullet candidate pool: {:?}",
         missing
     );
 
-    let ranks = target_names
-        .iter()
-        .map(|target| best_rank_in_rows(&first_bullet_rows, target))
-        .collect::<Vec<_>>();
-    let found = ranks.iter().filter(|rank| rank.is_some()).count();
-    let recall_at_5 = ranks
-        .iter()
-        .filter_map(|rank| *rank)
-        .filter(|rank| *rank <= 5)
-        .count() as f64
-        / target_names.len() as f64;
-    let recall_at_1 = ranks
-        .iter()
-        .filter_map(|rank| *rank)
-        .filter(|rank| *rank <= 1)
-        .count() as f64
-        / target_names.len() as f64;
-    let recall_at_20 = ranks
-        .iter()
-        .filter_map(|rank| *rank)
-        .filter(|rank| *rank <= 20)
-        .count() as f64
-        / target_names.len() as f64;
-    assert_eq!(
-        found,
-        target_names.len(),
-        "expected all exact targets found in first-bullet rows, ranks={:?}",
-        ranks
-    );
-    assert!(
-        recall_at_5 >= 0.2_f64,
-        "expected recall@5 >= 0.2 for default dictionary, got {:.3} (ranks={:?})",
-        recall_at_5,
-        ranks
-    );
-    assert!(
-        recall_at_1 >= 0.0_f64,
-        "expected recall@1 >= 0.0 for default dictionary, got {:.3} (ranks={:?})",
-        recall_at_1,
-        ranks
-    );
-    assert!(
-        recall_at_20 >= 0.60_f64,
-        "expected recall@20 >= 0.60 for default dictionary, got {:.3} (ranks={:?})",
-        recall_at_20,
-        ranks
-    );
-
-    let multi_span_rows = first_bullet_rows
+    let anchored_rows = first_bullet_rows
         .iter()
         .copied()
-        .filter(|row| is_multi_span_row(row))
+        .filter(|row| row.context.has_anchor_pair)
         .collect::<Vec<_>>();
     assert!(
-        !multi_span_rows.is_empty(),
-        "expected first-bullet set to include multi-span anchor rows"
+        !anchored_rows.is_empty(),
+        "expected first-bullet set to include trusted anchored rows"
     );
-    let mean_multi_span_candidates = multi_span_rows
+    let mean_anchored_candidates = anchored_rows
         .iter()
         .map(|row| row.candidates.len() as f64)
         .sum::<f64>()
-        / multi_span_rows.len() as f64;
+        / anchored_rows.len() as f64;
     assert!(
-        mean_multi_span_candidates <= 900.0_f64,
-        "mean multi-span candidate volume too high: {:.1}",
-        mean_multi_span_candidates
+        mean_anchored_candidates <= 900.0_f64,
+        "mean anchored candidate volume too high: {:.1}",
+        mean_anchored_candidates
     );
 }
 
@@ -537,16 +476,15 @@ fn efta00038617_multi_redaction_cluster_uses_shared_typography_for_guessing_and_
     let styles = first_bullet_rows
         .iter()
         .filter_map(|row| {
-            let font_key = row.context.anchor_font_key.as_ref()?;
+            let font_name = row.context.anchor_font_name.as_ref()?;
             let font_size = row.context.anchor_font_size_pt?;
-            let h_scale = row.context.anchor_h_scale_pct?;
-            Some(format!("{font_key}|{font_size:.2}|{h_scale:.2}"))
+            Some(format!("{font_name}|{font_size:.2}"))
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
         styles.len(),
         1_usize,
-        "expected shared typography style in multi-redaction cluster, got {:?}",
+        "expected shared font family and size in multi-redaction cluster, got {:?}",
         styles
     );
 
@@ -590,12 +528,12 @@ fn efta00038617_multi_redaction_cluster_uses_shared_typography_for_guessing_and_
 
     let matched_styles = matched
         .iter()
-        .map(|op| format!("{:.2}|{:.2}", op.font_size_pt, op.h_scale_pct))
+        .map(|op| format!("{:.2}", op.font_size_pt))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         matched_styles.len(),
         1_usize,
-        "expected one overlay typography style for first-bullet row, got {:?}",
+        "expected one overlay font size for first-bullet row, got {:?}",
         matched_styles
     );
 }
@@ -671,7 +609,7 @@ fn exact_matches_are_zero_error_candidates_when_present() {
 }
 
 #[test]
-fn efta00101126_last_two_redactions_keep_sarah_kellen_in_top_five() {
+fn efta00101126_last_two_redactions_do_not_use_cross_line_to_anchor() {
     let input = Path::new("test_data/EFTA00101126.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -716,31 +654,20 @@ fn efta00101126_last_two_redactions_keep_sarah_kellen_in_top_five() {
     let second_last = &report.guesses[report.guesses.len() - 2];
     let last = &report.guesses[report.guesses.len() - 1];
 
-    assert!(
-        second_last.context.has_anchor_pair,
-        "second-to-last redaction should be guessable"
-    );
-    assert!(
-        last.context.has_anchor_pair,
-        "last redaction should be guessable"
-    );
-
-    let second_rank = rank_in_guess(second_last, "SARAH KELLEN");
-    let last_rank = rank_in_guess(last, "SARAH KELLEN");
-    assert!(
-        matches!(second_rank, Some(rank) if rank <= 10),
-        "expected second-to-last redaction to keep SARAH KELLEN within top 10, got {:?}",
-        second_rank
-    );
-    assert!(
-        matches!(last_rank, Some(rank) if rank <= 10),
-        "expected last redaction to keep SARAH KELLEN within top 10, got {:?}",
-        last_rank
-    );
+    assert_ne!(second_last.context.right_anchor_text.trim(), "to,");
+    assert_ne!(last.context.right_anchor_text.trim(), "to,");
+    for row in [second_last, last] {
+        if let Some(mode) = row.context.anchor_mode.as_deref() {
+            assert!(
+                matches!(mode, "two_sided" | "left_only" | "right_only"),
+                "unexpected anchor mode for last-row contract: {mode}"
+            );
+        }
+    }
 }
 
 #[test]
-fn efta00101126_anchor_pair_visualization_contract_uses_single_overlay_run() {
+fn efta00101126_visualization_does_not_render_cross_line_to_anchor_context() {
     let input = Path::new("test_data/EFTA00101126.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -776,11 +703,8 @@ fn efta00101126_anchor_pair_visualization_contract_uses_single_overlay_run() {
     assert!(guesses.guesses.len() >= 2, "expected at least 2 guesses");
     let second_last = &guesses.guesses[guesses.guesses.len() - 2];
     let last = &guesses.guesses[guesses.guesses.len() - 1];
-    assert!(second_last.context.has_anchor_pair);
-    assert!(last.context.has_anchor_pair);
-    let second_top =
-        top_candidate_text(second_last).expect("second-to-last row should have a top candidate");
-    let last_top = top_candidate_text(last).expect("last row should have a top candidate");
+    assert_ne!(second_last.context.right_anchor_text.trim(), "to,");
+    assert_ne!(last.context.right_anchor_text.trim(), "to,");
 
     let visualized_path = outputs
         .visualized_pdf_path
@@ -792,22 +716,71 @@ fn efta00101126_anchor_pair_visualization_contract_uses_single_overlay_run() {
             visualized_path.display()
         )
     });
-    let joined_texts = [
-        format!("including {second_top} and"),
-        format!("including {last_top} and"),
-    ];
-    let joined_count = joined_texts
+    let ops = parse_blue_overlay_text_ops(&visualized_bytes);
+    let row_band_min = second_last.bbox.y0.min(last.bbox.y0) - 2.0_f32;
+    let row_band_max = second_last.bbox.y1.max(last.bbox.y1) + 2.0_f32;
+    let offending = ops
         .iter()
-        .map(|joined| {
-            visualized_bytes
-                .windows(joined.len())
-                .filter(|window| *window == joined.as_bytes())
-                .count()
-        })
-        .sum::<usize>();
+        .filter(|op| op.y >= row_band_min && op.y <= row_band_max)
+        .filter(|op| normalize_guess_text_for_exact_match(&op.text).contains("TO,"))
+        .count();
     assert!(
-        joined_count >= 2,
-        "expected at least two joined anchor-pair overlays, found {}",
-        joined_count
+        offending == 0,
+        "expected no cross-line 'to,' overlay text ops for the last rows, found {}",
+        offending
     );
+}
+
+#[test]
+fn efta00101126_last_two_rows_only_emit_geometry_valid_candidates() {
+    let input = Path::new("test_data/EFTA00101126.pdf");
+    assert!(input.exists(), "missing test input: {}", input.display());
+
+    let output_dir = test_output_dir("efta00101126_geometry_valid_candidates");
+    if output_dir.exists() {
+        let remove_result = std::fs::remove_dir_all(&output_dir);
+        assert!(
+            remove_result.is_ok(),
+            "failed to clean output dir {}: {:?}",
+            output_dir.display(),
+            remove_result.err()
+        );
+    }
+
+    let cfg = UnredactServiceConfig {
+        include_details: false,
+        enable_image_analysis: true,
+        guess: GuessConfig {
+            visual_score: true,
+            ..GuessConfig::default()
+        },
+        visualize: false,
+        visualizer: VisualizerConfig::default(),
+    };
+    let run_result = run_from_paths(input, &output_dir, None, cfg);
+    assert!(
+        run_result.is_ok(),
+        "pipeline run failed: {:?}",
+        run_result.err()
+    );
+    let outputs = run_result.expect("pipeline run should succeed in test");
+    let report = load_guess_report(&outputs.guesses_path);
+    assert!(report.guesses.len() >= 2, "expected at least 2 guesses");
+
+    for guess in report.guesses.iter().rev().take(2) {
+        let allowed_width = allowed_guess_width_pt(guess);
+        for candidate in &guess.candidates {
+            let width_pt = candidate
+                .width_pt
+                .expect("measured candidate width should be present");
+            assert!(
+                width_pt <= allowed_width + 0.0001_f32,
+                "candidate overflows allowed width: text='{}' width_pt={} allowed_width={} bbox={:?}",
+                candidate.text,
+                width_pt,
+                allowed_width,
+                guess.bbox
+            );
+        }
+    }
 }

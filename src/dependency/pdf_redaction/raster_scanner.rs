@@ -57,12 +57,6 @@ const COMPONENT_MIN_BLACK_RATIO: f32 = 0.72;
 const COMPONENT_MIN_DARK_RATIO: f32 = 0.90;
 const COMPONENT_MAX_CHANNEL_SPREAD_MEAN: f32 = 12.0;
 const COMPONENT_MAX_CHANNEL_SPREAD_P95: f32 = 32.0;
-const COMPONENT_DARK_FALLBACK_MIN_FILL_RATIO_IN_BBOX: f32 = 0.72;
-const COMPONENT_DARK_FALLBACK_MIN_DARK_RATIO: f32 = 0.98;
-const COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_MEAN: f32 = 24.0;
-const COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_P95: f32 = 64.0;
-const GRAYSCALE_PROFILE_FALLBACK_MIN_FILL_RATIO_IN_BBOX: f32 = 0.72;
-const GRAYSCALE_PROFILE_FALLBACK_MIN_DARK_RATIO: f32 = 0.75;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RasterSelectionDecision {
@@ -83,7 +77,6 @@ impl RasterSelectionDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum RasterSelectionReasonCode {
     SelectedBlackComponent,
-    SelectedDenseDarkComponent,
     RejectedNoDarkComponent,
     RejectedLowFillRatio,
     RejectedLowBlackRatio,
@@ -96,7 +89,6 @@ impl RasterSelectionReasonCode {
     fn as_str(self) -> &'static str {
         match self {
             Self::SelectedBlackComponent => "selected_black_component",
-            Self::SelectedDenseDarkComponent => "selected_dense_dark_component",
             Self::RejectedNoDarkComponent => "rejected_no_dark_component",
             Self::RejectedLowFillRatio => "rejected_low_fill_ratio",
             Self::RejectedLowBlackRatio => "rejected_low_black_ratio",
@@ -813,40 +805,20 @@ fn profile_raster_component(
         100,
     ) as f32;
 
-    let within_primary_spread = component_channel_spread_mean <= COMPONENT_MAX_CHANNEL_SPREAD_MEAN
-        && component_channel_spread_p95 <= COMPONENT_MAX_CHANNEL_SPREAD_P95;
-    let within_dark_fallback_spread = component_channel_spread_mean
-        <= COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_MEAN
-        && component_channel_spread_p95 <= COMPONENT_DARK_FALLBACK_MAX_CHANNEL_SPREAD_P95;
-
     let reason_code = if component_fill_ratio_in_bbox < COMPONENT_MIN_FILL_RATIO_IN_BBOX {
         RasterSelectionReasonCode::RejectedLowFillRatio
-    } else if component_black_ratio >= COMPONENT_MIN_BLACK_RATIO {
-        if within_primary_spread {
-            RasterSelectionReasonCode::SelectedBlackComponent
-        } else {
-            RasterSelectionReasonCode::RejectedHighChannelSpread
-        }
-    } else if component_fill_ratio_in_bbox >= COMPONENT_DARK_FALLBACK_MIN_FILL_RATIO_IN_BBOX
-        && component_dark_ratio >= COMPONENT_DARK_FALLBACK_MIN_DARK_RATIO
-    {
-        if within_dark_fallback_spread {
-            RasterSelectionReasonCode::SelectedDenseDarkComponent
-        } else {
-            RasterSelectionReasonCode::RejectedHighChannelSpread
-        }
+    } else if component_black_ratio < COMPONENT_MIN_BLACK_RATIO {
+        RasterSelectionReasonCode::RejectedLowBlackRatio
     } else if component_dark_ratio < COMPONENT_MIN_DARK_RATIO {
         RasterSelectionReasonCode::RejectedLowDarkRatio
-    } else if !within_primary_spread {
+    } else if component_channel_spread_mean > COMPONENT_MAX_CHANNEL_SPREAD_MEAN
+        || component_channel_spread_p95 > COMPONENT_MAX_CHANNEL_SPREAD_P95
+    {
         RasterSelectionReasonCode::RejectedHighChannelSpread
     } else {
-        RasterSelectionReasonCode::RejectedLowBlackRatio
-    };
-    let decision = if matches!(
-        reason_code,
         RasterSelectionReasonCode::SelectedBlackComponent
-            | RasterSelectionReasonCode::SelectedDenseDarkComponent
-    ) {
+    };
+    let decision = if reason_code == RasterSelectionReasonCode::SelectedBlackComponent {
         RasterSelectionDecision::Selected
     } else {
         RasterSelectionDecision::Rejected
@@ -995,7 +967,6 @@ pub fn extract_raster_page_redactions(
     let mut out = Vec::new();
     let mut pre_filter_candidate_count = 0_usize;
     let mut rejected_reason_counts = BTreeMap::<RasterSelectionReasonCode, usize>::new();
-    let mut rejection_samples = Vec::<String>::new();
     for det in regions.regions {
         let profile = dark_run_profile_for_region(
             &capture.gray,
@@ -1044,18 +1015,7 @@ pub fn extract_raster_page_redactions(
                 capture.height_px as usize,
                 &split_region,
             );
-            let grayscale_profile_fallback = !component_profile.is_selected()
-                && component_profile.component_fill_ratio_in_bbox
-                    >= GRAYSCALE_PROFILE_FALLBACK_MIN_FILL_RATIO_IN_BBOX
-                && split_profile.dark_ratio >= GRAYSCALE_PROFILE_FALLBACK_MIN_DARK_RATIO
-                && matches!(
-                    component_profile.reason_code,
-                    RasterSelectionReasonCode::RejectedLowBlackRatio
-                        | RasterSelectionReasonCode::RejectedLowDarkRatio
-                        | RasterSelectionReasonCode::RejectedHighChannelSpread
-                );
-
-            let mut meta = build_raster_redaction_meta(
+            let meta = build_raster_redaction_meta(
                 DetailPolicy::new(cfg.include_details),
                 cfg,
                 &capture,
@@ -1068,32 +1028,11 @@ pub fn extract_raster_page_redactions(
                 },
             );
 
-            if !component_profile.is_selected() && !grayscale_profile_fallback {
+            if !component_profile.is_selected() {
                 *rejected_reason_counts
                     .entry(component_profile.reason_code)
                     .or_insert(0) += 1;
-                if rejection_samples.len() < 4 {
-                    rejection_samples.push(format!(
-                        "reason={} fill={:.4} black={:.4} dark={:.4} split_dark={:.4} split_conf={:.4} spread_mean={:.3} spread_p95={:.3}",
-                        component_profile.reason_code.as_str(),
-                        component_profile.component_fill_ratio_in_bbox,
-                        component_profile.component_black_ratio,
-                        component_profile.component_dark_ratio,
-                        split_profile.dark_ratio,
-                        split_profile.split_confidence,
-                        component_profile.component_channel_spread_mean,
-                        component_profile.component_channel_spread_p95
-                    ));
-                }
                 continue;
-            }
-
-            if grayscale_profile_fallback {
-                meta.insert("black_filter_decision".to_owned(), "selected".to_owned());
-                meta.insert(
-                    "black_filter_reason_code".to_owned(),
-                    "selected_grayscale_profile_fallback".to_owned(),
-                );
             }
 
             out.push(RedactionOccurrence {
@@ -1109,13 +1048,8 @@ pub fn extract_raster_page_redactions(
 
     if pre_filter_candidate_count > 0 && out.is_empty() {
         let rejected_breakdown = format_rejection_breakdown(&rejected_reason_counts);
-        let rejection_sample_summary = if rejection_samples.is_empty() {
-            "none".to_owned()
-        } else {
-            rejection_samples.join(" | ")
-        };
         return Err(format!(
-            "raster_black_filter_rejected_all_candidates page_index={page_index} pre_filter_candidate_count={pre_filter_candidate_count} rejected_breakdown={rejected_breakdown} rejection_samples={rejection_sample_summary}"
+            "raster_black_filter_rejected_all_candidates page_index={page_index} pre_filter_candidate_count={pre_filter_candidate_count} rejected_breakdown={rejected_breakdown}"
         ));
     }
 
@@ -1362,56 +1296,6 @@ mod tests {
         assert_eq!(
             profile.reason_code,
             RasterSelectionReasonCode::RejectedHighChannelSpread
-        );
-    }
-
-    #[test]
-    fn component_profile_selects_dense_dark_gray_component_without_true_black_pixels() {
-        let width = 18_usize;
-        let height = 10_usize;
-        let mut rgba = make_rgba_canvas(width, height, (255, 255, 255, 255));
-        paint_rect(&mut rgba, width, 4, 2, 14, 8, (90, 90, 90, 255));
-        let gray = rgba_to_grayscale(&rgba, width as u32, height as u32);
-        let region = DarkRegion {
-            x0_px: 3,
-            y0_px: 1,
-            x1_px: 14,
-            y1_px: 8,
-            avg_luminance: 90.0,
-            area_fraction: 0.2,
-            score: 0.7,
-        };
-
-        let profile = profile_raster_component(&rgba, &gray, width, height, &region);
-        assert!(profile.is_selected());
-        assert_eq!(
-            profile.reason_code,
-            RasterSelectionReasonCode::SelectedDenseDarkComponent
-        );
-    }
-
-    #[test]
-    fn component_profile_selects_dense_dark_component_with_moderate_spread() {
-        let width = 18_usize;
-        let height = 10_usize;
-        let mut rgba = make_rgba_canvas(width, height, (255, 255, 255, 255));
-        paint_rect(&mut rgba, width, 4, 2, 14, 8, (110, 96, 82, 255));
-        let gray = rgba_to_grayscale(&rgba, width as u32, height as u32);
-        let region = DarkRegion {
-            x0_px: 3,
-            y0_px: 1,
-            x1_px: 14,
-            y1_px: 8,
-            avg_luminance: 96.0,
-            area_fraction: 0.2,
-            score: 0.7,
-        };
-
-        let profile = profile_raster_component(&rgba, &gray, width, height, &region);
-        assert!(profile.is_selected());
-        assert_eq!(
-            profile.reason_code,
-            RasterSelectionReasonCode::SelectedDenseDarkComponent
         );
     }
 }

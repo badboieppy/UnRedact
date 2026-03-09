@@ -1,0 +1,15 @@
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\deps\serde-8ff233df8c2bbfe9.d: C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\build\serde-57df1c8dd470aa03\out/private.rs
+
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\deps\libserde-8ff233df8c2bbfe9.rlib: C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\build\serde-57df1c8dd470aa03\out/private.rs
+
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\deps\libserde-8ff233df8c2bbfe9.rmeta: C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\build\serde-57df1c8dd470aa03\out/private.rs
+
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\release\build\serde-57df1c8dd470aa03\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\jkpri\\.codex\\worktrees\\22f4\\UnRedact\\web_bindings\\target\\wasm32-unknown-unknown\\release\\build\\serde-57df1c8dd470aa03\\out
+# env-dep:wasm

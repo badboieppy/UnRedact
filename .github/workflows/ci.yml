@@ -17,17 +17,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --release --all-features
 
       - name: Benchmark smoke - guess accuracy
         run: >
-          cargo run --features cli-entry --bin guess_accuracy_benchmark --
+          cargo run --release --features cli-entry --bin guess_accuracy_benchmark --
           --out benchmark/ci_guess_accuracy.json
           --repeats 1
 
       - name: Benchmark smoke - visual score impact
         run: >
-          cargo run --features cli-entry --bin visual_score_impact_benchmark --
+          cargo run --release --features cli-entry --bin visual_score_impact_benchmark --
           --input test_data/EFTA00038617.pdf
           --page 2
           --trials 1
@@ -41,16 +41,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
       - name: Setup Rust + wasm target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
 
       - name: Check wasm build with warnings denied
         env:
           RUSTFLAGS: -D warnings
         run: >
           cargo check
+          --manifest-path web_bindings/Cargo.toml
           --target wasm32-unknown-unknown
-          --no-default-features
-          --features shared-bytes-workflow,web-entry
+
+      - name: Build wasm package
+        working-directory: web_bindings
+        run: wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
+
+      - name: Run wasm Node smoke test
+        run: npm run test:wasm-smoke
+
+      - name: Install Playwright dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser wasm smoke test
+        run: npm run test:web-ui-benchmark
