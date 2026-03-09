@@ -16,8 +16,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run tests
-        run: cargo test --release --all-features
+      - name: Run lib tests
+        run: cargo test --release --all-features --lib
+
+      - name: Run bin tests
+        run: cargo test --release --all-features --bins
+
+      - name: Run integration tests
+        run: cargo test --release --all-features --tests
 
       - name: Benchmark smoke - guess accuracy
         run: >
