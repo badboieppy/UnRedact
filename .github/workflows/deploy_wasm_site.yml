@@ -42,7 +42,8 @@ jobs:
           wasm-opt --version
 
       - name: Build wasm package
-        run: wasm-pack build --target web --out-dir web/pkg --release --no-default-features --features "shared-bytes-workflow,web-entry"
+        working-directory: web_bindings
+        run: wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
 
       - name: Prepare site artifact
         run: |

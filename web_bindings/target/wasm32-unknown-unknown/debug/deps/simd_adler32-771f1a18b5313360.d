@@ -1,0 +1,15 @@
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\debug\deps\simd_adler32-771f1a18b5313360.d: C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\lib.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\hash.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\mod.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx2.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx512.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\scalar.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\sse2.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\ssse3.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\wasm.rs
+
+C:\Users\jkpri\.codex\worktrees\22f4\UnRedact\web_bindings\target\wasm32-unknown-unknown\debug\deps\libsimd_adler32-771f1a18b5313360.rmeta: C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\lib.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\hash.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\mod.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx2.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx512.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\scalar.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\sse2.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\ssse3.rs C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\wasm.rs
+
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\lib.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\hash.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\mod.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx2.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\avx512.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\scalar.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\sse2.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\ssse3.rs:
+C:\Users\jkpri\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\simd-adler32-0.3.8\src\imp\wasm.rs:
+
+# env-dep:16

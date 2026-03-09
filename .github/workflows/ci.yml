@@ -16,14 +16,8 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run lib tests
-        run: cargo test --release --all-features --lib
-
-      - name: Run bin tests
-        run: cargo test --release --all-features --bins
-
-      - name: Run integration tests
-        run: cargo test --release --all-features --tests
+      - name: Run tests
+        run: cargo test --release --all-features
 
       - name: Benchmark smoke - guess accuracy
         run: >
@@ -47,16 +41,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
       - name: Setup Rust + wasm target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
 
       - name: Check wasm build with warnings denied
         env:
           RUSTFLAGS: -D warnings
         run: >
           cargo check
+          --manifest-path web_bindings/Cargo.toml
           --target wasm32-unknown-unknown
-          --no-default-features
-          --features shared-bytes-workflow,web-entry
+
+      - name: Build wasm package
+        working-directory: web_bindings
+        run: wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
+
+      - name: Run wasm Node smoke test
+        run: npm run test:wasm-smoke
+
+      - name: Install Playwright dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser wasm smoke test
+        run: npm run test:web-ui-benchmark

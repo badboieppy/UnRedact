@@ -8,9 +8,6 @@ keywords = ["pdf", "redaction", "forensics", "fonts", "cli"]
 categories = ["command-line-utilities", "text-processing"]
 license-file = "LICENSE"
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
 [features]
 default = [
     "shared-bytes-workflow",
@@ -21,7 +18,7 @@ default = [
 shared-bytes-workflow = []
 local-file-workflow = []
 cli-entry = ["dep:clap", "shared-bytes-workflow", "local-file-workflow"]
-web-entry = ["shared-bytes-workflow", "dep:wasm-bindgen", "dep:serde-wasm-bindgen"]
+web-entry = ["shared-bytes-workflow"]
 
 [dependencies]
 serde = { version = "1.0.217", features = ["derive"] }
@@ -35,8 +32,6 @@ sha2 = "0.10.8"
 clap = { version = "4.5.27", features = ["derive"], optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-wasm-bindgen = { version = "0.2.108", optional = true }
-serde-wasm-bindgen = { version = "0.6.5", optional = true }
 js-sys = "0.3.85"
 
 [dev-dependencies]
@@ -55,9 +50,6 @@ strip = "symbols"
 
 [profile.bench]
 inherits = "release"
-
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--all-features"]
 
 [[bin]]
 name = "unredact-cli"
