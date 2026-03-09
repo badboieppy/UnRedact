@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::types::diagnostic_types::DiagnosticRecord;
 use crate::types::redaction_types::Rect;
 use crate::types::runtime_defaults::{DEFAULT_VISUAL_SCORE_DPI, DEFAULT_VISUAL_SCORE_ENABLED};
 
@@ -27,7 +28,8 @@ pub struct GuessReport {
     pub guesses: Vec<RedactionGuess>,
     #[serde(default)]
     pub anchors: Vec<AnchorDecisionRecord>,
-    pub diagnostics: Vec<String>,
+    #[serde(default)]
+    pub diagnostics: Vec<DiagnosticRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,18 +37,7 @@ pub struct AnchorReport {
     pub input_redactions: String,
     pub decisions: Vec<AnchorDecisionRecord>,
     #[serde(default)]
-    pub diagnostics: Vec<String>,
-}
-
-impl GuessReport {
-    #[inline]
-    pub fn to_anchor_report(&self) -> AnchorReport {
-        AnchorReport {
-            input_redactions: self.input_redactions.clone(),
-            decisions: self.anchors.clone(),
-            diagnostics: self.diagnostics.clone(),
-        }
-    }
+    pub diagnostics: Vec<DiagnosticRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,8 +83,6 @@ pub struct GuessContext {
     #[serde(default)]
     pub anchor_right_x: Option<f32>,
     #[serde(default)]
-    pub anchor_font_key: Option<String>,
-    #[serde(default)]
     pub anchor_font_name: Option<String>,
     #[serde(default)]
     pub anchor_font_size_pt: Option<f32>,
@@ -103,14 +92,6 @@ pub struct GuessContext {
     pub anchor_row_bias_pt: Option<f32>,
     #[serde(default)]
     pub anchor_mode: Option<String>,
-    #[serde(default)]
-    pub anchor_width_source: Option<String>,
-    #[serde(default)]
-    pub space_width_source: Option<String>,
-    #[serde(default)]
-    pub candidate_width_source: Option<String>,
-    #[serde(default)]
-    pub width_fallback_reason: Option<String>,
     #[serde(default)]
     pub confidence_score: Option<f32>,
     #[serde(default)]
@@ -211,8 +192,6 @@ pub struct AnchorCandidateDecision {
     pub left: Option<AnchorSideDecision>,
     #[serde(default)]
     pub right: Option<AnchorSideDecision>,
-    #[serde(default)]
-    pub anchor_font_key: Option<String>,
     #[serde(default)]
     pub anchor_font_name: Option<String>,
     #[serde(default)]

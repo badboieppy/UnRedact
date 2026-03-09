@@ -10,6 +10,7 @@ use unredact::benchmarks::types::known_redaction_contract::{
 };
 use unredact::service::tooling_entry::default_name_dictionary_entries;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::runtime_defaults::MULTI_SPAN_GAP_RATIO_THRESHOLD;
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -148,11 +149,6 @@ struct MetricDefinitions {
     quality_anchored_rows: &'static str,
     quality_anchor_two_sided_rows: &'static str,
     quality_anchor_one_sided_rows: &'static str,
-    quality_width_asset_rows: &'static str,
-    quality_width_table_rows: &'static str,
-    quality_width_core_rows: &'static str,
-    quality_width_fallback_rows: &'static str,
-    quality_width_fallback_reason_rows: &'static str,
     quality_exact_rows: &'static str,
     quality_exact_zero_error_rows: &'static str,
     quality_exact_invalid_rows: &'static str,
@@ -231,11 +227,6 @@ struct QualitySummary {
     anchored_rows: usize,
     anchor_two_sided_rows: usize,
     anchor_one_sided_rows: usize,
-    width_asset_rows: usize,
-    width_table_rows: usize,
-    width_core_rows: usize,
-    width_fallback_rows: usize,
-    width_fallback_reason_rows: usize,
     exact_rows: usize,
     exact_zero_error_rows: usize,
     exact_invalid_rows: usize,
@@ -648,27 +639,36 @@ fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumu
     merged
 }
 
-fn visual_rerank_accumulator_from_diagnostics(diagnostics: &[String]) -> VisualRerankAccumulator {
-    let mut acc = VisualRerankAccumulator::default();
-    for line in diagnostics {
-        let Some(rest) = line.strip_prefix("visual_rerank=") else {
-            continue;
-        };
-        let mut rows_considered = None::<usize>;
-        let mut rows_scored = None::<usize>;
-        let mut top1_changed = None::<usize>;
-        let mut mean_gain = None::<f64>;
-        for token in rest.split_whitespace() {
-            if let Some(value) = token.strip_prefix("rows_considered=") {
-                rows_considered = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("rows_scored=") {
-                rows_scored = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("top1_changed=") {
-                top1_changed = value.parse::<usize>().ok();
-            } else if let Some(value) = token.strip_prefix("mean_gain=") {
-                mean_gain = value.parse::<f64>().ok();
-            }
+fn metric_usize(record: &DiagnosticRecord, key: &str) -> Option<usize> {
+    match record.metrics.get(key) {
+        Some(DiagnosticValue::Integer(value)) if *value >= 0 => Some(*value as usize),
+        Some(DiagnosticValue::Float(value)) if value.is_finite() && *value >= 0.0_f64 => {
+            Some(*value as usize)
         }
+        _ => None,
+    }
+}
+
+fn metric_f64(record: &DiagnosticRecord, key: &str) -> Option<f64> {
+    match record.metrics.get(key) {
+        Some(DiagnosticValue::Float(value)) if value.is_finite() => Some(*value),
+        Some(DiagnosticValue::Integer(value)) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn visual_rerank_accumulator_from_diagnostics(
+    diagnostics: &[DiagnosticRecord],
+) -> VisualRerankAccumulator {
+    let mut acc = VisualRerankAccumulator::default();
+    for record in diagnostics {
+        if record.code != "visual_rerank_summary" {
+            continue;
+        }
+        let rows_considered = metric_usize(record, "rows_considered");
+        let rows_scored = metric_usize(record, "rows_scored");
+        let top1_changed = metric_usize(record, "top1_changed");
+        let mean_gain = metric_f64(record, "mean_gain");
         let scored = rows_scored.unwrap_or(0_usize);
         acc.rows_considered += rows_considered.unwrap_or(0_usize);
         acc.rows_scored += scored;
@@ -794,21 +794,6 @@ fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
             Some("left_only") | Some("right_only") => out.anchor_one_sided_rows += 1,
             _ => {}
         }
-        let width_source = guess
-            .context
-            .candidate_width_source
-            .as_deref()
-            .or(guess.context.anchor_width_source.as_deref());
-        match width_source {
-            Some("asset") => out.width_asset_rows += 1,
-            Some("pdf_width_table") => out.width_table_rows += 1,
-            Some("core_font") => out.width_core_rows += 1,
-            Some("fallback") => out.width_fallback_rows += 1,
-            _ => {}
-        }
-        if guess.context.width_fallback_reason.is_some() {
-            out.width_fallback_reason_rows += 1;
-        }
         if !guess.exact_matches.is_empty() {
             out.exact_rows += 1;
             let all_exact_zero = guess.exact_matches.iter().all(|exact| {
@@ -836,11 +821,6 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
         merged.anchored_rows += summary.anchored_rows;
         merged.anchor_two_sided_rows += summary.anchor_two_sided_rows;
         merged.anchor_one_sided_rows += summary.anchor_one_sided_rows;
-        merged.width_asset_rows += summary.width_asset_rows;
-        merged.width_table_rows += summary.width_table_rows;
-        merged.width_core_rows += summary.width_core_rows;
-        merged.width_fallback_rows += summary.width_fallback_rows;
-        merged.width_fallback_reason_rows += summary.width_fallback_reason_rows;
         merged.exact_rows += summary.exact_rows;
         merged.exact_zero_error_rows += summary.exact_zero_error_rows;
         merged.exact_invalid_rows += summary.exact_invalid_rows;
@@ -848,25 +828,16 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
     merged
 }
 
-fn timing_accumulator_from_diagnostics(diagnostics: &[String]) -> TimingAccumulator {
+fn timing_accumulator_from_diagnostics(diagnostics: &[DiagnosticRecord]) -> TimingAccumulator {
     let mut acc = TimingAccumulator::default();
-    for line in diagnostics {
-        if !line.starts_with("timing_ms stage=") {
+    for record in diagnostics {
+        if record.code != "timing_ms" {
             continue;
         }
-        let mut stage = None::<String>;
-        let mut value = None::<f64>;
-        for token in line.split_whitespace() {
-            if let Some(rest) = token.strip_prefix("stage=") {
-                stage = Some(rest.to_owned());
-            } else if let Some(rest) = token.strip_prefix("value=") {
-                value = rest.parse::<f64>().ok();
-            }
-        }
-        let (Some(stage), Some(value)) = (stage, value) else {
+        let Some(value) = metric_f64(record, "value_ms") else {
             continue;
         };
-        match stage.as_str() {
+        match record.stage.as_str() {
             "redactions" => acc.redactions_ms.push(value),
             "fonts" => acc.fonts_ms.push(value),
             "guess" => acc.guess_ms.push(value),
@@ -1398,16 +1369,11 @@ fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
 
 fn print_quality_summary(label: &str, summary: &QualitySummary) {
     println!(
-        "{label:16} rows={} anchored={} two_sided={} one_sided={} width_asset={} width_table={} width_core={} width_fallback={} fallback_reason_rows={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
+        "{label:16} rows={} anchored={} two_sided={} one_sided={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
         summary.rows_total,
         summary.anchored_rows,
         summary.anchor_two_sided_rows,
         summary.anchor_one_sided_rows,
-        summary.width_asset_rows,
-        summary.width_table_rows,
-        summary.width_core_rows,
-        summary.width_fallback_rows,
-        summary.width_fallback_reason_rows,
         summary.exact_rows,
         summary.exact_zero_error_rows,
         summary.exact_invalid_rows
@@ -1476,16 +1442,6 @@ fn metric_definitions() -> MetricDefinitions {
             "Rows where anchor_mode is two_sided (full left/right anchor).",
         quality_anchor_one_sided_rows:
             "Rows where anchor_mode is left_only or right_only.",
-        quality_width_asset_rows:
-            "Rows whose primary candidate width source is embedded font asset shaping.",
-        quality_width_table_rows:
-            "Rows whose primary candidate width source is PDF width table lookup.",
-        quality_width_core_rows:
-            "Rows whose primary candidate width source is core-font width table fallback.",
-        quality_width_fallback_rows:
-            "Rows whose primary candidate width source is heuristic fallback.",
-        quality_width_fallback_reason_rows:
-            "Rows carrying explicit width_fallback_reason diagnostics.",
         quality_exact_rows: "Rows where exact_matches is non-empty.",
         quality_exact_zero_error_rows:
             "Rows where every exact_match exists in candidates with zero raw error.",
@@ -2198,26 +2154,6 @@ fn main() {
     println!(
         "  quality_anchor_one_sided_rows: {}",
         payload.definitions.quality_anchor_one_sided_rows
-    );
-    println!(
-        "  quality_width_asset_rows: {}",
-        payload.definitions.quality_width_asset_rows
-    );
-    println!(
-        "  quality_width_table_rows: {}",
-        payload.definitions.quality_width_table_rows
-    );
-    println!(
-        "  quality_width_core_rows: {}",
-        payload.definitions.quality_width_core_rows
-    );
-    println!(
-        "  quality_width_fallback_rows: {}",
-        payload.definitions.quality_width_fallback_rows
-    );
-    println!(
-        "  quality_width_fallback_reason_rows: {}",
-        payload.definitions.quality_width_fallback_reason_rows
     );
     println!(
         "  quality_exact_rows: {}",

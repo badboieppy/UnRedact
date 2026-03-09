@@ -2,6 +2,7 @@ use crate::dependency::pdf_font_occurrence_accessor::{
     build_file_font_report_from_bytes, DataBuildConfig,
 };
 use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
+use crate::dependency::pdf_font_run_types::PdfFontRunReport;
 use crate::types::file_types::{
     aggregate_counts, distinct_fonts_from_counts, FileFontReport, FontDetectionReport,
     FontRunReport, FontsFound,
@@ -10,6 +11,7 @@ use crate::types::file_types::{
 #[derive(Debug, Clone)]
 pub struct FontRunInputs {
     pub report: FontRunReport,
+    pub(crate) pdf_report: PdfFontRunReport,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,8 +46,9 @@ impl FontsData {
         input_name: &str,
         pdf_bytes: &[u8],
     ) -> Result<FontRunInputs, String> {
-        let report = build_font_run_report_from_input_name(input_name, pdf_bytes)?;
-        Ok(FontRunInputs { report })
+        let pdf_report = build_font_run_report_from_input_name(input_name, pdf_bytes)?;
+        let report = pdf_report.to_public_report();
+        Ok(FontRunInputs { report, pdf_report })
     }
 }
 

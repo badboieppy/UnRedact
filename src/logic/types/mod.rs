@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::types::diagnostic_types::DiagnosticReport;
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{AnchorReport, GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
@@ -7,6 +8,8 @@ use crate::types::runtime_defaults::{
     DEFAULT_ENABLE_IMAGE_ANALYSIS, DEFAULT_INCLUDE_DETAILS, DEFAULT_VISUALIZE_OUTPUT,
 };
 use crate::types::visualizer_config::VisualizerConfig;
+
+pub mod guess_input_types;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,7 +63,19 @@ pub struct EncodedPipelineOutputs {
     pub fonts_json: Vec<u8>,
     pub guesses_json: Vec<u8>,
     pub anchors_json: Vec<u8>,
+    pub diagnostics_json: Vec<u8>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
+}
+
+impl GuessReport {
+    #[inline]
+    pub fn to_anchor_report(&self) -> AnchorReport {
+        AnchorReport {
+            input_redactions: self.input_redactions.clone(),
+            decisions: self.anchors.clone(),
+            diagnostics: self.diagnostics.clone(),
+        }
+    }
 }
 
 #[inline]
@@ -74,11 +89,16 @@ pub fn encode_outputs(outputs: &BytesPipelineOutputs) -> Result<EncodedPipelineO
     let anchors_report: AnchorReport = outputs.guesses.to_anchor_report();
     let anchors_json = serde_json::to_vec_pretty(&anchors_report)
         .map_err(|error| format!("failed to encode anchors json: {error}"))?;
+    let diagnostics_json = serde_json::to_vec_pretty(&DiagnosticReport {
+        items: outputs.guesses.diagnostics.clone(),
+    })
+    .map_err(|error| format!("failed to encode diagnostics json: {error}"))?;
     Ok(EncodedPipelineOutputs {
         redactions_json,
         fonts_json,
         guesses_json,
         anchors_json,
+        diagnostics_json,
         visualized_pdf_bytes: outputs.visualized_pdf_bytes.clone(),
     })
 }

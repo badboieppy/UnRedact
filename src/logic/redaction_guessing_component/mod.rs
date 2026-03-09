@@ -7,6 +7,7 @@ use crate::data::redactions_data::RedactionsData;
 use crate::logic::types::{
     BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
 };
+use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::GuessReport;
 use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, RedactionReport};
@@ -89,18 +90,18 @@ pub fn run_redaction_guessing_component(
         preloaded_font_runs_elapsed_ms: Some(font_runs_stage.elapsed_ms),
         cfg: &cfg,
     })?;
-    guess_stage.guesses.diagnostics.push(format!(
-        "timing_ms stage=redactions value={}",
-        redaction_stage.elapsed_ms
-    ));
-    guess_stage.guesses.diagnostics.push(format!(
-        "timing_ms stage=fonts value={}",
-        font_stage.elapsed_ms
-    ));
-    guess_stage.guesses.diagnostics.push(format!(
-        "timing_ms stage=guess value={}",
-        guess_stage.elapsed_ms
-    ));
+    guess_stage
+        .guesses
+        .diagnostics
+        .push(stage_timing_diagnostic("redactions", redaction_stage.elapsed_ms));
+    guess_stage
+        .guesses
+        .diagnostics
+        .push(stage_timing_diagnostic("fonts", font_stage.elapsed_ms));
+    guess_stage
+        .guesses
+        .diagnostics
+        .push(stage_timing_diagnostic("guess", guess_stage.elapsed_ms));
 
     let visualization_stage = build_visualization_payload_stage(
         pdf_bytes,
@@ -109,9 +110,9 @@ pub fn run_redaction_guessing_component(
         &mut guess_stage.guesses,
     )?;
 
-    guess_stage.guesses.diagnostics.push(format!(
-        "timing_ms stage=orchestrator_total value={}",
-        component_started.elapsed().as_millis()
+    guess_stage.guesses.diagnostics.push(stage_timing_diagnostic(
+        "orchestrator_total",
+        component_started.elapsed().as_millis(),
     ));
 
     Ok(BytesPipelineOutputs {
@@ -206,14 +207,22 @@ fn build_visualization_payload_stage(
         return Ok(VisualizationPayloadStageOutput { payload: None });
     }
     let started = Instant::now();
-    guess_report.diagnostics.push(format!(
-        "timing_ms stage=visualize_payload value={}",
-        started.elapsed().as_millis()
-    ));
+    guess_report
+        .diagnostics
+        .push(stage_timing_diagnostic("visualize_payload", started.elapsed().as_millis()));
     Ok(VisualizationPayloadStageOutput {
         payload: Some(VisualizationPayload {
             pdf_bytes,
             font_runs: font_runs.clone(),
         }),
     })
+}
+
+fn stage_timing_diagnostic(stage: &str, elapsed_ms: u128) -> DiagnosticRecord {
+    let mut record = DiagnosticRecord::info("logic", stage, "timing_ms");
+    record.metrics.insert(
+        "value_ms".to_owned(),
+        DiagnosticValue::Integer(elapsed_ms as i64),
+    );
+    record
 }

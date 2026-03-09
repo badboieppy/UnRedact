@@ -20,6 +20,8 @@ const OVERLAY_CONTEXT_LINE_BUCKET_PT: f32 = 2.0_f32;
 const OVERLAY_ANCHOR_LINE_TOLERANCE_PT: f32 = 8.0_f32;
 const OVERLAY_ANCHOR_MAX_GAP_PT: f32 = 260.0_f32;
 const OVERLAY_ANCHOR_EDGE_WINDOW_PT: f32 = 24.0_f32;
+const OVERLAY_STYLE_FONT_SIZE_TOLERANCE_PT: f32 = 0.5_f32;
+const OVERLAY_STYLE_H_SCALE_TOLERANCE_PCT: f32 = 5.0_f32;
 
 #[derive(Debug, Clone)]
 pub struct VisualizationInputs {
@@ -218,21 +220,14 @@ fn build_overlays(
 
         if matches!(redaction.kind, RedactionKind::RasterDarkRegion) {
             let dense_row = dense_anchor_rows.get(idx).copied().unwrap_or(false);
-            let anchor_font = guess.context.anchor_font_key.as_ref().and_then(|font_key| {
-                guess.context.anchor_font_size_pt.map(|font_size_pt| {
-                    (
-                        font_key.clone(),
-                        font_size_pt,
-                        guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32),
-                    )
-                })
-            });
             let nearby_run =
                 select_run_by_bbox(&font_runs.runs, redaction.page_index, Some(redaction.bbox));
-            let (font_key, requested_font_size_pt, h_scale_pct) = if let Some(font) = anchor_font {
-                (font.0, font.1, font.2)
-            } else if let Some(run) = nearby_run {
-                (run.font_key.clone(), run.font_size_pt, run.h_scale_pct)
+            let (font_key, requested_font_size_pt, h_scale_pct) = if let Some(run) = nearby_run {
+                (
+                    run.font_key.clone(),
+                    guess.context.anchor_font_size_pt.unwrap_or(run.font_size_pt),
+                    guess.context.anchor_h_scale_pct.unwrap_or(run.h_scale_pct),
+                )
             } else {
                 ("F1".to_owned(), 11.0_f32, 100.0_f32)
             };
@@ -486,27 +481,40 @@ fn push_anchor_pair_overlays(
     };
 
     let anchor_left_x = guess.context.anchor_left_x;
-    let anchor_font_key = guess.context.anchor_font_key.as_deref();
-    let anchor_font_size = guess.context.anchor_font_size_pt;
-    let anchor_h_scale = guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32);
-    let fallback_style = match (anchor_font_key, anchor_font_size) {
-        (Some(font_key), Some(font_size_pt))
-            if font_size_pt.is_finite() && font_size_pt > 0.0_f32 =>
-        {
-            Some((font_key.to_owned(), font_size_pt, anchor_h_scale))
-        }
-        _ => None,
-    };
-    let style_from_run = left_anchor_run
+    let run_style = left_anchor_run
         .or(right_anchor_run)
         .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
-    let chosen_style = if force_selected_only {
-        fallback_style.or(style_from_run)
+    let nearby_run =
+        select_run_by_bbox(runs, redaction.page_index, Some(redaction.bbox))
+            .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
+    let (font_key, font_size_pt, h_scale_pct) = if let Some((font_key, run_font_size_pt, run_h_scale_pct)) =
+        run_style.or(nearby_run)
+    {
+        let context_font_size_pt = guess.context.anchor_font_size_pt;
+        let context_h_scale_pct = guess.context.anchor_h_scale_pct;
+        let context_style_compatible = context_font_size_pt
+            .map(|value| (value - run_font_size_pt).abs() <= OVERLAY_STYLE_FONT_SIZE_TOLERANCE_PT)
+            .unwrap_or(true)
+            && context_h_scale_pct
+                .map(|value| (value - run_h_scale_pct).abs() <= OVERLAY_STYLE_H_SCALE_TOLERANCE_PCT)
+                .unwrap_or(true);
+        let font_size_pt = if context_style_compatible {
+            context_font_size_pt.unwrap_or(run_font_size_pt)
+        } else {
+            run_font_size_pt
+        };
+        let h_scale_pct = if context_style_compatible {
+            context_h_scale_pct.unwrap_or(run_h_scale_pct)
+        } else {
+            run_h_scale_pct
+        };
+        (font_key, font_size_pt, h_scale_pct)
     } else {
-        style_from_run.or(fallback_style)
-    };
-    let Some((font_key, font_size_pt, h_scale_pct)) = chosen_style else {
-        return false;
+        (
+            "F1".to_owned(),
+            guess.context.anchor_font_size_pt.unwrap_or(11.0_f32),
+            guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32),
+        )
     };
     let y0 = left_anchor_run
         .map(|run| run.bbox.y0)
@@ -1642,16 +1650,11 @@ mod tests {
                     tol_pt: 8.0_f32,
                     anchor_left_x: Some(80.0_f32),
                     anchor_right_x: Some(190.0_f32),
-                    anchor_font_key: Some("F1".to_owned()),
-                    anchor_font_name: None,
+                    anchor_font_name: Some("Times-Roman".to_owned()),
                     anchor_font_size_pt: Some(11.0_f32),
                     anchor_h_scale_pct: Some(100.0_f32),
                     anchor_row_bias_pt: Some(0.0_f32),
                     anchor_mode: Some("two_sided".to_owned()),
-                    anchor_width_source: None,
-                    space_width_source: None,
-                    candidate_width_source: None,
-                    width_fallback_reason: None,
                     confidence_score: None,
                     confidence_factors: None,
                     anchor_row_id: None,
@@ -1819,9 +1822,9 @@ mod tests {
     #[test]
     fn anchor_pair_overlay_uses_joined_text_with_anchor_typography() {
         let data = VisualizationData::new();
-        let report = sample_report();
+        let report = sample_anchor_pair_report();
         let guesses = sample_guesses_with_candidate("EDWARD JAY EPSTEIN EDWARD JAY EPSTEIN");
-        let font_runs = sample_font_runs();
+        let font_runs = sample_font_runs_with_anchor_row();
         let pdf_bytes = sample_pdf_bytes();
 
         let inputs = data
@@ -1862,7 +1865,7 @@ mod tests {
         let report = sample_anchor_pair_report();
         let mut guesses = sample_guesses();
         guesses.guesses[0].context.anchor_left_x = Some(80.0_f32);
-        guesses.guesses[0].context.anchor_font_key = Some("F_wrong".to_owned());
+        guesses.guesses[0].context.anchor_font_name = Some("Wrong-Font".to_owned());
         guesses.guesses[0].context.anchor_font_size_pt = Some(17.0_f32);
         guesses.guesses[0].context.anchor_h_scale_pct = Some(82.0_f32);
         let font_runs = sample_font_runs_with_anchor_row();

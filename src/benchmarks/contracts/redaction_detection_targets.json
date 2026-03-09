@@ -10,7 +10,7 @@
     {
       "name": "EFTA00101126",
       "input_pdf": "test_data/EFTA00101126.pdf",
-      "ground_truth_redactions": "benchmark/user_issue_default_baseline/EFTA00101126.redactions.json"
+      "ground_truth_redactions": "test_data/redactions/EFTA00101126.redactions.json"
     }
   ]
 }

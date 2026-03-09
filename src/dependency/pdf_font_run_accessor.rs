@@ -1,4 +1,5 @@
-use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect};
+use crate::dependency::pdf_font_run_types::{PdfFontRunReport, PdfFontTextRun, PdfWidthMetrics};
+use crate::types::file_types::{FontAsset, FontTextRun, Rect};
 use crate::types::runtime_defaults::{DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE};
 use crate::types::typography_shaping::shaping_features;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -22,6 +23,7 @@ struct TextState {
     char_spacing: f32,
     word_spacing: f32,
     leading: f32,
+    render_mode: u8,
     text_matrix: Matrix,
 }
 
@@ -36,6 +38,7 @@ impl Default for TextState {
             char_spacing: 0.0_f32,
             word_spacing: 0.0_f32,
             leading: 0.0_f32,
+            render_mode: 0,
             text_matrix: Matrix::default(),
         }
     }
@@ -55,10 +58,20 @@ impl Default for Matrix {
 
 #[derive(Debug, Clone)]
 struct TextMetrics {
-    width_pt: f32,
-    width_px: f32,
-    char_advances_pt: Vec<f32>,
-    char_advances_px: Vec<f32>,
+    base_glyph_width_pt: f32,
+    observed_width_pt: f32,
+    observed_width_px: f32,
+    base_char_advances_pt: Vec<f32>,
+    observed_char_advances_pt: Vec<f32>,
+    observed_char_advances_px: Vec<f32>,
+    explicit_char_spacing_total_pt: f32,
+    explicit_word_spacing_total_pt: f32,
+    explicit_tj_total_pt: f32,
+    glyph_count: u32,
+    char_count: u32,
+    has_cluster_substitution: bool,
+    tj_adjustments_pt_by_gap: Vec<f32>,
+    residual_width_delta_pt: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -71,7 +84,7 @@ struct ShowTextOp {
 pub fn build_font_run_report_from_input_name(
     input_name: &str,
     bytes: &[u8],
-) -> Result<FontRunReport, String> {
+) -> Result<PdfFontRunReport, String> {
     let doc = Document::load_mem(bytes).map_err(|e| e.to_string())?;
     let pages = doc.get_pages();
 
@@ -106,7 +119,7 @@ pub fn build_font_run_report_from_input_name(
         ));
     }
 
-    Ok(FontRunReport {
+    Ok(PdfFontRunReport {
         input: input_name.to_owned(),
         runs,
         assets: assets_map.into_values().collect(),
@@ -117,7 +130,7 @@ fn extract_text_runs(
     page_index: u32,
     ops: &[lopdf::content::Operation],
     font_map: &BTreeMap<String, FontInfo>,
-) -> Vec<FontTextRun> {
+) -> Vec<PdfFontTextRun> {
     let mut out = Vec::new();
     let mut st = TextState::default();
 
@@ -171,6 +184,13 @@ fn extract_text_runs(
                     .and_then(object_to_f32)
                     .unwrap_or(st.leading);
             }
+            "Tr" => {
+                st.render_mode = op
+                    .operands
+                    .first()
+                    .and_then(object_to_u8)
+                    .unwrap_or(st.render_mode);
+            }
             "Tm" => {
                 if let Some(tx) = op.operands.get(4).and_then(object_to_f32) {
                     st.text_matrix.tx = tx;
@@ -207,44 +227,12 @@ fn extract_text_runs(
                 if show.text.trim().is_empty() {
                     continue;
                 }
-
-                let font_info = font_map.get(&st.font_key);
-                let mut metrics = measure_run_metrics(
-                    font_info,
-                    &st.font_name,
-                    st.font_size_pt,
-                    st.h_scale_pct,
-                    &show.text,
-                )
-                .unwrap_or_else(|| {
-                    fallback_text_metrics(
-                        &show.text,
-                        st.font_size_pt.abs().max(1.0_f32),
-                        st.h_scale_pct,
-                        DEFAULT_FONT_METRICS_DPI,
-                    )
-                });
-                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
-                let width = metrics.width_pt.max(0.0_f32);
-                let h = st.font_size_pt.abs().max(1.0);
-                let x0 = st.text_matrix.tx;
-                let y1 = st.text_matrix.ty;
-                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
-                out.push(FontTextRun {
-                    page_index,
-                    text: show.text,
-                    bbox,
-                    font_key: st.font_key.clone(),
-                    font_name: st.font_name.clone(),
-                    font_size_pt: st.font_size_pt,
-                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
-                    measured_width_pt: Some(metrics.width_pt),
-                    measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
-                    char_advances_pt: metrics.char_advances_pt,
-                    char_advances_px: metrics.char_advances_px,
-                });
-                st.text_matrix.tx += width;
+                emit_text_run(page_index, &show, &st, font_map, &mut out);
+                let observed_width = out
+                    .last()
+                    .and_then(|run| run.measured_width_pt)
+                    .unwrap_or(0.0_f32);
+                st.text_matrix.tx += observed_width.max(0.0_f32);
             }
             "\"" => {
                 if !st.in_text {
@@ -263,44 +251,12 @@ fn extract_text_runs(
                 if show.text.trim().is_empty() {
                     continue;
                 }
-
-                let font_info = font_map.get(&st.font_key);
-                let mut metrics = measure_run_metrics(
-                    font_info,
-                    &st.font_name,
-                    st.font_size_pt,
-                    st.h_scale_pct,
-                    &show.text,
-                )
-                .unwrap_or_else(|| {
-                    fallback_text_metrics(
-                        &show.text,
-                        st.font_size_pt.abs().max(1.0_f32),
-                        st.h_scale_pct,
-                        DEFAULT_FONT_METRICS_DPI,
-                    )
-                });
-                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
-                let width = metrics.width_pt.max(0.0_f32);
-                let h = st.font_size_pt.abs().max(1.0);
-                let x0 = st.text_matrix.tx;
-                let y1 = st.text_matrix.ty;
-                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
-                out.push(FontTextRun {
-                    page_index,
-                    text: show.text,
-                    bbox,
-                    font_key: st.font_key.clone(),
-                    font_name: st.font_name.clone(),
-                    font_size_pt: st.font_size_pt,
-                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
-                    measured_width_pt: Some(metrics.width_pt),
-                    measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
-                    char_advances_pt: metrics.char_advances_pt,
-                    char_advances_px: metrics.char_advances_px,
-                });
-                st.text_matrix.tx += width;
+                emit_text_run(page_index, &show, &st, font_map, &mut out);
+                let observed_width = out
+                    .last()
+                    .and_then(|run| run.measured_width_pt)
+                    .unwrap_or(0.0_f32);
+                st.text_matrix.tx += observed_width.max(0.0_f32);
             }
             "Tj" | "TJ" => {
                 if !st.in_text {
@@ -312,50 +268,86 @@ fn extract_text_runs(
                 if show.text.trim().is_empty() {
                     continue;
                 }
-
-                let font_info = font_map.get(&st.font_key);
-                let mut metrics = measure_run_metrics(
-                    font_info,
-                    &st.font_name,
-                    st.font_size_pt,
-                    st.h_scale_pct,
-                    &show.text,
-                )
-                .unwrap_or_else(|| {
-                    fallback_text_metrics(
-                        &show.text,
-                        st.font_size_pt.abs().max(1.0_f32),
-                        st.h_scale_pct,
-                        DEFAULT_FONT_METRICS_DPI,
-                    )
-                });
-                apply_pdf_spacing_adjustments(&mut metrics, &show, &st);
-                let width = metrics.width_pt.max(0.0_f32);
-                let h = st.font_size_pt.abs().max(1.0);
-                let x0 = st.text_matrix.tx;
-                let y1 = st.text_matrix.ty;
-                let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
-                out.push(FontTextRun {
-                    page_index,
-                    text: show.text,
-                    bbox,
-                    font_key: st.font_key.clone(),
-                    font_name: st.font_name.clone(),
-                    font_size_pt: st.font_size_pt,
-                    h_scale_pct: st.h_scale_pct.max(1.0_f32),
-                    measured_width_pt: Some(metrics.width_pt),
-                    measured_width_px: Some(metrics.width_px),
-                    measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
-                    char_advances_pt: metrics.char_advances_pt,
-                    char_advances_px: metrics.char_advances_px,
-                });
-                st.text_matrix.tx += width;
+                emit_text_run(page_index, &show, &st, font_map, &mut out);
+                let observed_width = out
+                    .last()
+                    .and_then(|run| run.measured_width_pt)
+                    .unwrap_or(0.0_f32);
+                st.text_matrix.tx += observed_width.max(0.0_f32);
             }
             _ => {}
         }
     }
 
     out
+}
+
+fn emit_text_run(
+    page_index: u32,
+    show: &ShowTextOp,
+    st: &TextState,
+    font_map: &BTreeMap<String, FontInfo>,
+    out: &mut Vec<PdfFontTextRun>,
+) {
+    let font_info = font_map.get(&st.font_key);
+    let mut metrics = measure_run_metrics(
+        font_info,
+        &st.font_name,
+        st.font_size_pt,
+        st.h_scale_pct,
+        &show.text,
+    )
+    .unwrap_or_else(|| {
+        fallback_text_metrics(
+            &show.text,
+            st.font_size_pt.abs().max(1.0_f32),
+            st.h_scale_pct,
+            DEFAULT_FONT_METRICS_DPI,
+        )
+    });
+    apply_pdf_spacing_adjustments(&mut metrics, show, st);
+    let width = metrics.observed_width_pt.max(0.0_f32);
+    let h = st.font_size_pt.abs().max(1.0_f32);
+    let x0 = st.text_matrix.tx;
+    let y1 = st.text_matrix.ty;
+    let bbox = Rect::new(x0, y1 - h, x0 + width, y1);
+    let observed_char_advances_pt = metrics.observed_char_advances_pt.clone();
+    let observed_char_advances_px = metrics.observed_char_advances_px.clone();
+    out.push(PdfFontTextRun {
+        run: FontTextRun {
+            page_index,
+            text: show.text.clone(),
+            bbox,
+            font_key: st.font_key.clone(),
+            font_name: st.font_name.clone(),
+            font_size_pt: st.font_size_pt,
+            h_scale_pct: st.h_scale_pct.max(1.0_f32),
+            measured_width_pt: Some(metrics.observed_width_pt),
+            measured_width_px: Some(metrics.observed_width_px),
+            measured_dpi: Some(DEFAULT_FONT_METRICS_DPI),
+            char_advances_pt: observed_char_advances_pt.clone(),
+            char_advances_px: observed_char_advances_px,
+        },
+        width_metrics: PdfWidthMetrics {
+            render_mode: st.render_mode,
+            text_origin_x_pt: st.text_matrix.tx,
+            text_origin_y_pt: st.text_matrix.ty,
+            char_spacing_pt: pdf_spacing_pt(st.char_spacing, st.font_size_pt, st.h_scale_pct),
+            word_spacing_pt: pdf_spacing_pt(st.word_spacing, st.font_size_pt, st.h_scale_pct),
+            base_char_advances_pt: metrics.base_char_advances_pt,
+            observed_char_advances_pt: observed_char_advances_pt.clone(),
+            tj_adjustments_pt_by_gap: metrics.tj_adjustments_pt_by_gap,
+            base_glyph_width_pt: metrics.base_glyph_width_pt,
+            explicit_char_spacing_total_pt: metrics.explicit_char_spacing_total_pt,
+            explicit_word_spacing_total_pt: metrics.explicit_word_spacing_total_pt,
+            explicit_tj_total_pt: metrics.explicit_tj_total_pt,
+            observed_width_pt: metrics.observed_width_pt,
+            residual_width_delta_pt: metrics.residual_width_delta_pt,
+            glyph_count: metrics.glyph_count,
+            char_count: metrics.char_count,
+            has_cluster_substitution: metrics.has_cluster_substitution,
+        },
+    });
 }
 
 fn extract_page_font_info(
@@ -508,54 +500,70 @@ fn tj_adjustment_pt(value: f32, font_size_pt: f32, h_scale_pct: f32) -> f32 {
 }
 
 fn apply_pdf_spacing_adjustments(metrics: &mut TextMetrics, show: &ShowTextOp, st: &TextState) {
-    if show.text.is_empty() || metrics.char_advances_pt.is_empty() {
+    if show.text.is_empty() || metrics.observed_char_advances_pt.is_empty() {
         return;
     }
     let chars = show.text.chars().collect::<Vec<_>>();
     let inter_char_spacing = pdf_spacing_pt(st.char_spacing, st.font_size_pt, st.h_scale_pct);
     let inter_word_spacing = pdf_spacing_pt(st.word_spacing, st.font_size_pt, st.h_scale_pct);
-    let mut width_delta = 0.0_f32;
+    let mut char_spacing_total = 0.0_f32;
+    let mut word_spacing_total = 0.0_f32;
+    let mut tj_total = 0.0_f32;
+    let mut tj_adjustments_pt_by_gap = vec![0.0_f32; chars.len().saturating_sub(1)];
 
     let last_gap_index = chars.len().saturating_sub(1);
     for (idx, ch) in chars.iter().enumerate().take(last_gap_index) {
-        let mut delta = inter_char_spacing;
-        if ch.is_whitespace() {
-            delta += inter_word_spacing;
+        if inter_char_spacing.abs() > f32::EPSILON {
+            if idx < metrics.observed_char_advances_pt.len() {
+                metrics.observed_char_advances_pt[idx] += inter_char_spacing;
+            }
+            char_spacing_total += inter_char_spacing;
         }
-        if delta.abs() <= f32::EPSILON {
-            continue;
+        if ch.is_whitespace() && inter_word_spacing.abs() > f32::EPSILON {
+            if idx < metrics.observed_char_advances_pt.len() {
+                metrics.observed_char_advances_pt[idx] += inter_word_spacing;
+            }
+            word_spacing_total += inter_word_spacing;
         }
-        if idx < metrics.char_advances_pt.len() {
-            metrics.char_advances_pt[idx] += delta;
-        }
-        width_delta += delta;
     }
 
     for (char_idx, delta) in &show.per_char_adjustments_pt {
         if !delta.is_finite() || delta.abs() <= f32::EPSILON {
             continue;
         }
-        if *char_idx < metrics.char_advances_pt.len() {
-            metrics.char_advances_pt[*char_idx] += *delta;
-            width_delta += *delta;
+        if *char_idx < metrics.observed_char_advances_pt.len() {
+            metrics.observed_char_advances_pt[*char_idx] += *delta;
+            tj_total += *delta;
+            if *char_idx < tj_adjustments_pt_by_gap.len() {
+                tj_adjustments_pt_by_gap[*char_idx] += *delta;
+            }
         }
     }
 
-    metrics.width_pt += width_delta;
-    if !metrics.width_pt.is_finite() || metrics.width_pt <= 0.0_f32 {
-        metrics.width_pt = 0.001_f32;
+    metrics.explicit_char_spacing_total_pt = char_spacing_total;
+    metrics.explicit_word_spacing_total_pt = word_spacing_total;
+    metrics.explicit_tj_total_pt = tj_total;
+    metrics.tj_adjustments_pt_by_gap = tj_adjustments_pt_by_gap;
+    metrics.observed_width_pt = metrics.base_glyph_width_pt + char_spacing_total + word_spacing_total + tj_total;
+    if !metrics.observed_width_pt.is_finite() || metrics.observed_width_pt <= 0.0_f32 {
+        metrics.observed_width_pt = 0.001_f32;
     }
-    metrics.width_px = points_to_pixels(metrics.width_pt, DEFAULT_FONT_METRICS_DPI);
-    metrics.char_advances_pt = normalize_char_advances(
+    metrics.observed_width_px = points_to_pixels(metrics.observed_width_pt, DEFAULT_FONT_METRICS_DPI);
+    metrics.observed_char_advances_pt = normalize_char_advances(
         &show.text,
-        metrics.char_advances_pt.clone(),
-        metrics.width_pt,
+        metrics.observed_char_advances_pt.clone(),
+        metrics.observed_width_pt,
     );
-    metrics.char_advances_px = metrics
-        .char_advances_pt
+    metrics.observed_char_advances_px = metrics
+        .observed_char_advances_pt
         .iter()
         .map(|value| points_to_pixels(*value, DEFAULT_FONT_METRICS_DPI))
         .collect::<Vec<_>>();
+    metrics.residual_width_delta_pt = metrics.observed_width_pt
+        - (metrics.base_glyph_width_pt
+            + metrics.explicit_char_spacing_total_pt
+            + metrics.explicit_word_spacing_total_pt
+            + metrics.explicit_tj_total_pt);
 }
 
 fn measure_run_metrics(
@@ -567,10 +575,20 @@ fn measure_run_metrics(
 ) -> Option<TextMetrics> {
     if text.is_empty() {
         return Some(TextMetrics {
-            width_pt: 0.0_f32,
-            width_px: 0.0_f32,
-            char_advances_pt: Vec::new(),
-            char_advances_px: Vec::new(),
+            base_glyph_width_pt: 0.0_f32,
+            observed_width_pt: 0.0_f32,
+            observed_width_px: 0.0_f32,
+            base_char_advances_pt: Vec::new(),
+            observed_char_advances_pt: Vec::new(),
+            observed_char_advances_px: Vec::new(),
+            explicit_char_spacing_total_pt: 0.0_f32,
+            explicit_word_spacing_total_pt: 0.0_f32,
+            explicit_tj_total_pt: 0.0_f32,
+            glyph_count: 0,
+            char_count: 0,
+            has_cluster_substitution: false,
+            tj_adjustments_pt_by_gap: Vec::new(),
+            residual_width_delta_pt: 0.0_f32,
         });
     }
     let font_size = font_size_pt.abs().max(1.0_f32);
@@ -621,20 +639,30 @@ fn shape_text_metrics(
     }
 
     let char_units = contextual_char_advances_units(text, &shaped);
-    let mut char_advances_pt = char_units
+    let mut base_char_advances_pt = char_units
         .iter()
         .map(|units_value| units_value * (font_size_pt / units_per_em.max(1.0_f32)) * scale)
         .collect::<Vec<_>>();
-    char_advances_pt = normalize_char_advances(text, char_advances_pt, width_pt);
-    let char_advances_px = char_advances_pt
+    base_char_advances_pt = normalize_char_advances(text, base_char_advances_pt, width_pt);
+    let observed_char_advances_px = base_char_advances_pt
         .iter()
         .map(|value| points_to_pixels(*value, dpi))
         .collect::<Vec<_>>();
     Some(TextMetrics {
-        width_pt,
-        width_px: points_to_pixels(width_pt, dpi),
-        char_advances_pt,
-        char_advances_px,
+        base_glyph_width_pt: width_pt,
+        observed_width_pt: width_pt,
+        observed_width_px: points_to_pixels(width_pt, dpi),
+        base_char_advances_pt: base_char_advances_pt.clone(),
+        observed_char_advances_pt: base_char_advances_pt,
+        observed_char_advances_px,
+        explicit_char_spacing_total_pt: 0.0_f32,
+        explicit_word_spacing_total_pt: 0.0_f32,
+        explicit_tj_total_pt: 0.0_f32,
+        glyph_count: glyph_positions.len() as u32,
+        char_count: text.chars().count() as u32,
+        has_cluster_substitution: glyph_positions.len() != text.chars().count(),
+        tj_adjustments_pt_by_gap: vec![0.0_f32; text.chars().count().saturating_sub(1)],
+        residual_width_delta_pt: 0.0_f32,
     })
 }
 
@@ -660,24 +688,34 @@ fn core_font_metrics(
         return None;
     };
 
-    let mut char_advances_pt = Vec::with_capacity(text.chars().count());
+    let mut base_char_advances_pt = Vec::with_capacity(text.chars().count());
     for ch in text.chars() {
         let unit_width = table(ch) as f32;
-        char_advances_pt.push(unit_width * (font_size_pt / 1000.0_f32) * scale);
+        base_char_advances_pt.push(unit_width * (font_size_pt / 1000.0_f32) * scale);
     }
-    let width_pt = char_advances_pt.iter().sum::<f32>();
+    let width_pt = base_char_advances_pt.iter().sum::<f32>();
     if !width_pt.is_finite() || width_pt <= 0.0_f32 {
         return None;
     }
-    let char_advances_px = char_advances_pt
+    let observed_char_advances_px = base_char_advances_pt
         .iter()
         .map(|value| points_to_pixels(*value, dpi))
         .collect::<Vec<_>>();
     Some(TextMetrics {
-        width_pt,
-        width_px: points_to_pixels(width_pt, dpi),
-        char_advances_pt,
-        char_advances_px,
+        base_glyph_width_pt: width_pt,
+        observed_width_pt: width_pt,
+        observed_width_px: points_to_pixels(width_pt, dpi),
+        base_char_advances_pt: base_char_advances_pt.clone(),
+        observed_char_advances_pt: base_char_advances_pt,
+        observed_char_advances_px,
+        explicit_char_spacing_total_pt: 0.0_f32,
+        explicit_word_spacing_total_pt: 0.0_f32,
+        explicit_tj_total_pt: 0.0_f32,
+        glyph_count: text.chars().count() as u32,
+        char_count: text.chars().count() as u32,
+        has_cluster_substitution: false,
+        tj_adjustments_pt_by_gap: vec![0.0_f32; text.chars().count().saturating_sub(1)],
+        residual_width_delta_pt: 0.0_f32,
     })
 }
 
@@ -768,16 +806,26 @@ fn fallback_text_metrics(text: &str, font_size_pt: f32, h_scale_pct: f32, dpi: f
     let chars = text.chars().count().max(1);
     let width_pt = (font_size_pt.abs().max(1.0_f32) * 0.6_f32 * chars as f32 * scale).max(1.0_f32);
     let per_char = width_pt / chars as f32;
-    let char_advances_pt = vec![per_char; chars];
-    let char_advances_px = char_advances_pt
+    let observed_char_advances_pt = vec![per_char; chars];
+    let observed_char_advances_px = observed_char_advances_pt
         .iter()
         .map(|value| points_to_pixels(*value, dpi))
         .collect::<Vec<_>>();
     TextMetrics {
-        width_pt,
-        width_px: points_to_pixels(width_pt, dpi),
-        char_advances_pt,
-        char_advances_px,
+        base_glyph_width_pt: width_pt,
+        observed_width_pt: width_pt,
+        observed_width_px: points_to_pixels(width_pt, dpi),
+        base_char_advances_pt: observed_char_advances_pt.clone(),
+        observed_char_advances_pt,
+        observed_char_advances_px,
+        explicit_char_spacing_total_pt: 0.0_f32,
+        explicit_word_spacing_total_pt: 0.0_f32,
+        explicit_tj_total_pt: 0.0_f32,
+        glyph_count: text.chars().count() as u32,
+        char_count: text.chars().count() as u32,
+        has_cluster_substitution: false,
+        tj_adjustments_pt_by_gap: vec![0.0_f32; text.chars().count().saturating_sub(1)],
+        residual_width_delta_pt: 0.0_f32,
     }
 }
 
@@ -1010,6 +1058,16 @@ fn object_to_f32(object: &Object) -> Option<f32> {
     }
 }
 
+fn object_to_u8(object: &Object) -> Option<u8> {
+    match object {
+        Object::Integer(integer_value) => u8::try_from(*integer_value).ok(),
+        Object::Real(real_value) if *real_value >= 0.0_f32 && *real_value <= u8::MAX as f32 => {
+            Some(*real_value as u8)
+        }
+        _ => None,
+    }
+}
+
 fn object_to_name_string(object: &Object) -> Option<String> {
     match object {
         Object::Name(name_bytes) => Some(String::from_utf8_lossy(name_bytes).to_string()),
@@ -1083,8 +1141,35 @@ fn is_subset_prefix(parts: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::apply_pdf_spacing_adjustments;
     use super::build_font_run_report_from_input_name;
+    use super::extract_text_runs;
+    use super::ShowTextOp;
+    use super::TextMetrics;
+    use super::TextState;
+    use lopdf::content::Operation;
+    use lopdf::Object;
     use std::path::Path;
+
+    fn sample_metrics(text: &str, base_advances: Vec<f32>) -> TextMetrics {
+        let base_width_pt = base_advances.iter().sum::<f32>();
+        TextMetrics {
+            base_glyph_width_pt: base_width_pt,
+            observed_width_pt: base_width_pt,
+            observed_width_px: base_width_pt,
+            base_char_advances_pt: base_advances.clone(),
+            observed_char_advances_pt: base_advances,
+            observed_char_advances_px: vec![0.0_f32; text.chars().count()],
+            explicit_char_spacing_total_pt: 0.0_f32,
+            explicit_word_spacing_total_pt: 0.0_f32,
+            explicit_tj_total_pt: 0.0_f32,
+            glyph_count: text.chars().count() as u32,
+            char_count: text.chars().count() as u32,
+            has_cluster_substitution: false,
+            tj_adjustments_pt_by_gap: vec![0.0_f32; text.chars().count().saturating_sub(1)],
+            residual_width_delta_pt: 0.0_f32,
+        }
+    }
 
     #[test]
     fn build_font_run_report_is_deterministic_for_same_input() {
@@ -1118,6 +1203,14 @@ mod tests {
             .filter(|run| run.measured_width_pt.is_some() && run.measured_width_px.is_some())
             .count();
         assert!(measured > 0, "expected measured widths on at least one run");
+        assert!(
+            report.runs.iter().all(|run| {
+                let metrics = &run.width_metrics;
+                metrics.char_count as usize == run.text.chars().count()
+                    && metrics.observed_width_pt >= 0.0_f32
+            }),
+            "expected width metrics to align with extracted runs"
+        );
     }
 
     #[test]
@@ -1125,5 +1218,100 @@ mod tests {
         let err = build_font_run_report_from_input_name("invalid.pdf", b"not a pdf")
             .expect_err("invalid bytes should fail");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn apply_pdf_spacing_adjustments_tracks_tc_tw_tj_and_residual() {
+        let mut metrics = sample_metrics("A A", vec![2.0_f32, 1.0_f32, 2.0_f32]);
+        let show = ShowTextOp {
+            text: "A A".to_owned(),
+            per_char_adjustments_pt: vec![(0, -0.5_f32)],
+        };
+        let state = TextState {
+            font_size_pt: 10.0_f32,
+            h_scale_pct: 100.0_f32,
+            char_spacing: 100.0_f32,
+            word_spacing: 200.0_f32,
+            ..TextState::default()
+        };
+
+        apply_pdf_spacing_adjustments(&mut metrics, &show, &state);
+
+        assert!((metrics.explicit_char_spacing_total_pt - 2.0_f32).abs() < 0.0001_f32);
+        assert!((metrics.explicit_word_spacing_total_pt - 2.0_f32).abs() < 0.0001_f32);
+        assert!((metrics.explicit_tj_total_pt - (-0.5_f32)).abs() < 0.0001_f32);
+        assert!((metrics.observed_width_pt - 8.5_f32).abs() < 0.0001_f32);
+        assert!(metrics.residual_width_delta_pt.abs() < 0.0001_f32);
+        assert_eq!(metrics.tj_adjustments_pt_by_gap, vec![-0.5_f32, 0.0_f32]);
+    }
+
+    #[test]
+    fn extract_text_runs_captures_render_mode() {
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new(
+                "Tf",
+                vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            ),
+            Operation::new("Tr", vec![Object::Integer(3)]),
+            Operation::new(
+                "Tm",
+                vec![
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(1),
+                    Object::Integer(100),
+                    Object::Integer(200),
+                ],
+            ),
+            Operation::new(
+                "Tj",
+                vec![Object::string_literal("ABC")],
+            ),
+            Operation::new("ET", vec![]),
+        ];
+
+        let runs = extract_text_runs(0, &ops, &std::collections::BTreeMap::new());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].width_metrics.render_mode, 3);
+    }
+
+    #[test]
+    fn extract_text_runs_preserves_explicit_tj_metrics() {
+        let ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new(
+                "Tf",
+                vec![Object::Name(b"F1".to_vec()), Object::Integer(12)],
+            ),
+            Operation::new(
+                "Tm",
+                vec![
+                    Object::Integer(1),
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(1),
+                    Object::Integer(100),
+                    Object::Integer(200),
+                ],
+            ),
+            Operation::new(
+                "TJ",
+                vec![Object::Array(vec![
+                    Object::string_literal("A"),
+                    Object::Integer(100),
+                    Object::string_literal("V"),
+                ])],
+            ),
+            Operation::new("ET", vec![]),
+        ];
+
+        let runs = extract_text_runs(0, &ops, &std::collections::BTreeMap::new());
+        assert_eq!(runs.len(), 1);
+        assert!(
+            runs[0].width_metrics.explicit_tj_total_pt.abs() > 0.0001_f32,
+            "expected explicit TJ adjustments on extracted run"
+        );
     }
 }

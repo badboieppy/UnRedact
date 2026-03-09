@@ -55,8 +55,7 @@ fn anchor_signature(decisions: &[AnchorDecisionRecord]) -> Vec<String> {
 #[test]
 fn run_anchor_from_redactions_is_deterministic_for_fixed_input() {
     let input = Path::new("test_data/EFTA00101126.pdf");
-    let redactions_path =
-        Path::new("benchmark/user_issue_default_baseline/EFTA00101126.redactions.json");
+    let redactions_path = Path::new("test_data/redactions/EFTA00101126.redactions.json");
     let pdf_bytes = std::fs::read(input)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", input.display()));
     let redactions = load_redaction_report(redactions_path);

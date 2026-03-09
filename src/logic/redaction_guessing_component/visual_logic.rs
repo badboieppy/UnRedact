@@ -4,6 +4,7 @@ use crate::data::visual_score_data::{
     annotate_overlays, apply_page_crop_boxes, build_page_boxes, render_pages_to_rgba,
 };
 use crate::data::visualization_data::{VisualizationData, VisualizationInputs};
+use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use crate::types::file_types::FontRunReport;
 use crate::types::guess_types::{GuessReport, RedactionGuess};
 use crate::types::redaction_types::{Rect, RedactionReport, RenderedPage};
@@ -93,9 +94,13 @@ pub fn apply_visual_scores_from_bytes(
     font_runs: &FontRunReport,
     guesses: &mut [RedactionGuess],
     cfg: VisualGuessScoreConfig,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<DiagnosticRecord>, String> {
     if !cfg.enabled {
-        return Ok(vec!["visual_score=disabled".to_owned()]);
+        return Ok(vec![DiagnosticRecord::info(
+            "logic",
+            "guess_visual_score",
+            "visual_score_disabled",
+        )]);
     }
     if !cfg.dpi.is_finite() || cfg.dpi <= 0.0_f32 {
         return Err(format!("visual_score_invalid_dpi:{}", cfg.dpi));
@@ -111,7 +116,11 @@ pub fn apply_visual_scores_from_bytes(
 
     let max_items = redactions.redactions.len().min(guesses.len());
     if max_items == 0 {
-        return Ok(vec!["visual_score=skipped_empty_input".to_owned()]);
+        return Ok(vec![DiagnosticRecord::info(
+            "logic",
+            "guess_visual_score",
+            "visual_score_skipped_empty_input",
+        )]);
     }
 
     let visualization = VisualizationData::new();
@@ -138,7 +147,7 @@ fn apply_visual_scores_with_inputs(
     guesses: &mut [RedactionGuess],
     cfg: VisualGuessScoreConfig,
     max_items: usize,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<DiagnosticRecord>, String> {
     let effective_dpi = cfg.dpi.min(MAX_VISUAL_SCORE_DPI);
     let dpi_ratio = if cfg.dpi <= 0.0_f32 {
         1.0_f32
@@ -151,7 +160,7 @@ fn apply_visual_scores_with_inputs(
     let page_boxes = build_page_boxes(&inputs.pdf_bytes)?;
     let rerank_enabled = cfg.enabled;
 
-    let mut diagnostics = Vec::<String>::new();
+    let mut diagnostics = Vec::<DiagnosticRecord>::new();
     if overlays_by_redaction.is_empty() {
         for guess in guesses.iter_mut().take(max_items) {
             guess.visual_compared_pixels = None;
@@ -160,7 +169,20 @@ fn apply_visual_scores_with_inputs(
             guess.visual_reason = Some("no_overlay_for_top_guess".to_owned());
             guess.visual_dropped = false;
         }
-        diagnostics.push("visual_score=scored_rows=0 dropped_rows=0 reason=no_overlays".to_owned());
+        let mut record = DiagnosticRecord::info(
+            "logic",
+            "guess_visual_score",
+            "visual_score_no_overlays",
+        );
+        record.metrics.insert(
+            "rows_scored".to_owned(),
+            DiagnosticValue::Integer(0),
+        );
+        record.metrics.insert(
+            "rows_dropped".to_owned(),
+            DiagnosticValue::Integer(0),
+        );
+        diagnostics.push(record);
         return Ok(diagnostics);
     }
 
@@ -177,7 +199,7 @@ fn apply_visual_scores_with_inputs(
     };
     let annotate_context_ms = 0_u128;
     let page_crop_boxes = build_visual_page_crop_boxes(&overlays_by_redaction, &page_boxes);
-    let mut crop_fallback_reason: Option<String> = None;
+    let mut crop_fallback_reason: Option<DiagnosticRecord> = None;
     let (base_pdf_bytes_for_visual, overlay_pdf_bytes_for_visual, crop_apply_ms) =
         if page_crop_boxes.is_empty() {
             (inputs.pdf_bytes.clone(), annotated_bytes.clone(), 0_u128)
@@ -192,9 +214,21 @@ fn apply_visual_scores_with_inputs(
                 (base_result, overlay_result) => {
                     let base_error = base_result.err().unwrap_or_else(|| "none".to_owned());
                     let overlay_error = overlay_result.err().unwrap_or_else(|| "none".to_owned());
-                    crop_fallback_reason = Some(format!(
-                        "visual_crop_fallback base_error={base_error} overlay_error={overlay_error}"
-                    ));
+                    let mut record = DiagnosticRecord::warning(
+                        "logic",
+                        "guess_visual_score",
+                        "visual_crop_fallback",
+                        "visual crop application failed; using uncropped pages",
+                    );
+                    record.metrics.insert(
+                        "base_error".to_owned(),
+                        DiagnosticValue::Text(base_error),
+                    );
+                    record.metrics.insert(
+                        "overlay_error".to_owned(),
+                        DiagnosticValue::Text(overlay_error),
+                    );
+                    crop_fallback_reason = Some(record);
                     (
                         inputs.pdf_bytes.clone(),
                         annotated_bytes.clone(),
@@ -422,23 +456,62 @@ fn apply_visual_scores_with_inputs(
         }
     }
 
-    diagnostics.push(format!(
-        "visual_score=enabled rows_total={} rows_with_top_guess={} context_rows_scored={} context_rows_rejected={} rows_scored={} rows_dropped={} dpi_requested={} dpi_effective={} min_ink_pixels_requested={} min_ink_pixels_effective={} drop_threshold={} context_max_diff={}",
-        max_items,
-        rows_with_top_guess,
-        context_rows_scored,
-        context_rows_rejected,
-        rows_scored,
-        rows_dropped,
-        cfg.dpi,
-        effective_dpi,
-        cfg.min_ink_pixels,
-        effective_min_ink_pixels,
-        cfg.drop_threshold
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "none".to_owned()),
-        CONTEXT_ALIGNMENT_MAX_DIFF
-    ));
+    let mut visual_summary = DiagnosticRecord::info(
+        "logic",
+        "guess_visual_score",
+        "visual_score_summary",
+    );
+    visual_summary.metrics.insert(
+        "rows_total".to_owned(),
+        DiagnosticValue::Integer(max_items as i64),
+    );
+    visual_summary.metrics.insert(
+        "rows_with_top_guess".to_owned(),
+        DiagnosticValue::Integer(rows_with_top_guess as i64),
+    );
+    visual_summary.metrics.insert(
+        "context_rows_scored".to_owned(),
+        DiagnosticValue::Integer(context_rows_scored as i64),
+    );
+    visual_summary.metrics.insert(
+        "context_rows_rejected".to_owned(),
+        DiagnosticValue::Integer(context_rows_rejected as i64),
+    );
+    visual_summary.metrics.insert(
+        "rows_scored".to_owned(),
+        DiagnosticValue::Integer(rows_scored as i64),
+    );
+    visual_summary.metrics.insert(
+        "rows_dropped".to_owned(),
+        DiagnosticValue::Integer(rows_dropped as i64),
+    );
+    visual_summary.metrics.insert(
+        "dpi_requested".to_owned(),
+        DiagnosticValue::Float(cfg.dpi as f64),
+    );
+    visual_summary.metrics.insert(
+        "dpi_effective".to_owned(),
+        DiagnosticValue::Float(effective_dpi as f64),
+    );
+    visual_summary.metrics.insert(
+        "min_ink_pixels_requested".to_owned(),
+        DiagnosticValue::Integer(cfg.min_ink_pixels as i64),
+    );
+    visual_summary.metrics.insert(
+        "min_ink_pixels_effective".to_owned(),
+        DiagnosticValue::Integer(effective_min_ink_pixels as i64),
+    );
+    visual_summary.metrics.insert(
+        "context_max_diff".to_owned(),
+        DiagnosticValue::Float(CONTEXT_ALIGNMENT_MAX_DIFF as f64),
+    );
+    if let Some(threshold) = cfg.drop_threshold {
+        visual_summary.metrics.insert(
+            "drop_threshold".to_owned(),
+            DiagnosticValue::Float(threshold as f64),
+        );
+    }
+    diagnostics.push(visual_summary);
     if let Some(reason) = crop_fallback_reason {
         diagnostics.push(reason);
     }
@@ -452,18 +525,48 @@ fn apply_visual_scores_with_inputs(
     } else {
         rerank_gain_sum / rerank_rows_scored as f64
     };
-    diagnostics.push(format!(
-        "visual_rerank=enabled={} rows_considered={} rows_scored={} top1_changed={} top1_changed_ratio={:.4} mean_gain={:.4} top_k={} eval_cap={} blend_weight={:.3}",
-        rerank_enabled,
-        rerank_rows_considered,
-        rerank_rows_scored,
-        rerank_top1_changed,
-        rerank_changed_ratio,
-        rerank_mean_gain,
-        VISUAL_RERANK_TOP_K,
-        VISUAL_RERANK_MAX_EVAL_CANDIDATES,
-        VISUAL_RERANK_BLEND_WEIGHT
-    ));
+    let mut rerank_summary = DiagnosticRecord::info(
+        "logic",
+        "guess_visual_score",
+        "visual_rerank_summary",
+    );
+    rerank_summary.metrics.insert(
+        "enabled".to_owned(),
+        DiagnosticValue::Bool(rerank_enabled),
+    );
+    rerank_summary.metrics.insert(
+        "rows_considered".to_owned(),
+        DiagnosticValue::Integer(rerank_rows_considered as i64),
+    );
+    rerank_summary.metrics.insert(
+        "rows_scored".to_owned(),
+        DiagnosticValue::Integer(rerank_rows_scored as i64),
+    );
+    rerank_summary.metrics.insert(
+        "top1_changed".to_owned(),
+        DiagnosticValue::Integer(rerank_top1_changed as i64),
+    );
+    rerank_summary.metrics.insert(
+        "top1_changed_ratio".to_owned(),
+        DiagnosticValue::Float(rerank_changed_ratio),
+    );
+    rerank_summary.metrics.insert(
+        "mean_gain".to_owned(),
+        DiagnosticValue::Float(rerank_mean_gain),
+    );
+    rerank_summary.metrics.insert(
+        "top_k".to_owned(),
+        DiagnosticValue::Integer(VISUAL_RERANK_TOP_K as i64),
+    );
+    rerank_summary.metrics.insert(
+        "eval_cap".to_owned(),
+        DiagnosticValue::Integer(VISUAL_RERANK_MAX_EVAL_CANDIDATES as i64),
+    );
+    rerank_summary.metrics.insert(
+        "blend_weight".to_owned(),
+        DiagnosticValue::Float(VISUAL_RERANK_BLEND_WEIGHT as f64),
+    );
+    diagnostics.push(rerank_summary);
     let rerank_mean_eval_ms_per_candidate = if rerank_candidate_evals == 0 {
         0.0_f64
     } else {
@@ -474,29 +577,80 @@ fn apply_visual_scores_with_inputs(
     } else {
         rerank_eval_ms as f64 / rerank_rows_scored as f64
     };
-    diagnostics.push(format!(
-        "visual_rerank_timing=candidate_evals={} eval_ms_total={} eval_ms_per_candidate={:.3} eval_ms_per_scored_row={:.3}",
-        rerank_candidate_evals,
-        rerank_eval_ms,
-        rerank_mean_eval_ms_per_candidate,
-        rerank_mean_eval_ms_per_row
-    ));
-    diagnostics.push(format!(
-        "visual_score_timing=annotate_overlay_ms={} annotate_context_ms={} renderer_init_ms={} page_render_ms={} row_scoring_ms={} pages_rendered={}",
-        annotate_overlay_ms,
-        annotate_context_ms,
-        renderer_init_ms,
-        page_render_ms,
-        row_scoring_started.elapsed().as_millis(),
-        base_pages.len()
-    ));
-    diagnostics.push(format!(
-        "visual_tile_rendering=pages_cropped={} crop_apply_ms={} tile_padding_pt={} max_crop_coverage={}",
-        page_crop_boxes.len(),
-        crop_apply_ms,
-        VISUAL_TILE_PAGE_PADDING_PT,
-        VISUAL_TILE_MAX_COVERAGE_FOR_CROP
-    ));
+    let mut rerank_timing = DiagnosticRecord::info(
+        "logic",
+        "guess_visual_score",
+        "visual_rerank_timing",
+    );
+    rerank_timing.metrics.insert(
+        "candidate_evals".to_owned(),
+        DiagnosticValue::Integer(rerank_candidate_evals as i64),
+    );
+    rerank_timing.metrics.insert(
+        "eval_ms_total".to_owned(),
+        DiagnosticValue::Integer(rerank_eval_ms as i64),
+    );
+    rerank_timing.metrics.insert(
+        "eval_ms_per_candidate".to_owned(),
+        DiagnosticValue::Float(rerank_mean_eval_ms_per_candidate),
+    );
+    rerank_timing.metrics.insert(
+        "eval_ms_per_scored_row".to_owned(),
+        DiagnosticValue::Float(rerank_mean_eval_ms_per_row),
+    );
+    diagnostics.push(rerank_timing);
+    let mut visual_timing = DiagnosticRecord::info(
+        "logic",
+        "guess_visual_score",
+        "visual_score_timing",
+    );
+    visual_timing.metrics.insert(
+        "annotate_overlay_ms".to_owned(),
+        DiagnosticValue::Integer(annotate_overlay_ms as i64),
+    );
+    visual_timing.metrics.insert(
+        "annotate_context_ms".to_owned(),
+        DiagnosticValue::Integer(annotate_context_ms as i64),
+    );
+    visual_timing.metrics.insert(
+        "renderer_init_ms".to_owned(),
+        DiagnosticValue::Integer(renderer_init_ms as i64),
+    );
+    visual_timing.metrics.insert(
+        "page_render_ms".to_owned(),
+        DiagnosticValue::Integer(page_render_ms as i64),
+    );
+    visual_timing.metrics.insert(
+        "row_scoring_ms".to_owned(),
+        DiagnosticValue::Integer(row_scoring_started.elapsed().as_millis() as i64),
+    );
+    visual_timing.metrics.insert(
+        "pages_rendered".to_owned(),
+        DiagnosticValue::Integer(base_pages.len() as i64),
+    );
+    diagnostics.push(visual_timing);
+    let mut tile_rendering = DiagnosticRecord::info(
+        "logic",
+        "guess_visual_score",
+        "visual_tile_rendering",
+    );
+    tile_rendering.metrics.insert(
+        "pages_cropped".to_owned(),
+        DiagnosticValue::Integer(page_crop_boxes.len() as i64),
+    );
+    tile_rendering.metrics.insert(
+        "crop_apply_ms".to_owned(),
+        DiagnosticValue::Integer(crop_apply_ms as i64),
+    );
+    tile_rendering.metrics.insert(
+        "tile_padding_pt".to_owned(),
+        DiagnosticValue::Float(VISUAL_TILE_PAGE_PADDING_PT as f64),
+    );
+    tile_rendering.metrics.insert(
+        "max_crop_coverage".to_owned(),
+        DiagnosticValue::Float(VISUAL_TILE_MAX_COVERAGE_FOR_CROP as f64),
+    );
+    diagnostics.push(tile_rendering);
     Ok(diagnostics)
 }
 

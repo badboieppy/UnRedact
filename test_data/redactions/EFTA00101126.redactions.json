@@ -1,0 +1,376 @@
+{
+  "input": "test_data/EFTA00101126.pdf",
+  "redactions": [
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 33.0,
+        "y0": 66.0,
+        "x1": 70.5,
+        "y1": 84.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.8,
+      "meta": {
+        "profile_dark_ratio": "0.875",
+        "profile_dark_runs": "0-50",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "4",
+        "profile_split_index": "0"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 32.25,
+            "y0": 59.56,
+            "x1": 45.378,
+            "y1": 70.5
+          },
+          "text": "--"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 69.48,
+            "y0": 60.680004,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "Print"
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 72.75,
+        "y0": 66.0,
+        "x1": 77.25,
+        "y1": 84.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.2,
+      "meta": {
+        "profile_dark_ratio": "0.674",
+        "profile_dark_runs": "0-6",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "4",
+        "profile_split_index": "1"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 32.25,
+            "y0": 59.56,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "-- Print"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 69.48,
+            "y0": 60.680004,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "Print"
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 85.5,
+        "y0": 66.0,
+        "x1": 90.0,
+        "y1": 84.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.2,
+      "meta": {
+        "profile_dark_ratio": "0.688",
+        "profile_dark_runs": "0-6",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "4",
+        "profile_split_index": "2"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 32.25,
+            "y0": 59.56,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "-- Print"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 69.48,
+            "y0": 60.680004,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "Print"
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 92.25,
+        "y0": 66.0,
+        "x1": 132.0,
+        "y1": 84.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.8,
+      "meta": {
+        "profile_dark_ratio": "0.876",
+        "profile_dark_runs": "0-53",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "4",
+        "profile_split_index": "3"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 32.25,
+            "y0": 59.56,
+            "x1": 102.3,
+            "y1": 71.62
+          },
+          "text": "-- Print"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 170.14,
+            "y0": 60.31,
+            "x1": 229.14001,
+            "y1": 71.62
+          },
+          "text": "Save As..."
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 144.0,
+        "y0": 66.0,
+        "x1": 243.0,
+        "y1": 81.0
+      },
+      "kind": "raster_dark_region",
+      "score": 1.0,
+      "meta": {
+        "profile_dark_ratio": "0.877",
+        "profile_dark_runs": "1-132",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 30.46,
+            "y0": 47.57,
+            "x1": 42.646,
+            "y1": 67.88
+          },
+          "text": "1"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 144.0,
+            "y0": 66.0,
+            "x1": 243.0,
+            "y1": 81.0
+          },
+          "text": ""
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 481.5,
+        "y0": 66.0,
+        "x1": 516.75,
+        "y1": 81.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.8,
+      "meta": {
+        "profile_dark_ratio": "1.000",
+        "profile_dark_runs": "0-47",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "2",
+        "profile_split_index": "0"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 170.14,
+            "y0": 60.31,
+            "x1": 229.14001,
+            "y1": 71.62
+          },
+          "text": "Save As..."
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 516.17,
+            "y0": 60.31,
+            "x1": 548.99,
+            "y1": 71.25
+          },
+          "text": "Reset"
+        }
+      ]
+    },
+    {
+      "page_index": 1,
+      "bbox": {
+        "x0": 522.75,
+        "y0": 66.0,
+        "x1": 580.5,
+        "y1": 81.0
+      },
+      "kind": "raster_dark_region",
+      "score": 0.8,
+      "meta": {
+        "profile_dark_ratio": "0.890",
+        "profile_dark_runs": "0-77",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000",
+        "profile_split_count": "2",
+        "profile_split_index": "1"
+      },
+      "underlying_text": [
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 516.17,
+            "y0": 60.31,
+            "x1": 548.99,
+            "y1": 71.25
+          },
+          "text": "Reset"
+        },
+        {
+          "page_index": 1,
+          "bbox": {
+            "x0": 522.75,
+            "y0": 66.0,
+            "x1": 580.5,
+            "y1": 81.0
+          },
+          "text": ""
+        }
+      ]
+    },
+    {
+      "page_index": 7,
+      "bbox": {
+        "x0": 174.0,
+        "y0": 267.0,
+        "x1": 264.0,
+        "y1": 282.0
+      },
+      "kind": "raster_dark_region",
+      "score": 1.0,
+      "meta": {
+        "profile_dark_ratio": "0.843",
+        "profile_dark_runs": "1-120",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000"
+      },
+      "underlying_text": [
+        {
+          "page_index": 7,
+          "bbox": {
+            "x0": 71.86,
+            "y0": 259.29,
+            "x1": 187.994,
+            "y1": 270.75
+          },
+          "text": "EPSTEIN, including"
+        },
+        {
+          "page_index": 7,
+          "bbox": {
+            "x0": 267.3,
+            "y0": 259.29,
+            "x1": 349.55402,
+            "y1": 270.75
+          },
+          "text": "and GHISLAINE"
+        }
+      ]
+    },
+    {
+      "page_index": 7,
+      "bbox": {
+        "x0": 240.0,
+        "y0": 228.0,
+        "x1": 330.0,
+        "y1": 243.0
+      },
+      "kind": "raster_dark_region",
+      "score": 1.0,
+      "meta": {
+        "profile_dark_ratio": "0.900",
+        "profile_dark_runs": "0-120",
+        "profile_max_gap_px": "0",
+        "profile_split_confidence": "0.000"
+      },
+      "underlying_text": [
+        {
+          "page_index": 7,
+          "bbox": {
+            "x0": 137.11,
+            "y0": 219.54,
+            "x1": 253.244,
+            "y1": 231.0
+          },
+          "text": "EPSTEIN, including"
+        },
+        {
+          "page_index": 7,
+          "bbox": {
+            "x0": 332.55,
+            "y0": 219.54,
+            "x1": 414.80402,
+            "y1": 231.0
+          },
+          "text": "and GHISLAINE"
+        }
+      ]
+    }
+  ],
+  "count": 9,
+  "page_counts": {
+    "1": 7,
+    "7": 2
+  },
+  "diagnostics": [
+    "raster_two_pass=pages=9 candidate_pages=2 non_candidate_pages=7 prepass_dpi=18.0 highpass_dpi=96.0 requested_dpi=96.0 prepass_ms=3964 highpass_pages=2 highpass_ms=3921 highpass_fallback_pages=0"
+  ]
+}

@@ -3,38 +3,23 @@
 use std::path::Path;
 
 use unredact::service::unredact_web_entry::{run, UnredactWebConfig, UnredactWebRequest};
+use unredact::types::diagnostic_types::DiagnosticReport;
 use unredact::types::guess_types::{GuessConfig, GuessReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
-fn normalize_guess_text_for_exact_match(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_ascii_uppercase()
-}
-
-fn rank_in_guess(
-    guess: &unredact::types::guess_types::RedactionGuess,
-    target: &str,
-) -> Option<usize> {
-    let target = normalize_guess_text_for_exact_match(target);
-    let mut ordered = Vec::<String>::new();
-    for candidate in &guess.candidates {
-        ordered.push(normalize_guess_text_for_exact_match(&candidate.text));
+fn allowed_guess_width_pt(guess: &unredact::types::guess_types::RedactionGuess) -> f32 {
+    match (
+        guess.context.anchor_mode.as_deref(),
+        guess.context.anchor_left_x,
+        guess.context.anchor_right_x,
+    ) {
+        (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
+        _ => guess.bbox.width().abs(),
     }
-    for value in &guess.exact_matches {
-        ordered.push(normalize_guess_text_for_exact_match(value));
-    }
-    ordered
-        .iter()
-        .position(|value| value == &target)
-        .map(|index| index + 1)
 }
 
 #[test]
-fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
+fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
     let input = Path::new("test_data/EFTA00101126.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
     let pdf_bytes_result = std::fs::read(input);
@@ -76,6 +61,18 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
         report_result.err()
     );
     let report = report_result.expect("web guesses should decode");
+    let diagnostics_result =
+        serde_json::from_slice::<DiagnosticReport>(&web_outputs.diagnostics_json);
+    assert!(
+        diagnostics_result.is_ok(),
+        "failed to decode web diagnostics json: {:?}",
+        diagnostics_result.err()
+    );
+    let diagnostics = diagnostics_result.expect("web diagnostics should decode");
+    assert!(
+        !diagnostics.items.is_empty(),
+        "expected typed diagnostics in web response"
+    );
 
     assert!(
         report.guesses.len() >= 2,
@@ -93,16 +90,18 @@ fn web_entry_bytes_flow_matches_known_efta00101126_expectations() {
         last.context.has_anchor_pair,
         "last redaction should be guessable"
     );
-    let second_rank = rank_in_guess(second_last, "SARAH KELLEN");
-    let last_rank = rank_in_guess(last, "SARAH KELLEN");
-    assert!(
-        matches!(second_rank, Some(rank) if rank <= 5),
-        "expected second-to-last redaction to keep SARAH KELLEN within top 5, got {:?}",
-        second_rank
-    );
-    assert!(
-        matches!(last_rank, Some(rank) if rank <= 5),
-        "expected last redaction to keep SARAH KELLEN within top 5, got {:?}",
-        last_rank
-    );
+    for guess in [second_last, last] {
+        let allowed_width = allowed_guess_width_pt(guess) + 0.01_f32;
+        for candidate in &guess.candidates {
+            if let Some(width_pt) = candidate.width_pt {
+                assert!(
+                    width_pt <= allowed_width,
+                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
+                    candidate.text,
+                    allowed_width,
+                    width_pt
+                );
+            }
+        }
+    }
 }

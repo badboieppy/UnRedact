@@ -27,6 +27,7 @@ pub struct UnredactServiceOutputs {
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
     pub anchors_path: PathBuf,
+    pub diagnostics_path: PathBuf,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -52,6 +53,7 @@ pub struct UnredactBatchFileResult {
     pub fonts_path: Option<PathBuf>,
     pub guesses_path: Option<PathBuf>,
     pub anchors_path: Option<PathBuf>,
+    pub diagnostics_path: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
     pub error: Option<String>,
     pub elapsed_ms: u128,
@@ -122,10 +124,16 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
     } else {
         0_u128
     };
-    bytes_outputs
-        .guesses
-        .diagnostics
-        .push(format!("timing_ms stage=visualize value={visualize_ms}"));
+    let mut visualize_record = crate::types::diagnostic_types::DiagnosticRecord::info(
+        "service",
+        "visualize",
+        "timing_ms",
+    );
+    visualize_record.metrics.insert(
+        "value_ms".to_owned(),
+        crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
+    );
+    bytes_outputs.guesses.diagnostics.push(visualize_record);
     bytes_outputs.visualization_payload = None;
     let encoded_outputs = crate::logic::encode_outputs(&bytes_outputs)?;
     write_encoded_outputs(&output_paths, &encoded_outputs)?;
@@ -134,6 +142,7 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         fonts_path: output_paths.fonts_path,
         guesses_path: output_paths.guesses_path,
         anchors_path: output_paths.anchors_path,
+        diagnostics_path: output_paths.diagnostics_path,
         visualized_pdf_path: output_paths.visualized_pdf_path,
     })
 }
@@ -218,6 +227,7 @@ fn run_batch_item(
                 fonts_path: None,
                 guesses_path: None,
                 anchors_path: None,
+                diagnostics_path: None,
                 visualized_pdf_path: None,
                 error: Some(error),
                 elapsed_ms: started.elapsed().as_millis(),
@@ -234,6 +244,7 @@ fn run_batch_item(
             fonts_path: Some(outputs.fonts_path),
             guesses_path: Some(outputs.guesses_path),
             anchors_path: Some(outputs.anchors_path),
+            diagnostics_path: Some(outputs.diagnostics_path),
             visualized_pdf_path: outputs.visualized_pdf_path,
             error: None,
             elapsed_ms: started.elapsed().as_millis(),
@@ -245,6 +256,7 @@ fn run_batch_item(
             fonts_path: None,
             guesses_path: None,
             anchors_path: None,
+            diagnostics_path: None,
             visualized_pdf_path: None,
             error: Some(format!("{}: {error}", input.display())),
             elapsed_ms: started.elapsed().as_millis(),
@@ -256,7 +268,9 @@ fn run_batch_item(
 mod tests {
     use std::path::Path;
 
-    use super::{run_batch_from_paths, BatchFileStatus, UnredactServiceConfig};
+    use crate::types::diagnostic_types::DiagnosticReport;
+
+    use super::{run_batch_from_paths, run_from_paths, BatchFileStatus, UnredactServiceConfig};
 
     fn test_dir(tag: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -351,5 +365,43 @@ mod tests {
             guesses_path.display()
         );
         assert!(guesses_path.ends_with(Path::new("a/b/report/report.guesses.json")));
+    }
+
+    #[test]
+    fn run_from_paths_writes_diagnostics_json() {
+        let input = Path::new("test_data/EFTA00101126.pdf");
+        assert!(input.exists(), "missing test input: {}", input.display());
+
+        let output_dir = test_dir("service_diagnostics_output");
+        std::fs::create_dir_all(&output_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+
+        let outputs = run_from_paths(input, &output_dir, None, UnredactServiceConfig::default())
+            .expect("service run should succeed");
+        assert!(
+            outputs.diagnostics_path.exists(),
+            "expected diagnostics file {}",
+            outputs.diagnostics_path.display()
+        );
+        let bytes = std::fs::read(&outputs.diagnostics_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read diagnostics {}: {error}",
+                outputs.diagnostics_path.display()
+            )
+        });
+        let report = serde_json::from_slice::<DiagnosticReport>(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "failed to parse diagnostics {}: {error}",
+                outputs.diagnostics_path.display()
+            )
+        });
+        assert!(
+            !report.items.is_empty(),
+            "expected non-empty diagnostics report"
+        );
+        assert!(
+            report.items.iter().any(|item| item.code == "timing_ms"),
+            "expected diagnostics to include timing records"
+        );
     }
 }
