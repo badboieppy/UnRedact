@@ -1015,7 +1015,6 @@ pub fn extract_raster_page_redactions(
                 capture.height_px as usize,
                 &split_region,
             );
-
             let meta = build_raster_redaction_meta(
                 DetailPolicy::new(cfg.include_details),
                 cfg,
