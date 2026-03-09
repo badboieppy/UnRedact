@@ -2,6 +2,9 @@
   "name": "unredact-web-tests",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "playwright:install": "playwright install chromium",
     "test:wasm-smoke": "node scripts/wasm_smoke_test.mjs",

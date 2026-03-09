@@ -12,6 +12,7 @@ const rootDir = process.cwd();
 const wasmBinaryPath = path.resolve(rootDir, "web/pkg/unredact_bg.wasm");
 const samplePdfPath = path.resolve(rootDir, "test_data/EFTA00101126.pdf");
 const textDecoder = new TextDecoder();
+const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
 
 function asUint8Array(value, fieldName) {
   if (value == null) {
@@ -35,6 +36,11 @@ function decodeJson(bytes, fieldName) {
 }
 
 async function main() {
+  assert(
+    Number.isFinite(nodeMajor) && nodeMajor >= 22,
+    `Node.js 22 or newer is required for this wasm smoke test; found ${process.versions.node}`,
+  );
+
   const [wasmBytes, pdfBytes] = await Promise.all([
     fs.readFile(wasmBinaryPath),
     fs.readFile(samplePdfPath),
