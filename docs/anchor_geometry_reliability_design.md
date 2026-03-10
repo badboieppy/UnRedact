@@ -2,6 +2,10 @@
 Date: 2026-03-02
 Status: Proposed
 
+This document captures an earlier anchor-geometry investigation. The current
+ranking implementation lives in `src/data/guess_candidate_data.rs` and
+`src/logic/redaction_guessing_component/helpers/guessing.rs`.
+
 ## 1. Introduction
 ### 1.1 Service description
 This service tries to recover words that were hidden under black redaction boxes in PDF files.
@@ -310,16 +314,12 @@ Required validation commands (default args):
 - `cargo test`
 - `cargo run --bin guess_accuracy_benchmark --release`
 - `cargo run --bin synthetic_overfitting_benchmark --release`
-- `cargo run --bin visual_score_impact_benchmark --release`
-- `cargo run --bin evidence_first_change_gate --release`
 
 Expected primary artifacts:
 - `benchmark/guess_accuracy.json`
 - `benchmark/guess_accuracy.baseline.json`
 - `benchmark/synthetic_overfitting_evaluation.json`
 - `benchmark/synthetic_overfitting_evaluation.baseline.json`
-- `benchmark/visual_score_impact.json`
-- `benchmark/evidence_first_change_gate_decision.json`
 
 ### 4.2 Hard gate policy
 - Hard pass requires:

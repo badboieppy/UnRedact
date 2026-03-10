@@ -30,20 +30,14 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
-      - name: Install Binaryen version_126
-        run: |
-          curl -L "https://github.com/WebAssembly/binaryen/releases/download/version_126/binaryen-version_126-x86_64-linux.tar.gz" -o /tmp/binaryen.tar.gz
-          tar -xzf /tmp/binaryen.tar.gz -C /tmp
-          echo "/tmp/binaryen-version_126/bin" >> "$GITHUB_PATH"
-
-      - name: Verify wasm-opt version
-        run: |
-          which wasm-opt
-          wasm-opt --version
-
       - name: Build wasm package
-        working-directory: web_bindings
-        run: wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
+        run: >
+          wasm-pack build
+          --target web
+          --out-dir web/pkg
+          --release
+          --no-default-features
+          --features "shared-bytes-workflow,web-entry"
 
       - name: Prepare site artifact
         run: |

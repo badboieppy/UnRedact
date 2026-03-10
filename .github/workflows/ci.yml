@@ -25,16 +25,6 @@ jobs:
           --out benchmark/ci_guess_accuracy.json
           --repeats 1
 
-      - name: Benchmark smoke - visual score impact
-        run: >
-          cargo run --release --features cli-entry --bin visual_score_impact_benchmark --
-          --input test_data/EFTA00038617.pdf
-          --page 2
-          --trials 1
-          --targets-per-trial 2
-          --dictionary-size 256
-          --out benchmark/ci_visual_score_impact.json
-
   wasm-warning-free:
     runs-on: ubuntu-latest
     steps:
@@ -60,12 +50,18 @@ jobs:
           RUSTFLAGS: -D warnings
         run: >
           cargo check
-          --manifest-path web_bindings/Cargo.toml
           --target wasm32-unknown-unknown
+          --no-default-features
+          --features "shared-bytes-workflow,web-entry"
 
       - name: Build wasm package
-        working-directory: web_bindings
-        run: wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
+        run: >
+          wasm-pack build
+          --target web
+          --out-dir web/pkg
+          --release
+          --no-default-features
+          --features "shared-bytes-workflow,web-entry"
 
       - name: Run wasm Node smoke test
         run: npm run test:wasm-smoke

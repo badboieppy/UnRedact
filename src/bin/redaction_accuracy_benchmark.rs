@@ -269,10 +269,7 @@ fn benchmark_config() -> UnredactServiceConfig {
     UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: false,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     }

@@ -544,11 +544,13 @@ fn apply_pdf_spacing_adjustments(metrics: &mut TextMetrics, show: &ShowTextOp, s
     metrics.explicit_word_spacing_total_pt = word_spacing_total;
     metrics.explicit_tj_total_pt = tj_total;
     metrics.tj_adjustments_pt_by_gap = tj_adjustments_pt_by_gap;
-    metrics.observed_width_pt = metrics.base_glyph_width_pt + char_spacing_total + word_spacing_total + tj_total;
+    metrics.observed_width_pt =
+        metrics.base_glyph_width_pt + char_spacing_total + word_spacing_total + tj_total;
     if !metrics.observed_width_pt.is_finite() || metrics.observed_width_pt <= 0.0_f32 {
         metrics.observed_width_pt = 0.001_f32;
     }
-    metrics.observed_width_px = points_to_pixels(metrics.observed_width_pt, DEFAULT_FONT_METRICS_DPI);
+    metrics.observed_width_px =
+        points_to_pixels(metrics.observed_width_pt, DEFAULT_FONT_METRICS_DPI);
     metrics.observed_char_advances_pt = normalize_char_advances(
         &show.text,
         metrics.observed_char_advances_pt.clone(),
@@ -1265,10 +1267,7 @@ mod tests {
                     Object::Integer(200),
                 ],
             ),
-            Operation::new(
-                "Tj",
-                vec![Object::string_literal("ABC")],
-            ),
+            Operation::new("Tj", vec![Object::string_literal("ABC")]),
             Operation::new("ET", vec![]),
         ];
 

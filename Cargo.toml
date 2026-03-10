@@ -8,6 +8,9 @@ keywords = ["pdf", "redaction", "forensics", "fonts", "cli"]
 categories = ["command-line-utilities", "text-processing"]
 license-file = "LICENSE"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = [
     "shared-bytes-workflow",
@@ -33,6 +36,8 @@ clap = { version = "4.5.27", features = ["derive"], optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 js-sys = "0.3.85"
+serde-wasm-bindgen = "=0.6.5"
+wasm-bindgen = "=0.2.108"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
@@ -51,6 +56,9 @@ strip = "symbols"
 [profile.bench]
 inherits = "release"
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [[bin]]
 name = "unredact-cli"
 path = "src/main.rs"
@@ -67,18 +75,8 @@ path = "src/bin/pdf_to_png.rs"
 required-features = ["cli-entry"]
 
 [[bin]]
-name = "visual_score_impact_benchmark"
-path = "src/bin/visual_score_impact_benchmark.rs"
-required-features = ["cli-entry"]
-
-[[bin]]
 name = "synthetic_overfitting_benchmark"
 path = "src/bin/synthetic_overfitting_benchmark.rs"
-required-features = ["cli-entry"]
-
-[[bin]]
-name = "evidence_first_change_gate"
-path = "src/bin/evidence_first_change_gate.rs"
 required-features = ["cli-entry"]
 
 [[bin]]

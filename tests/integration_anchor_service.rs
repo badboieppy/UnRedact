@@ -4,26 +4,18 @@ use std::path::Path;
 
 use unredact::service::tooling_entry::{run_anchor_from_redactions, ToolingAnchorRequest};
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use unredact::types::guess_types::{AnchorCandidateDecision, AnchorDecisionRecord, AnchorType};
+use unredact::types::guess_types::{AnchorDecisionRecord, AnchorType};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 mod common;
 use common::{load_guess_report, load_redaction_report, test_output_dir};
 
-fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorCandidateDecision> {
-    if let Some(candidate_id) = decision.selected_candidate_id.as_deref() {
-        if let Some(candidate) = decision
-            .candidates
-            .iter()
-            .find(|candidate| candidate.candidate_id == candidate_id)
-        {
-            return Some(candidate);
-        }
+fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorDecisionRecord> {
+    if decision.left.is_some() || decision.right.is_some() {
+        Some(decision)
+    } else {
+        None
     }
-    decision
-        .candidates
-        .iter()
-        .find(|candidate| candidate.was_selected)
 }
 
 fn anchor_signature(decisions: &[AnchorDecisionRecord]) -> Vec<String> {
@@ -41,12 +33,8 @@ fn anchor_signature(decisions: &[AnchorDecisionRecord]) -> Vec<String> {
             .map(|side| format!("{}@{:.3}", side.text.trim(), side.x))
             .unwrap_or_else(|| "-".to_owned());
         out.push(format!(
-            "{}|{}|{}|{}|{}",
-            decision.anchor_row_id,
-            decision.selected_candidate_id.as_deref().unwrap_or("-"),
-            decision.selected_mode.as_deref().unwrap_or("-"),
-            left,
-            right
+            "{}|{}|{}|{}",
+            decision.anchor_row_id, decision.anchor_mode, left, right
         ));
     }
     out
@@ -98,10 +86,7 @@ fn pipeline_anchor_output_matches_anchor_service_entrypoint() {
         UnredactServiceConfig {
             include_details: false,
             enable_image_analysis: true,
-            guess: unredact::types::guess_types::GuessConfig {
-                visual_score: false,
-                ..unredact::types::guess_types::GuessConfig::default()
-            },
+            guess: unredact::types::guess_types::GuessConfig::default(),
             visualize: false,
             visualizer: VisualizerConfig::default(),
         },

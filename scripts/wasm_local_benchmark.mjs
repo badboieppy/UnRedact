@@ -13,8 +13,6 @@ const DEFAULT_OUTPUT = "benchmark/wasm_local_benchmark.json";
 const DEFAULT_REPEATS = 3;
 const DEFAULT_WARMUP = 1;
 const DEFAULT_RASTER_DPI = 200.0;
-const DEFAULT_VISUAL_SCORE_DPI = 200.0;
-
 function printUsage() {
   const lines = [
     "Usage: node scripts/wasm_local_benchmark.mjs [options]",
@@ -25,11 +23,9 @@ function printUsage() {
     "  --dictionary <path>             Optional dictionary text file (one entry per line).",
     "  --repeats <n>                   Number of measured runs per PDF (default: 3).",
     "  --warmup <n>                    Number of warmup runs per PDF (default: 1).",
-    "  --should-visually-score <bool>  Enable visual scoring (default: true).",
     "  --enable-image-analysis <bool>  Enable raster/image analysis (default: true).",
     "  --visualize <bool>              Render visualized PDF output (default: false).",
     "  --raster-dpi <float>            Raster DPI (default: 200).",
-    "  --visual-score-dpi <float>      Visual-score DPI (default: 200).",
     "  --out <path>                    Output report JSON path (default: benchmark/wasm_local_benchmark.json).",
     "  --help                          Show this help.",
     "",
@@ -82,11 +78,9 @@ function parseArgs(argv) {
     dictionary: null,
     repeats: DEFAULT_REPEATS,
     warmup: DEFAULT_WARMUP,
-    shouldVisuallyScore: true,
     enableImageAnalysis: true,
     visualize: false,
     rasterDpi: DEFAULT_RASTER_DPI,
-    visualScoreDpi: DEFAULT_VISUAL_SCORE_DPI,
     outPath: DEFAULT_OUTPUT,
   };
 
@@ -113,11 +107,6 @@ function parseArgs(argv) {
       options.repeats = parsePositiveInt(next(), "--repeats");
     } else if (arg === "--warmup") {
       options.warmup = parseNonNegativeInt(next(), "--warmup");
-    } else if (arg === "--should-visually-score") {
-      options.shouldVisuallyScore = parseBool(
-        next(),
-        "--should-visually-score",
-      );
     } else if (arg === "--enable-image-analysis") {
       options.enableImageAnalysis = parseBool(
         next(),
@@ -127,8 +116,6 @@ function parseArgs(argv) {
       options.visualize = parseBool(next(), "--visualize");
     } else if (arg === "--raster-dpi") {
       options.rasterDpi = parsePositiveFloat(next(), "--raster-dpi");
-    } else if (arg === "--visual-score-dpi") {
-      options.visualScoreDpi = parsePositiveFloat(next(), "--visual-score-dpi");
     } else if (arg === "--out") {
       options.outPath = next();
     } else {
@@ -281,15 +268,11 @@ function parseStageTimings(diagnostics) {
 
 function stableTopGuessSignature(report) {
   const rows = (report?.guesses ?? []).map((guess) => {
-    const topExact =
-      Array.isArray(guess.exact_matches) && guess.exact_matches.length > 0
-        ? guess.exact_matches[0]
-        : "";
     const topCandidate =
       Array.isArray(guess.candidates) && guess.candidates.length > 0
         ? String(guess.candidates[0]?.text ?? "")
         : "";
-    const topGuess = topExact || topCandidate;
+    const topGuess = topCandidate;
     const bbox = guess?.bbox ?? {};
     return [
       String(guess?.page_index ?? ""),
@@ -375,10 +358,7 @@ function buildRequest(pdfPath, pdfBytes, dictionaryBytes, options) {
       include_details: false,
       enable_image_analysis: options.enableImageAnalysis,
       raster_dpi: options.rasterDpi,
-      guess: {
-        visual_score: options.shouldVisuallyScore,
-        visual_score_dpi: options.visualScoreDpi,
-      },
+      guess: {},
       visualize: options.visualize,
       visualizer: {
         color: [1.0, 0.0, 0.0],
@@ -515,11 +495,9 @@ async function main() {
       pdf_count: pdfPaths.length,
       repeats: options.repeats,
       warmup: options.warmup,
-      should_visually_score: options.shouldVisuallyScore,
       enable_image_analysis: options.enableImageAnalysis,
       visualize: options.visualize,
       raster_dpi: options.rasterDpi,
-      visual_score_dpi: options.visualScoreDpi,
       dictionary_source: dictionary.source,
       dictionary_entries: dictionary.entry_count,
       dictionary_byte_length: dictionary.byte_length,

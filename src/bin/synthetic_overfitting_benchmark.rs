@@ -745,10 +745,7 @@ fn evaluate_seed(
             redactions: &redaction_report,
             dictionary: &dictionary_inputs.dictionary,
             dictionary_diagnostics: &dictionary_inputs.diagnostics,
-            guess: &GuessConfig {
-                visual_score: true,
-                visual_score_dpi: 200.0_f32,
-            },
+            guess: &GuessConfig::default(),
         })?;
 
         let target_rows = sampled
@@ -1274,16 +1271,6 @@ fn rank_in_guess(guess: &RedactionGuess, target: &str) -> Option<usize> {
     let mut seen = BTreeSet::<String>::new();
     for candidate in &guess.candidates {
         let normalized = candidate.text.trim().to_ascii_uppercase();
-        if normalized.is_empty() || !seen.insert(normalized.clone()) {
-            continue;
-        }
-        if normalized == target_upper {
-            return Some(rank);
-        }
-        rank += 1;
-    }
-    for exact in &guess.exact_matches {
-        let normalized = exact.trim().to_ascii_uppercase();
         if normalized.is_empty() || !seen.insert(normalized.clone()) {
             continue;
         }

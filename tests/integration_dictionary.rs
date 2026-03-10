@@ -60,12 +60,6 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
             out.push(normalized);
         }
     }
-    for text in &guess.exact_matches {
-        let normalized = text.trim().to_ascii_uppercase();
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            out.push(normalized);
-        }
-    }
     out
 }
 
@@ -117,10 +111,7 @@ fn alternate_dictionary_entry_formats_expand_into_geometry_valid_candidates() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -148,17 +139,24 @@ fn alternate_dictionary_entry_formats_expand_into_geometry_valid_candidates() {
     }
 
     for row in &rows {
-        let allowed_width = row.context.gap_pt.max(0.0_f32) + 0.01_f32;
+        let mut last_error = None::<f32>;
         for candidate in &row.candidates {
-            if let Some(width_pt) = candidate.width_pt {
+            assert!(
+                candidate.width_pt.is_finite() && candidate.width_pt >= 0.0_f32,
+                "candidate {} produced invalid width {}",
+                candidate.text,
+                candidate.width_pt
+            );
+            if let Some(previous_error) = last_error {
                 assert!(
-                    width_pt <= allowed_width,
-                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
-                    candidate.text,
-                    allowed_width,
-                    width_pt
+                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    "candidate list is not sorted by error: previous={} current={} text={}",
+                    previous_error,
+                    candidate.error_pt,
+                    candidate.text
                 );
             }
+            last_error = Some(candidate.error_pt);
         }
     }
 

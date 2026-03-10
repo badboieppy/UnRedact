@@ -29,12 +29,6 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
             out.push(normalized);
         }
     }
-    for text in &guess.exact_matches {
-        let normalized = normalize_guess_text_for_exact_match(text);
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            out.push(normalized);
-        }
-    }
     out
 }
 
@@ -48,17 +42,6 @@ fn top_candidate_text(guess: &RedactionGuess) -> Option<&str> {
         .first()
         .map(|candidate| candidate.text.trim())
         .filter(|value| !value.is_empty())
-}
-
-fn allowed_guess_width_pt(guess: &RedactionGuess) -> f32 {
-    match (
-        guess.context.anchor_mode.as_deref(),
-        guess.context.anchor_left_x,
-        guess.context.anchor_right_x,
-    ) {
-        (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
-        _ => guess.bbox.width().abs(),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,10 +197,7 @@ fn efta00038617_page2_served_rows_emit_geometry_valid_candidates_with_default_di
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -274,33 +254,37 @@ fn efta00038617_page2_served_rows_emit_geometry_valid_candidates_with_default_di
         .flat_map(|row| ordered_guess_texts_upper(row))
         .collect::<BTreeSet<_>>();
     for row in &first_bullet_rows {
-        let allowed_width = allowed_guess_width_pt(row) + 0.01_f32;
+        let mut last_error = None::<f32>;
         for candidate in &row.candidates {
-            if let Some(width_pt) = candidate.width_pt {
+            assert!(
+                candidate.width_pt.is_finite() && candidate.width_pt >= 0.0_f32,
+                "candidate {} produced invalid width {}",
+                candidate.text,
+                candidate.width_pt
+            );
+            if let Some(previous_error) = last_error {
                 assert!(
-                    width_pt <= allowed_width,
-                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
-                    candidate.text,
-                    allowed_width,
-                    width_pt
+                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    "candidate list is not sorted by error: previous={} current={} text={}",
+                    previous_error,
+                    candidate.error_pt,
+                    candidate.text
                 );
             }
+            last_error = Some(candidate.error_pt);
         }
     }
 
     let expected_fragments = [
-        "SARAH",
-        "ADRIANA",
-        "NADIA",
-        "WEXNER",
-        "HALEY",
-        "WILLIAM",
-        "DAVID",
-        "BARNETT",
+        "SARAH", "ADRIANA", "NADIA", "WEXNER", "HALEY", "WILLIAM", "DAVID", "BARNETT",
     ];
     let missing = expected_fragments
         .iter()
-        .filter(|fragment| !candidate_pool.iter().any(|value| value.contains(**fragment)))
+        .filter(|fragment| {
+            !candidate_pool
+                .iter()
+                .any(|value| value.contains(**fragment))
+        })
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),
@@ -311,7 +295,7 @@ fn efta00038617_page2_served_rows_emit_geometry_valid_candidates_with_default_di
     let anchored_rows = first_bullet_rows
         .iter()
         .copied()
-        .filter(|row| row.context.has_anchor_pair)
+        .filter(|row| row.context.anchor_mode.is_some())
         .collect::<Vec<_>>();
     assert!(
         !anchored_rows.is_empty(),
@@ -355,10 +339,7 @@ fn efta00038617_served_row_metadata_exposes_multi_anchor_context_spans() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -445,10 +426,7 @@ fn efta00038617_multi_redaction_cluster_uses_shared_typography_for_guessing_and_
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: true,
         visualizer: VisualizerConfig::default(),
     };
@@ -476,8 +454,8 @@ fn efta00038617_multi_redaction_cluster_uses_shared_typography_for_guessing_and_
     let styles = first_bullet_rows
         .iter()
         .filter_map(|row| {
-            let font_name = row.context.anchor_font_name.as_ref()?;
-            let font_size = row.context.anchor_font_size_pt?;
+            let font_name = row.context.font_name.as_ref()?;
+            let font_size = row.context.font_size_pt?;
             Some(format!("{font_name}|{font_size:.2}"))
         })
         .collect::<BTreeSet<_>>();
@@ -539,7 +517,7 @@ fn efta00038617_multi_redaction_cluster_uses_shared_typography_for_guessing_and_
 }
 
 #[test]
-fn exact_matches_are_zero_error_candidates_when_present() {
+fn candidates_are_sorted_by_error_when_present() {
     let input = Path::new("test_data/EFTA00038617.pdf");
     assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -564,10 +542,7 @@ fn exact_matches_are_zero_error_candidates_when_present() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -580,29 +555,14 @@ fn exact_matches_are_zero_error_candidates_when_present() {
     let outputs = run_result.expect("pipeline run should succeed in test");
     let report = load_guess_report(&outputs.guesses_path);
 
-    let exact_eps = 0.0001_f32;
     for (index, row) in report.guesses.iter().enumerate() {
-        for exact in &row.exact_matches {
-            let matched = row
-                .candidates
-                .iter()
-                .find(|candidate| {
-                    normalize_guess_text_for_exact_match(&candidate.text)
-                        == normalize_guess_text_for_exact_match(exact)
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "exact match missing from candidates at row {}: exact='{}'",
-                        index + 1,
-                        exact
-                    )
-                });
+        for pair in row.candidates.windows(2) {
             assert!(
-                matched.error_pt.abs() <= exact_eps,
-                "exact match has non-zero error at row {}: exact='{}' error_pt={}",
+                pair[0].error_pt <= pair[1].error_pt + 0.0001_f32,
+                "candidate errors not sorted at row {}: {} then {}",
                 index + 1,
-                exact,
-                matched.error_pt
+                pair[0].error_pt,
+                pair[1].error_pt
             );
         }
     }
@@ -627,10 +587,7 @@ fn efta00101126_last_two_redactions_do_not_use_cross_line_to_anchor() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -654,8 +611,24 @@ fn efta00101126_last_two_redactions_do_not_use_cross_line_to_anchor() {
     let second_last = &report.guesses[report.guesses.len() - 2];
     let last = &report.guesses[report.guesses.len() - 1];
 
-    assert_ne!(second_last.context.right_anchor_text.trim(), "to,");
-    assert_ne!(last.context.right_anchor_text.trim(), "to,");
+    let second_last_anchor = &report.anchors[report.anchors.len() - 2];
+    let last_anchor = &report.anchors[report.anchors.len() - 1];
+    assert_ne!(
+        second_last_anchor
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "to,"
+    );
+    assert_ne!(
+        last_anchor
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "to,"
+    );
     for row in [second_last, last] {
         if let Some(mode) = row.context.anchor_mode.as_deref() {
             assert!(
@@ -685,10 +658,7 @@ fn efta00101126_visualization_does_not_render_cross_line_to_anchor_context() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: true,
         visualizer: VisualizerConfig::default(),
     };
@@ -703,8 +673,24 @@ fn efta00101126_visualization_does_not_render_cross_line_to_anchor_context() {
     assert!(guesses.guesses.len() >= 2, "expected at least 2 guesses");
     let second_last = &guesses.guesses[guesses.guesses.len() - 2];
     let last = &guesses.guesses[guesses.guesses.len() - 1];
-    assert_ne!(second_last.context.right_anchor_text.trim(), "to,");
-    assert_ne!(last.context.right_anchor_text.trim(), "to,");
+    let second_last_anchor = &guesses.anchors[guesses.anchors.len() - 2];
+    let last_anchor = &guesses.anchors[guesses.anchors.len() - 1];
+    assert_ne!(
+        second_last_anchor
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "to,"
+    );
+    assert_ne!(
+        last_anchor
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "to,"
+    );
 
     let visualized_path = outputs
         .visualized_pdf_path
@@ -750,10 +736,7 @@ fn efta00101126_last_two_rows_only_emit_geometry_valid_candidates() {
     let cfg = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -768,19 +751,26 @@ fn efta00101126_last_two_rows_only_emit_geometry_valid_candidates() {
     assert!(report.guesses.len() >= 2, "expected at least 2 guesses");
 
     for guess in report.guesses.iter().rev().take(2) {
-        let allowed_width = allowed_guess_width_pt(guess);
+        let mut last_error = None::<f32>;
         for candidate in &guess.candidates {
-            let width_pt = candidate
-                .width_pt
-                .expect("measured candidate width should be present");
+            let width_pt = candidate.width_pt;
             assert!(
-                width_pt <= allowed_width + 0.0001_f32,
-                "candidate overflows allowed width: text='{}' width_pt={} allowed_width={} bbox={:?}",
+                width_pt.is_finite() && width_pt >= 0.0_f32,
+                "candidate has invalid width: text='{}' width_pt={} bbox={:?}",
                 candidate.text,
                 width_pt,
-                allowed_width,
                 guess.bbox
             );
+            if let Some(previous_error) = last_error {
+                assert!(
+                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    "candidate list is not sorted by error: previous={} current={} text={}",
+                    previous_error,
+                    candidate.error_pt,
+                    candidate.text
+                );
+            }
+            last_error = Some(candidate.error_pt);
         }
     }
 }

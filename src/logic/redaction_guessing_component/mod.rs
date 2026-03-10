@@ -14,14 +14,11 @@ use crate::types::redaction_types::{RedactionFinderConfig, RedactionMode, Redact
 use crate::types::runtime_defaults::RASTER_HIGHPASS_DPI;
 use crate::types::time::Instant;
 
-pub(crate) mod common;
-pub(crate) mod guess_logic;
-pub(crate) mod joint_assignment;
-pub(crate) mod visual_logic;
+pub(crate) mod helpers;
 
 #[cfg(feature = "cli-entry")]
-pub use guess_logic::{run_anchor_from_bytes, RunAnchorFromBytesRequest};
-pub use guess_logic::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
+pub use helpers::guessing::{run_anchor_from_bytes, RunAnchorFromBytesRequest};
+pub use helpers::guessing::{run_from_bytes as run_guess_from_bytes, RunGuessFromBytesRequest};
 
 const INCLUDE_FULL_PAGE_RECTS: bool = false;
 
@@ -93,7 +90,10 @@ pub fn run_redaction_guessing_component(
     guess_stage
         .guesses
         .diagnostics
-        .push(stage_timing_diagnostic("redactions", redaction_stage.elapsed_ms));
+        .push(stage_timing_diagnostic(
+            "redactions",
+            redaction_stage.elapsed_ms,
+        ));
     guess_stage
         .guesses
         .diagnostics
@@ -110,10 +110,13 @@ pub fn run_redaction_guessing_component(
         &mut guess_stage.guesses,
     )?;
 
-    guess_stage.guesses.diagnostics.push(stage_timing_diagnostic(
-        "orchestrator_total",
-        component_started.elapsed().as_millis(),
-    ));
+    guess_stage
+        .guesses
+        .diagnostics
+        .push(stage_timing_diagnostic(
+            "orchestrator_total",
+            component_started.elapsed().as_millis(),
+        ));
 
     Ok(BytesPipelineOutputs {
         redactions: redaction_stage.redactions,
@@ -207,9 +210,10 @@ fn build_visualization_payload_stage(
         return Ok(VisualizationPayloadStageOutput { payload: None });
     }
     let started = Instant::now();
-    guess_report
-        .diagnostics
-        .push(stage_timing_diagnostic("visualize_payload", started.elapsed().as_millis()));
+    guess_report.diagnostics.push(stage_timing_diagnostic(
+        "visualize_payload",
+        started.elapsed().as_millis(),
+    ));
     Ok(VisualizationPayloadStageOutput {
         payload: Some(VisualizationPayload {
             pdf_bytes,

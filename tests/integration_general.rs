@@ -25,10 +25,7 @@ fn smoke_cfg() -> UnredactServiceConfig {
     UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     }
@@ -81,7 +78,7 @@ fn fallback_dictionary_flow_runs_end_to_end() {
         report
             .guesses
             .iter()
-            .any(|guess| !guess.exact_matches.is_empty() || !guess.candidates.is_empty()),
+            .any(|guess| !guess.candidates.is_empty()),
         "expected at least one guess row with candidate output"
     );
 }
@@ -101,10 +98,7 @@ fn service_image_analysis_toggle_controls_raster_detection() {
     let cfg_on = UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };

@@ -36,8 +36,15 @@ pub struct GuessCandidateRow {
 pub struct MeasuredCandidate {
     pub text: String,
     pub width_pt: f32,
-    pub word_count: u32,
-    pub char_count: u32,
+    pub glyph_width_sum_pt: f32,
+    pub char_spacing_total_pt: f32,
+    pub word_spacing_total_pt: f32,
+    #[serde(default)]
+    pub predicted_right_edge_x_pt: Option<f32>,
+    #[serde(default)]
+    pub actual_right_edge_x_pt: Option<f32>,
+    pub target_width_pt: f32,
+    pub error_pt: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

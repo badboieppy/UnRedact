@@ -115,13 +115,19 @@ mod tests {
     fn normalized_identity_merges_float_noise() {
         let left = sample_run(" Times-Roman ", 12.004_f32, 99.96_f32, 0.004_f32, 3.004_f32);
         let right = sample_run("Times-Roman", 12.003_f32, 100.04_f32, 0.003_f32, 3.003_f32);
-        assert_eq!(width_profile_from_run(&left), width_profile_from_run(&right));
+        assert_eq!(
+            width_profile_from_run(&left),
+            width_profile_from_run(&right)
+        );
     }
 
     #[test]
     fn normalized_identity_keeps_distinct_measurement_families_separate() {
         let left = sample_run("Times-Roman", 12.00_f32, 100.0_f32, 0.0_f32, 3.0_f32);
         let right = sample_run("Times-Roman", 12.00_f32, 100.0_f32, 0.5_f32, 3.0_f32);
-        assert_ne!(width_profile_from_run(&left), width_profile_from_run(&right));
+        assert_ne!(
+            width_profile_from_run(&left),
+            width_profile_from_run(&right)
+        );
     }
 }

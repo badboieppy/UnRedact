@@ -3,17 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::data::fonts_data::FontsData;
 use crate::data::helpers::character_measurement::measure_text;
 use crate::data::helpers::normalized_measurement::{
-    normalize_font_size_pt, normalize_h_scale_pct, normalize_spacing_pt,
-    normalized_font_name,
+    normalize_font_size_pt, normalize_h_scale_pct, normalize_spacing_pt, normalized_font_name,
     width_profile_from_run,
 };
 use crate::data::helpers::text_runs::{join_adjacent_run_text, normalize_transport_text};
+use crate::data::page_boxes_data::build_page_boxes;
 use crate::data::types::redaction_evidence_types::{
     AnchorMode, AnchorSet, AnchorSide, CandidateWidthModel, CollectRedactionEvidenceRequest,
     GuessGeometry, MeasurementFont, NeighborFacts, NeighborRef, RedactionEvidenceDiagnostic,
     RedactionEvidenceRow, RedactionEvidenceSet, TrustedRedaction,
 };
-use crate::data::visual_score_data::build_page_boxes;
 use crate::dependency::pdf_font_run_types::PdfFontTextRun;
 use crate::types::diagnostic_types::DiagnosticValue;
 use crate::types::redaction_types::{Rect, RedactionOccurrence};
@@ -58,8 +57,7 @@ pub fn collect_redaction_evidence(
     req: CollectRedactionEvidenceRequest<'_>,
 ) -> Result<RedactionEvidenceSet, String> {
     let page_boxes = build_page_boxes(req.pdf_bytes)?;
-    let font_runs = FontsData::new()
-        .load_font_runs_from_bytes(req.input_name, req.pdf_bytes)?;
+    let font_runs = FontsData::new().load_font_runs_from_bytes(req.input_name, req.pdf_bytes)?;
     let runs_by_page = build_runs_by_page(&font_runs.pdf_report.runs);
     let line_buckets_by_page = build_line_buckets_by_page(&runs_by_page);
 
@@ -117,7 +115,9 @@ pub fn collect_redaction_evidence(
         }
         let Some(line_bucket) = select_line_bucket(
             redaction,
-            line_buckets_by_page.get(&redaction.page_index).map(Vec::as_slice),
+            line_buckets_by_page
+                .get(&redaction.page_index)
+                .map(Vec::as_slice),
         ) else {
             diagnostics.push(build_diagnostic(
                 DiagnosticLocation {
@@ -259,7 +259,10 @@ fn validate_redaction(redaction: &RedactionOccurrence, page_box: Rect) -> Result
     if bbox.area() < MIN_REDACTION_AREA_PT2 {
         return Err("invalid_redaction_geometry");
     }
-    if bbox.x0 < page_box.x0 || bbox.y0 < page_box.y0 || bbox.x1 > page_box.x1 || bbox.y1 > page_box.y1
+    if bbox.x0 < page_box.x0
+        || bbox.y0 < page_box.y0
+        || bbox.x1 > page_box.x1
+        || bbox.y1 > page_box.y1
     {
         return Err("redaction_out_of_page_bounds");
     }
@@ -326,13 +329,8 @@ fn build_row(
     let left_anchor = left_run.map(|run| build_anchor_side(row_id, run, &line_bucket.runs, true));
     let right_anchor =
         right_run.map(|run| build_anchor_side(row_id, run, &line_bucket.runs, false));
-    let resolved = resolve_anchor_measurement(
-        left_run,
-        right_run,
-        left_anchor,
-        right_anchor,
-        all_runs,
-    )?;
+    let resolved =
+        resolve_anchor_measurement(left_run, right_run, left_anchor, right_anchor, all_runs)?;
     let ResolvedAnchorMeasurement {
         mode,
         left_anchor,
@@ -344,23 +342,24 @@ fn build_row(
         .as_ref()
         .map(|anchor| measure_text(&measurement_model, &anchor.text))
         .transpose()
-        .map_err(|message| build_error_with_metrics(
-            "character_model_unbuildable",
-            &message,
-            width_metrics_map(&measurement_model, left_run.or(right_run)),
-        ))?
+        .map_err(|message| {
+            build_error_with_metrics(
+                "character_model_unbuildable",
+                &message,
+                width_metrics_map(&measurement_model, left_run.or(right_run)),
+            )
+        })?
         .unwrap_or(0.0_f32);
     let (line_bias_pt, tolerance_pt) =
         estimate_row_geometry(line_bucket, left_run.or(right_run), &measurement_model);
 
-    let usable_left_edge_x_pt =
-        left_anchor
-            .as_ref()
-            .map(|anchor| anchor.text_edge_x_pt + left_anchor_width_pt + boundary_space_width_pt);
+    let usable_left_edge_x_pt = left_anchor
+        .as_ref()
+        .map(|anchor| anchor.text_edge_x_pt + left_anchor_width_pt + boundary_space_width_pt);
     let usable_right_edge_x_pt = right_anchor
         .as_ref()
         .map(|anchor| anchor.text_edge_x_pt - boundary_space_width_pt);
-    let target_guess_width_pt = match (usable_left_edge_x_pt, usable_right_edge_x_pt) {
+    let target_width_pt = match (usable_left_edge_x_pt, usable_right_edge_x_pt) {
         (Some(left_edge), Some(right_edge)) if right_edge > left_edge => right_edge - left_edge,
         _ => redaction.bbox.width().abs(),
     };
@@ -385,7 +384,7 @@ fn build_row(
                 redaction_width_pt: redaction.bbox.width().abs(),
                 usable_left_edge_x_pt,
                 usable_right_edge_x_pt,
-                target_guess_width_pt,
+                target_width_pt,
                 line_bias_pt,
                 tolerance_pt,
             },
@@ -394,6 +393,8 @@ fn build_row(
             font_name: measurement_model.font_name.clone(),
             font_size_pt: measurement_model.font_size_pt,
             h_scale_pct: measurement_model.h_scale_pct,
+            char_spacing_pt: measurement_model.char_spacing_pt,
+            word_spacing_pt: measurement_model.word_spacing_pt,
         },
         neighbor_facts: NeighborFacts {
             line_id: line_bucket.line_id.clone(),
@@ -418,11 +419,7 @@ fn resolve_anchor_measurement(
         left_anchor.clone(),
         right_anchor.clone(),
     ) {
-        match build_measurement_model(
-            Some(left_run),
-            Some(right_run),
-            all_runs,
-        ) {
+        match build_measurement_model(Some(left_run), Some(right_run), all_runs) {
             Ok(measurement_model) => {
                 return Ok(ResolvedAnchorMeasurement {
                     mode: AnchorMode::TwoSided,
@@ -608,9 +605,12 @@ fn build_measurement_model(
     right_run: Option<&PdfFontTextRun>,
     all_runs: &[PdfFontTextRun],
 ) -> Result<CandidateWidthModel, EvidenceBuildError> {
-    let seed_run = left_run
-        .or(right_run)
-        .ok_or_else(|| build_error("same_line_anchor_missing", "no anchor run available for measurement model"))?;
+    let seed_run = left_run.or(right_run).ok_or_else(|| {
+        build_error(
+            "same_line_anchor_missing",
+            "no anchor run available for measurement model",
+        )
+    })?;
     let seed_profile = width_profile_from_run(seed_run);
     if let Some(other) = right_run.or(left_run) {
         if width_profile_from_run(other) != seed_profile {
@@ -667,7 +667,10 @@ fn build_measurement_model(
     if base_advances_pt.is_empty() {
         return Err(build_error_with_metrics(
             "character_model_unbuildable",
-            &format!("missing reusable character samples for {}", seed_run.font_name),
+            &format!(
+                "missing reusable character samples for {}",
+                seed_run.font_name
+            ),
             width_profile_metrics("seed", seed_run),
         ));
     }
@@ -739,12 +742,11 @@ fn median_value(values: &mut [f32]) -> Option<f32> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(|left, right| {
-        left.partial_cmp(right)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let median_index = ((values.len() as f32) * 0.5_f32).floor() as usize;
-    values.get(median_index.min(values.len().saturating_sub(1))).copied()
+    values
+        .get(median_index.min(values.len().saturating_sub(1)))
+        .copied()
 }
 
 fn estimate_row_geometry(
@@ -778,18 +780,14 @@ fn estimate_row_geometry(
         let Ok(current_width) = measure_text(model, current.text.trim()) else {
             continue;
         };
-        let predicted_next = current.bbox.x0 as f64
-            + current_width as f64
-            + boundary_space_width_pt(model) as f64;
+        let predicted_next =
+            current.bbox.x0 as f64 + current_width as f64 + boundary_space_width_pt(model) as f64;
         let residual = next.bbox.x0 as f64 - predicted_next;
         if residual.is_finite() {
             residuals.push(residual);
         }
     }
-    residuals.sort_by(|left, right| {
-        left.partial_cmp(right)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    residuals.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     if residuals.is_empty() {
         return (0.0_f32, ROW_EPSILON_MIN_PT as f32);
     }
@@ -799,17 +797,17 @@ fn estimate_row_geometry(
         .iter()
         .map(|value| (value - bias).abs())
         .collect::<Vec<_>>();
-    centered.sort_by(|left, right| {
-        left.partial_cmp(right)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    centered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let epsilon = if centered.is_empty() {
         ROW_EPSILON_MIN_PT
     } else {
         let idx = ((centered.len() as f64) * 0.75_f64).floor() as usize;
         centered[idx.min(centered.len().saturating_sub(1))]
     };
-    (bias as f32, epsilon.clamp(ROW_EPSILON_MIN_PT, ROW_EPSILON_MAX_PT) as f32)
+    (
+        bias as f32,
+        epsilon.clamp(ROW_EPSILON_MIN_PT, ROW_EPSILON_MAX_PT) as f32,
+    )
 }
 
 fn visibility_rank(run: &PdfFontTextRun) -> i32 {
@@ -1102,8 +1100,8 @@ mod tests {
         visible.run.bbox = Rect::new(9.0, 90.0, 19.0, 100.0);
         let line_runs = vec![&invisible, &visible];
 
-        let selected = select_anchor_run(&redaction, &line_runs, true)
-            .expect("expected a left-side anchor");
+        let selected =
+            select_anchor_run(&redaction, &line_runs, true).expect("expected a left-side anchor");
         assert_eq!(selected.width_metrics.render_mode, 0);
     }
 }

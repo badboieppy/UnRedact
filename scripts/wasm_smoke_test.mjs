@@ -52,16 +52,13 @@ async function main() {
     input_name: path.basename(samplePdfPath),
     pdf_bytes: new Uint8Array(pdfBytes),
     dictionary_file_bytes: null,
-    cfg: {
-      include_details: false,
-      enable_image_analysis: true,
-      guess: {
-        visual_score: false,
-        visual_score_dpi: 200.0,
-      },
-      visualize: false,
-      visualizer: {
-        color: [1.0, 0.0, 0.0],
+      cfg: {
+        include_details: false,
+        enable_image_analysis: true,
+        guess: {},
+        visualize: false,
+        visualizer: {
+          color: [1.0, 0.0, 0.0],
         text_color: [0.0, 0.4, 1.0],
         border_width: 1.0,
       },

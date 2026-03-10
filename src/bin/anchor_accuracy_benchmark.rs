@@ -15,7 +15,7 @@ use unredact::service::tooling_entry::{
     collect_underlying_text_hits_by_page, run_anchor_from_redactions, ToolingAnchorRequest,
 };
 use unredact::types::guess_types::{
-    AnchorCandidateDecision, AnchorDecisionRecord, AnchorReport, AnchorSideDecision, AnchorType,
+    AnchorDecisionRecord, AnchorReport, AnchorSideDecision, AnchorType,
 };
 use unredact::types::redaction_types::{
     Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,
@@ -494,24 +494,16 @@ fn parse_row_index(anchor_row_id: &str) -> Option<usize> {
     value.parse::<usize>().ok()
 }
 
-fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorCandidateDecision> {
-    if let Some(candidate_id) = decision.selected_candidate_id.as_deref() {
-        if let Some(candidate) = decision
-            .candidates
-            .iter()
-            .find(|candidate| candidate.candidate_id == candidate_id)
-        {
-            return Some(candidate);
-        }
+fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorDecisionRecord> {
+    if decision.left.is_some() || decision.right.is_some() {
+        Some(decision)
+    } else {
+        None
     }
-    decision
-        .candidates
-        .iter()
-        .find(|candidate| candidate.was_selected)
 }
 
 fn selected_side(
-    candidate: &AnchorCandidateDecision,
+    candidate: &AnchorDecisionRecord,
     anchor_type: AnchorType,
 ) -> Option<&AnchorSideDecision> {
     match anchor_type {
@@ -569,7 +561,7 @@ fn accumulate_side(
             acc.x_within_tol_count += 1;
         }
     }
-    let source_key = format!("{:?}", observed_side.selected_source).to_ascii_lowercase();
+    let source_key = "resolved".to_owned();
     *acc.source_counts.entry(source_key).or_insert(0_usize) += 1;
 }
 
@@ -669,9 +661,7 @@ fn evaluate_anchor_report(
             acc.rows_with_selected_candidate += 1;
         }
         if let Some(selected_candidate) = selected {
-            let selected_mode = decision
-                .and_then(|row| row.selected_mode.as_deref())
-                .unwrap_or(selected_candidate.anchor_mode.as_str());
+            let selected_mode = selected_candidate.anchor_mode.as_str();
             *acc.anchor_mode_counts
                 .entry(selected_mode.to_owned())
                 .or_insert(0_usize) += 1;

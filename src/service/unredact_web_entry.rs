@@ -50,11 +50,8 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
     } else {
         0_u128
     };
-    let mut visualize_record = crate::types::diagnostic_types::DiagnosticRecord::info(
-        "service",
-        "visualize",
-        "timing_ms",
-    );
+    let mut visualize_record =
+        crate::types::diagnostic_types::DiagnosticRecord::info("service", "visualize", "timing_ms");
     visualize_record.metrics.insert(
         "value_ms".to_owned(),
         crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),

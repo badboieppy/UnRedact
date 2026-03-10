@@ -61,8 +61,6 @@ struct BenchmarkSummary {
 struct DatasetResult {
     name: String,
     summary: BenchmarkSummary,
-    visual_summary: VisualSummary,
-    visual_rerank_summary: VisualRerankSummary,
     timing_summary: TimingSummary,
     candidate_summary: CandidateSummary,
     quality_summary: QualitySummary,
@@ -75,8 +73,6 @@ struct AccuracyBenchmark {
     definitions: MetricDefinitions,
     datasets: Vec<DatasetResult>,
     overall: BenchmarkSummary,
-    overall_visual: VisualSummary,
-    overall_visual_rerank: VisualRerankSummary,
     overall_timing: TimingSummary,
     overall_candidates: CandidateSummary,
     overall_quality: QualitySummary,
@@ -116,20 +112,6 @@ struct MetricDefinitions {
     mean_rank_found: &'static str,
     best_feasible_k: &'static str,
     best_rank: &'static str,
-    visual_rows_total: &'static str,
-    visual_rows_with_top_guess: &'static str,
-    visual_rows_scored: &'static str,
-    visual_rows_dropped: &'static str,
-    visual_mean_abs_diff: &'static str,
-    visual_median_abs_diff: &'static str,
-    visual_p90_abs_diff: &'static str,
-    visual_mean_changed_pixel_ratio: &'static str,
-    visual_mean_compared_pixels: &'static str,
-    visual_rerank_rows_considered: &'static str,
-    visual_rerank_rows_scored: &'static str,
-    visual_rerank_top1_changed: &'static str,
-    visual_rerank_top1_changed_ratio: &'static str,
-    visual_rerank_mean_gain: &'static str,
     timing_redactions_ms: &'static str,
     timing_fonts_ms: &'static str,
     timing_guess_ms: &'static str,
@@ -149,9 +131,6 @@ struct MetricDefinitions {
     quality_anchored_rows: &'static str,
     quality_anchor_two_sided_rows: &'static str,
     quality_anchor_one_sided_rows: &'static str,
-    quality_exact_rows: &'static str,
-    quality_exact_zero_error_rows: &'static str,
-    quality_exact_invalid_rows: &'static str,
     consistency_repeats: &'static str,
     consistency_all_hashes_identical: &'static str,
     consistency_hash_match_ratio: &'static str,
@@ -174,28 +153,6 @@ struct BaselineSnapshot {
     contract: CanonicalContractSummary,
     datasets: Vec<BaselineDatasetSnapshot>,
     overall: BenchmarkSummary,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct VisualSummary {
-    rows_total: usize,
-    rows_with_top_guess: usize,
-    rows_scored: usize,
-    rows_dropped: usize,
-    mean_abs_diff: Option<f64>,
-    median_abs_diff: Option<f64>,
-    p90_abs_diff: Option<f64>,
-    mean_changed_pixel_ratio: Option<f64>,
-    mean_compared_pixels: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct VisualRerankSummary {
-    rows_considered: usize,
-    rows_scored: usize,
-    top1_changed: usize,
-    top1_changed_ratio: Option<f64>,
-    mean_gain: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,27 +184,6 @@ struct QualitySummary {
     anchored_rows: usize,
     anchor_two_sided_rows: usize,
     anchor_one_sided_rows: usize,
-    exact_rows: usize,
-    exact_zero_error_rows: usize,
-    exact_invalid_rows: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-struct VisualAccumulator {
-    rows_total: usize,
-    rows_with_top_guess: usize,
-    rows_dropped: usize,
-    abs_diff: Vec<f64>,
-    changed_ratio: Vec<f64>,
-    compared_pixels: Vec<f64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct VisualRerankAccumulator {
-    rows_considered: usize,
-    rows_scored: usize,
-    top1_changed: usize,
-    weighted_gain_sum: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -319,8 +255,6 @@ struct BenchmarkRunSnapshot {
 #[derive(Debug, Clone)]
 struct EvaluatedDataset {
     dataset: DatasetResult,
-    visual_accumulator: VisualAccumulator,
-    visual_rerank_accumulator: VisualRerankAccumulator,
     timing_accumulator: TimingAccumulator,
     candidate_accumulator: CandidateAccumulator,
     run_snapshot: DatasetRunSnapshot,
@@ -424,10 +358,7 @@ fn benchmark_config() -> UnredactServiceConfig {
     UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     }
@@ -455,12 +386,6 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::<String>::new();
     for candidate in &guess.candidates {
         let normalized = candidate.text.trim().to_ascii_uppercase();
-        if !normalized.is_empty() && seen.insert(normalized.clone()) {
-            out.push(normalized);
-        }
-    }
-    for text in &guess.exact_matches {
-        let normalized = text.trim().to_ascii_uppercase();
         if !normalized.is_empty() && seen.insert(normalized.clone()) {
             out.push(normalized);
         }
@@ -547,10 +472,6 @@ fn summarize_ranks(ranks: &[Option<usize>]) -> BenchmarkSummary {
     }
 }
 
-fn has_top_guess(guess: &RedactionGuess) -> bool {
-    !guess.candidates.is_empty()
-}
-
 fn percentile_sorted(values: &[f64], q: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -583,72 +504,6 @@ fn stddev(values: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
-fn visual_accumulator_from_guesses(guesses: &[RedactionGuess]) -> VisualAccumulator {
-    let mut acc = VisualAccumulator {
-        rows_total: guesses.len(),
-        ..VisualAccumulator::default()
-    };
-    for guess in guesses {
-        if has_top_guess(guess) {
-            acc.rows_with_top_guess += 1;
-        }
-        if guess.visual_dropped {
-            acc.rows_dropped += 1;
-        }
-        if let Some(value) = guess.visual_mean_abs_diff {
-            acc.abs_diff.push(value as f64);
-        }
-        if let Some(value) = guess.visual_changed_pixel_ratio {
-            acc.changed_ratio.push(value as f64);
-        }
-        if let Some(value) = guess.visual_compared_pixels {
-            acc.compared_pixels.push(value as f64);
-        }
-    }
-    acc
-}
-
-fn summarize_visual_accumulator(mut acc: VisualAccumulator) -> VisualSummary {
-    acc.abs_diff
-        .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    VisualSummary {
-        rows_total: acc.rows_total,
-        rows_with_top_guess: acc.rows_with_top_guess,
-        rows_scored: acc.abs_diff.len(),
-        rows_dropped: acc.rows_dropped,
-        mean_abs_diff: mean(&acc.abs_diff),
-        median_abs_diff: percentile_sorted(&acc.abs_diff, 0.5_f64),
-        p90_abs_diff: percentile_sorted(&acc.abs_diff, 0.9_f64),
-        mean_changed_pixel_ratio: mean(&acc.changed_ratio),
-        mean_compared_pixels: mean(&acc.compared_pixels),
-    }
-}
-
-fn merge_visual_accumulators(accumulators: &[VisualAccumulator]) -> VisualAccumulator {
-    let mut merged = VisualAccumulator::default();
-    for acc in accumulators {
-        merged.rows_total += acc.rows_total;
-        merged.rows_with_top_guess += acc.rows_with_top_guess;
-        merged.rows_dropped += acc.rows_dropped;
-        merged.abs_diff.extend_from_slice(&acc.abs_diff);
-        merged.changed_ratio.extend_from_slice(&acc.changed_ratio);
-        merged
-            .compared_pixels
-            .extend_from_slice(&acc.compared_pixels);
-    }
-    merged
-}
-
-fn metric_usize(record: &DiagnosticRecord, key: &str) -> Option<usize> {
-    match record.metrics.get(key) {
-        Some(DiagnosticValue::Integer(value)) if *value >= 0 => Some(*value as usize),
-        Some(DiagnosticValue::Float(value)) if value.is_finite() && *value >= 0.0_f64 => {
-            Some(*value as usize)
-        }
-        _ => None,
-    }
-}
-
 fn metric_f64(record: &DiagnosticRecord, key: &str) -> Option<f64> {
     match record.metrics.get(key) {
         Some(DiagnosticValue::Float(value)) if value.is_finite() => Some(*value),
@@ -657,69 +512,17 @@ fn metric_f64(record: &DiagnosticRecord, key: &str) -> Option<f64> {
     }
 }
 
-fn visual_rerank_accumulator_from_diagnostics(
-    diagnostics: &[DiagnosticRecord],
-) -> VisualRerankAccumulator {
-    let mut acc = VisualRerankAccumulator::default();
-    for record in diagnostics {
-        if record.code != "visual_rerank_summary" {
-            continue;
-        }
-        let rows_considered = metric_usize(record, "rows_considered");
-        let rows_scored = metric_usize(record, "rows_scored");
-        let top1_changed = metric_usize(record, "top1_changed");
-        let mean_gain = metric_f64(record, "mean_gain");
-        let scored = rows_scored.unwrap_or(0_usize);
-        acc.rows_considered += rows_considered.unwrap_or(0_usize);
-        acc.rows_scored += scored;
-        acc.top1_changed += top1_changed.unwrap_or(0_usize);
-        if let Some(gain) = mean_gain {
-            acc.weighted_gain_sum += gain * scored as f64;
-        }
-    }
-    acc
-}
-
-fn summarize_visual_rerank_accumulator(acc: &VisualRerankAccumulator) -> VisualRerankSummary {
-    VisualRerankSummary {
-        rows_considered: acc.rows_considered,
-        rows_scored: acc.rows_scored,
-        top1_changed: acc.top1_changed,
-        top1_changed_ratio: if acc.rows_scored == 0 {
-            None
-        } else {
-            Some(acc.top1_changed as f64 / acc.rows_scored as f64)
-        },
-        mean_gain: if acc.rows_scored == 0 {
-            None
-        } else {
-            Some(acc.weighted_gain_sum / acc.rows_scored as f64)
-        },
-    }
-}
-
-fn merge_visual_rerank_accumulators(
-    accumulators: &[VisualRerankAccumulator],
-) -> VisualRerankAccumulator {
-    let mut merged = VisualRerankAccumulator::default();
-    for acc in accumulators {
-        merged.rows_considered += acc.rows_considered;
-        merged.rows_scored += acc.rows_scored;
-        merged.top1_changed += acc.top1_changed;
-        merged.weighted_gain_sum += acc.weighted_gain_sum;
-    }
-    merged
-}
-
 fn is_multi_span_guess(guess: &RedactionGuess) -> bool {
-    if !guess.context.has_anchor_pair {
+    if guess.context.anchor_mode.as_deref() != Some("two_sided") {
         return false;
     }
     let width = guess.bbox.width().abs() as f64;
     if width <= 0.0_f64 {
         return false;
     }
-    (guess.context.gap_pt as f64).abs() / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
+    let span_delta =
+        (guess.context.target_width_pt as f64 - guess.bbox.width().abs() as f64).abs();
+    span_delta / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
 }
 
 fn candidate_accumulator_from_guesses(guesses: &[RedactionGuess]) -> CandidateAccumulator {
@@ -784,31 +587,14 @@ fn quality_summary_from_guesses(guesses: &[RedactionGuess]) -> QualitySummary {
         rows_total: guesses.len(),
         ..QualitySummary::default()
     };
-    let exact_eps = 0.0001_f32;
     for guess in guesses {
-        if guess.context.has_anchor_pair {
+        if guess.context.anchor_mode.is_some() {
             out.anchored_rows += 1;
         }
         match guess.context.anchor_mode.as_deref() {
             Some("two_sided") => out.anchor_two_sided_rows += 1,
             Some("left_only") | Some("right_only") => out.anchor_one_sided_rows += 1,
             _ => {}
-        }
-        if !guess.exact_matches.is_empty() {
-            out.exact_rows += 1;
-            let all_exact_zero = guess.exact_matches.iter().all(|exact| {
-                guess
-                    .candidates
-                    .iter()
-                    .find(|candidate| candidate.text.eq_ignore_ascii_case(exact))
-                    .map(|candidate| candidate.error_pt.abs() <= exact_eps)
-                    .unwrap_or(false)
-            });
-            if all_exact_zero {
-                out.exact_zero_error_rows += 1;
-            } else {
-                out.exact_invalid_rows += 1;
-            }
         }
     }
     out
@@ -821,9 +607,6 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
         merged.anchored_rows += summary.anchored_rows;
         merged.anchor_two_sided_rows += summary.anchor_two_sided_rows;
         merged.anchor_one_sided_rows += summary.anchor_one_sided_rows;
-        merged.exact_rows += summary.exact_rows;
-        merged.exact_zero_error_rows += summary.exact_zero_error_rows;
-        merged.exact_invalid_rows += summary.exact_invalid_rows;
     }
     merged
 }
@@ -1092,20 +875,14 @@ fn evaluate_efta00101126(
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
-    let visual_rerank_accumulator = visual_rerank_accumulator_from_diagnostics(&report.diagnostics);
-    let visual_rerank_summary = summarize_visual_rerank_accumulator(&visual_rerank_accumulator);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
-    let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
         name: contract.name.clone(),
         summary: summarize_ranks(&ranks),
-        visual_summary,
-        visual_rerank_summary,
         timing_summary,
         candidate_summary,
         quality_summary: quality_summary.clone(),
@@ -1116,8 +893,6 @@ fn evaluate_efta00101126(
         dataset_hash: hash_json(&(
             dataset.name.clone(),
             dataset.summary.clone(),
-            dataset.visual_summary.clone(),
-            dataset.visual_rerank_summary.clone(),
             dataset.candidate_summary.clone(),
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
@@ -1130,8 +905,6 @@ fn evaluate_efta00101126(
     };
     Ok(EvaluatedDataset {
         dataset,
-        visual_accumulator,
-        visual_rerank_accumulator,
         timing_accumulator,
         candidate_accumulator,
         run_snapshot,
@@ -1194,20 +967,14 @@ fn evaluate_efta00038617(
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    let visual_accumulator = visual_accumulator_from_guesses(&report.guesses);
-    let visual_rerank_accumulator = visual_rerank_accumulator_from_diagnostics(&report.diagnostics);
-    let visual_rerank_summary = summarize_visual_rerank_accumulator(&visual_rerank_accumulator);
     let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
-    let visual_summary = summarize_visual_accumulator(visual_accumulator.clone());
     let candidate_summary = summarize_candidate_accumulator(candidate_accumulator.clone());
     let dataset = DatasetResult {
         name: contract.name.clone(),
         summary: summarize_ranks(&ranks),
-        visual_summary,
-        visual_rerank_summary,
         timing_summary,
         candidate_summary,
         quality_summary: quality_summary.clone(),
@@ -1218,8 +985,6 @@ fn evaluate_efta00038617(
         dataset_hash: hash_json(&(
             dataset.name.clone(),
             dataset.summary.clone(),
-            dataset.visual_summary.clone(),
-            dataset.visual_rerank_summary.clone(),
             dataset.candidate_summary.clone(),
             dataset.quality_summary.clone(),
             dataset.targets.clone(),
@@ -1232,8 +997,6 @@ fn evaluate_efta00038617(
     };
     Ok(EvaluatedDataset {
         dataset,
-        visual_accumulator,
-        visual_rerank_accumulator,
         timing_accumulator,
         candidate_accumulator,
         run_snapshot,
@@ -1256,53 +1019,6 @@ fn print_summary(label: &str, summary: &BenchmarkSummary) {
         summary
             .best_feasible_k
             .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_owned())
-    );
-}
-
-fn print_visual_summary(label: &str, summary: &VisualSummary) {
-    println!(
-        "{label:16} rows={:>3} top={:>3} scored={:>3} dropped={:>3} mean_abs_diff={} median_abs_diff={} p90_abs_diff={} mean_changed={} mean_pixels={}",
-        summary.rows_total,
-        summary.rows_with_top_guess,
-        summary.rows_scored,
-        summary.rows_dropped,
-        summary
-            .mean_abs_diff
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "-".to_owned()),
-        summary
-            .median_abs_diff
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "-".to_owned()),
-        summary
-            .p90_abs_diff
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "-".to_owned()),
-        summary
-            .mean_changed_pixel_ratio
-            .map(|value| format!("{:.2}%", value * 100.0_f64))
-            .unwrap_or_else(|| "-".to_owned()),
-        summary
-            .mean_compared_pixels
-            .map(|value| format!("{value:.1}"))
-            .unwrap_or_else(|| "-".to_owned())
-    );
-}
-
-fn print_visual_rerank_summary(label: &str, summary: &VisualRerankSummary) {
-    println!(
-        "{label:16} considered={:>3} scored={:>3} top1_changed={:>3} top1_changed_ratio={} mean_gain={}",
-        summary.rows_considered,
-        summary.rows_scored,
-        summary.top1_changed,
-        summary
-            .top1_changed_ratio
-            .map(|value| format!("{:.2}%", value * 100.0_f64))
-            .unwrap_or_else(|| "-".to_owned()),
-        summary
-            .mean_gain
-            .map(|value| format!("{value:.4}"))
             .unwrap_or_else(|| "-".to_owned())
     );
 }
@@ -1369,14 +1085,11 @@ fn print_candidate_summary(label: &str, summary: &CandidateSummary) {
 
 fn print_quality_summary(label: &str, summary: &QualitySummary) {
     println!(
-        "{label:16} rows={} anchored={} two_sided={} one_sided={} exact_rows={} exact_zero_error_rows={} exact_invalid_rows={}",
+        "{label:16} rows={} anchored={} two_sided={} one_sided={}",
         summary.rows_total,
         summary.anchored_rows,
         summary.anchor_two_sided_rows,
-        summary.anchor_one_sided_rows,
-        summary.exact_rows,
-        summary.exact_zero_error_rows,
-        summary.exact_invalid_rows
+        summary.anchor_one_sided_rows
     );
 }
 
@@ -1394,33 +1107,6 @@ fn metric_definitions() -> MetricDefinitions {
             "Smallest K where recall@K reaches 1.0 for the evaluated targets. Null means not all targets were found.",
         best_rank:
             "Per-target best observed rank (1 is top candidate). Null means the target was not found.",
-        visual_rows_total: "Total redaction rows in guesses for the dataset.",
-        visual_rows_with_top_guess:
-            "Rows where a scored top candidate exists (candidate list non-empty).",
-        visual_rows_scored:
-            "Rows with computed visual score (visual_mean_abs_diff present).",
-        visual_rows_dropped:
-            "Rows removed by visual thresholding (visual_dropped=true).",
-        visual_mean_abs_diff:
-            "Mean absolute grayscale delta in the non-redaction overlay window; lower is better.",
-        visual_median_abs_diff:
-            "Median of visual_mean_abs_diff across scored rows; lower is better.",
-        visual_p90_abs_diff:
-            "90th percentile of visual_mean_abs_diff across scored rows; lower is better.",
-        visual_mean_changed_pixel_ratio:
-            "Average fraction of significantly changed pixels in scored rows; lower is better.",
-        visual_mean_compared_pixels:
-            "Average non-background pixel count used per scored row.",
-        visual_rerank_rows_considered:
-            "Rows eligible for visual rerank candidate scoring (top-K evaluation path).",
-        visual_rerank_rows_scored:
-            "Rows where visual rerank actually scored candidate alternatives.",
-        visual_rerank_top1_changed:
-            "Rows where rerank changed top-1 guess from geometric ranking.",
-        visual_rerank_top1_changed_ratio:
-            "top1_changed / rows_scored for visual rerank; higher means more rerank impact.",
-        visual_rerank_mean_gain:
-            "Average blended-score gain of chosen rerank candidate over baseline top candidate.",
         timing_redactions_ms: "Average redaction stage runtime in milliseconds.",
         timing_fonts_ms: "Average font extraction stage runtime in milliseconds.",
         timing_guess_ms: "Average guessing stage runtime in milliseconds.",
@@ -1431,7 +1117,7 @@ fn metric_definitions() -> MetricDefinitions {
         candidate_mean_count: "Mean number of candidates per row.",
         candidate_median_count: "Median number of candidates per row.",
         candidate_p90_count: "90th percentile candidate count per row.",
-        candidate_multi_span_rows: "Rows classified as multi-span by anchor-gap ratio.",
+        candidate_multi_span_rows: "Rows classified as multi-span by target-span delta ratio.",
         candidate_multi_span_mean_count: "Mean candidate count for multi-span rows.",
         candidate_multi_span_p90_count: "90th percentile candidate count for multi-span rows.",
         candidate_single_span_rows: "Rows classified as non-multi-span rows.",
@@ -1442,11 +1128,6 @@ fn metric_definitions() -> MetricDefinitions {
             "Rows where anchor_mode is two_sided (full left/right anchor).",
         quality_anchor_one_sided_rows:
             "Rows where anchor_mode is left_only or right_only.",
-        quality_exact_rows: "Rows where exact_matches is non-empty.",
-        quality_exact_zero_error_rows:
-            "Rows where every exact_match exists in candidates with zero raw error.",
-        quality_exact_invalid_rows:
-            "Rows where exact_matches contains any entry missing from candidates or with non-zero raw error.",
         consistency_repeats: "Number of repeated benchmark runs with the same code/config.",
         consistency_all_hashes_identical:
             "True when every repeated run produced the same benchmark hash.",
@@ -1922,19 +1603,6 @@ fn main() {
             .flat_map(|dataset| dataset.targets.iter().map(|target| target.best_rank))
             .collect::<Vec<_>>();
         let overall = summarize_ranks(&overall_ranks);
-        let visual_accumulators = evaluated
-            .iter()
-            .map(|item| item.visual_accumulator.clone())
-            .collect::<Vec<_>>();
-        let overall_visual =
-            summarize_visual_accumulator(merge_visual_accumulators(&visual_accumulators));
-        let visual_rerank_accumulators = evaluated
-            .iter()
-            .map(|item| item.visual_rerank_accumulator.clone())
-            .collect::<Vec<_>>();
-        let overall_visual_rerank = summarize_visual_rerank_accumulator(
-            &merge_visual_rerank_accumulators(&visual_rerank_accumulators),
-        );
         let timing_accumulators = evaluated
             .iter()
             .map(|item| item.timing_accumulator.clone())
@@ -1959,8 +1627,6 @@ fn main() {
             definitions,
             datasets,
             overall,
-            overall_visual,
-            overall_visual_rerank,
             overall_timing,
             overall_candidates,
             overall_quality,
@@ -2029,62 +1695,6 @@ fn main() {
     println!("  mean_rank_found: {}", payload.definitions.mean_rank_found);
     println!("  best_feasible_k: {}", payload.definitions.best_feasible_k);
     println!("  best_rank: {}", payload.definitions.best_rank);
-    println!(
-        "  visual_rows_total: {}",
-        payload.definitions.visual_rows_total
-    );
-    println!(
-        "  visual_rows_with_top_guess: {}",
-        payload.definitions.visual_rows_with_top_guess
-    );
-    println!(
-        "  visual_rows_scored: {}",
-        payload.definitions.visual_rows_scored
-    );
-    println!(
-        "  visual_rows_dropped: {}",
-        payload.definitions.visual_rows_dropped
-    );
-    println!(
-        "  visual_mean_abs_diff: {}",
-        payload.definitions.visual_mean_abs_diff
-    );
-    println!(
-        "  visual_median_abs_diff: {}",
-        payload.definitions.visual_median_abs_diff
-    );
-    println!(
-        "  visual_p90_abs_diff: {}",
-        payload.definitions.visual_p90_abs_diff
-    );
-    println!(
-        "  visual_mean_changed_pixel_ratio: {}",
-        payload.definitions.visual_mean_changed_pixel_ratio
-    );
-    println!(
-        "  visual_mean_compared_pixels: {}",
-        payload.definitions.visual_mean_compared_pixels
-    );
-    println!(
-        "  visual_rerank_rows_considered: {}",
-        payload.definitions.visual_rerank_rows_considered
-    );
-    println!(
-        "  visual_rerank_rows_scored: {}",
-        payload.definitions.visual_rerank_rows_scored
-    );
-    println!(
-        "  visual_rerank_top1_changed: {}",
-        payload.definitions.visual_rerank_top1_changed
-    );
-    println!(
-        "  visual_rerank_top1_changed_ratio: {}",
-        payload.definitions.visual_rerank_top1_changed_ratio
-    );
-    println!(
-        "  visual_rerank_mean_gain: {}",
-        payload.definitions.visual_rerank_mean_gain
-    );
     println!(
         "  timing_redactions_ms: {}",
         payload.definitions.timing_redactions_ms
@@ -2156,18 +1766,6 @@ fn main() {
         payload.definitions.quality_anchor_one_sided_rows
     );
     println!(
-        "  quality_exact_rows: {}",
-        payload.definitions.quality_exact_rows
-    );
-    println!(
-        "  quality_exact_zero_error_rows: {}",
-        payload.definitions.quality_exact_zero_error_rows
-    );
-    println!(
-        "  quality_exact_invalid_rows: {}",
-        payload.definitions.quality_exact_invalid_rows
-    );
-    println!(
         "  consistency_repeats: {}",
         payload.definitions.consistency_repeats
     );
@@ -2201,11 +1799,6 @@ fn main() {
     );
     for dataset in &payload.datasets {
         print_summary(&dataset.name, &dataset.summary);
-        print_visual_summary(&format!("{} visual", dataset.name), &dataset.visual_summary);
-        print_visual_rerank_summary(
-            &format!("{} rerank", dataset.name),
-            &dataset.visual_rerank_summary,
-        );
         print_timing_summary(&format!("{} timing", dataset.name), &dataset.timing_summary);
         print_candidate_summary(
             &format!("{} candidates", dataset.name),
@@ -2217,8 +1810,6 @@ fn main() {
         );
     }
     print_summary("OVERALL", &payload.overall);
-    print_visual_summary("OVERALL visual", &payload.overall_visual);
-    print_visual_rerank_summary("OVERALL rerank", &payload.overall_visual_rerank);
     print_timing_summary("OVERALL timing", &payload.overall_timing);
     print_candidate_summary("OVERALL candidates", &payload.overall_candidates);
     print_quality_summary("OVERALL quality", &payload.overall_quality);

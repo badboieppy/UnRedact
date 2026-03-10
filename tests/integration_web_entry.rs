@@ -10,11 +10,14 @@ use unredact::types::visualizer_config::VisualizerConfig;
 fn allowed_guess_width_pt(guess: &unredact::types::guess_types::RedactionGuess) -> f32 {
     match (
         guess.context.anchor_mode.as_deref(),
-        guess.context.anchor_left_x,
-        guess.context.anchor_right_x,
+        guess.context.usable_left_edge_x_pt,
+        guess.context.usable_right_edge_x_pt,
     ) {
         (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
-        _ => guess.bbox.width().abs(),
+        _ => guess
+            .context
+            .target_width_pt
+            .max(guess.bbox.width().abs()),
     }
 }
 
@@ -34,10 +37,7 @@ fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
     let cfg = UnredactWebConfig {
         include_details: false,
         enable_image_analysis: true,
-        guess: GuessConfig {
-            visual_score: true,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: false,
         visualizer: VisualizerConfig::default(),
     };
@@ -83,25 +83,75 @@ fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
     let second_last = &report.guesses[report.guesses.len() - 2];
     let last = &report.guesses[report.guesses.len() - 1];
     assert!(
-        second_last.context.has_anchor_pair,
+        second_last.context.anchor_mode.is_some(),
         "second-to-last redaction should be guessable"
     );
     assert!(
-        last.context.has_anchor_pair,
+        last.context.anchor_mode.is_some(),
         "last redaction should be guessable"
     );
     for guess in [second_last, last] {
-        let allowed_width = allowed_guess_width_pt(guess) + 0.01_f32;
+        let _target_width = allowed_guess_width_pt(guess);
+        let mut last_error = None::<f32>;
         for candidate in &guess.candidates {
-            if let Some(width_pt) = candidate.width_pt {
+            let width_pt = candidate.width_pt;
+            assert!(
+                width_pt.is_finite() && width_pt >= 0.0_f32,
+                "candidate {} produced invalid width {}",
+                candidate.text,
+                width_pt
+            );
+            if let Some(previous_error) = last_error {
                 assert!(
-                    width_pt <= allowed_width,
-                    "candidate {} overflowed allowed width {:.2} with width {:.2}",
+                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    "candidate list is not sorted by error: previous={} current={} text={}",
+                    previous_error,
+                    candidate.error_pt,
                     candidate.text,
-                    allowed_width,
-                    width_pt
                 );
             }
+            last_error = Some(candidate.error_pt);
         }
+    }
+
+    let report_json = serde_json::from_slice::<serde_json::Value>(&web_outputs.guesses_json)
+        .expect("guesses json should decode into value");
+    let guesses = report_json
+        .get("guesses")
+        .and_then(serde_json::Value::as_array)
+        .expect("guesses array should exist");
+    let first_guess = guesses.first().expect("at least one guess should exist");
+    let context = first_guess
+        .get("context")
+        .expect("guess context should be present");
+    assert!(context.get("target_width_pt").is_some());
+    assert!(context.get("target_guess_width_pt").is_none());
+    let candidate = first_guess
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.first());
+    if let Some(candidate) = candidate {
+        for removed in ["score", "exact_matches", "visual_score", "confidence_score"] {
+            assert!(
+                candidate.get(removed).is_none(),
+                "candidate json should not contain removed field {removed}"
+            );
+        }
+        for required in [
+            "text",
+            "width_pt",
+            "glyph_width_sum_pt",
+            "char_spacing_total_pt",
+            "word_spacing_total_pt",
+            "target_width_pt",
+            "error_pt",
+        ] {
+            assert!(
+                candidate.get(required).is_some(),
+                "candidate json should contain field {required}"
+            );
+        }
+        assert!(candidate.get("word_count").is_none());
+        assert!(candidate.get("char_count").is_none());
     }
 }

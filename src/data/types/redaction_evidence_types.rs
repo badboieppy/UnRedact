@@ -86,7 +86,8 @@ pub struct GuessGeometry {
     pub usable_left_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub usable_right_edge_x_pt: Option<f32>,
-    pub target_guess_width_pt: f32,
+    #[serde(alias = "target_guess_width_pt")]
+    pub target_width_pt: f32,
     pub line_bias_pt: f32,
     pub tolerance_pt: f32,
 }
@@ -96,6 +97,8 @@ pub struct MeasurementFont {
     pub font_name: String,
     pub font_size_pt: f32,
     pub h_scale_pct: f32,
+    pub char_spacing_pt: f32,
+    pub word_spacing_pt: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

@@ -24,9 +24,6 @@ struct Args {
     #[arg(long)]
     no_image_analysis: bool,
 
-    #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
-    should_visually_score: bool,
-
     #[arg(long, default_value_t = false)]
     visualize: bool,
 }
@@ -48,10 +45,7 @@ fn run() -> Result<(), String> {
 
     let cfg = UnredactServiceConfig {
         enable_image_analysis: !args.no_image_analysis,
-        guess: GuessConfig {
-            visual_score: args.should_visually_score,
-            ..GuessConfig::default()
-        },
+        guess: GuessConfig::default(),
         visualize: args.visualize,
         visualizer: VisualizerConfig::default(),
         ..UnredactServiceConfig::default()

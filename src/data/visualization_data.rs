@@ -4,7 +4,7 @@ use serde::Deserialize;
 use crate::data::redaction_scan_data::CONTEXT_SPANS_META_KEY;
 use crate::dependency::pdf_annotator::PdfAnnotator;
 use crate::types::file_types::{FontAsset, FontRunReport, FontTextRun, Rect as FontRect};
-use crate::types::guess_types::{GuessReport, RedactionGuess};
+use crate::types::guess_types::{AnchorDecisionRecord, GuessReport, RedactionGuess};
 use crate::types::redaction_types::{Rect, RedactionKind, RedactionReport};
 use crate::types::runtime_defaults::GLYPH_UNITS_SCALE;
 use crate::types::text_overlay::TextOverlay;
@@ -44,6 +44,7 @@ struct AnchorPairOverlayInput<'a> {
     redaction_index: usize,
     redaction: &'a crate::types::redaction_types::RedactionOccurrence,
     guess: &'a RedactionGuess,
+    anchor: Option<&'a AnchorDecisionRecord>,
     selected_text: &'a str,
     left_bbox: Option<Rect>,
     right_bbox: Option<Rect>,
@@ -179,6 +180,7 @@ fn build_overlays(
     for idx in 0..max {
         let redaction = &report.redactions[idx];
         let guess = &guesses.guesses[idx];
+        let anchor = guesses.anchors.get(idx);
         let selected = pick_best_guess(guess);
         let selected = match selected {
             Some(text) => text,
@@ -190,14 +192,16 @@ fn build_overlays(
         }
         let left_hit = redaction.underlying_text.first();
         let right_hit = redaction.underlying_text.get(1);
-        let context_left = guess.context.left_anchor_text.trim();
-        let context_right = guess.context.right_anchor_text.trim();
+        let context_left = anchor_left_text(anchor);
+        let context_right = anchor_right_text(anchor);
+        let anchor_left_x = anchor.and_then(|value| value.usable_left_edge_x_pt);
+        let anchor_right_x = anchor.and_then(|value| value.usable_right_edge_x_pt);
 
         let has_any_anchor_hint = !context_left.is_empty()
             || !context_right.is_empty()
-            || guess.context.anchor_left_x.is_some()
-            || guess.context.anchor_right_x.is_some();
-        if guess.context.has_anchor_pair
+            || anchor_left_x.is_some()
+            || anchor_right_x.is_some();
+        if guess.context.anchor_mode.is_some()
             && has_any_anchor_hint
             && push_anchor_pair_overlays(
                 &mut out,
@@ -205,6 +209,7 @@ fn build_overlays(
                     redaction_index: idx,
                     redaction,
                     guess,
+                    anchor,
                     selected_text: selected_text.as_str(),
                     left_bbox: left_hit.map(|hit| hit.bbox),
                     right_bbox: right_hit.map(|hit| hit.bbox),
@@ -225,8 +230,8 @@ fn build_overlays(
             let (font_key, requested_font_size_pt, h_scale_pct) = if let Some(run) = nearby_run {
                 (
                     run.font_key.clone(),
-                    guess.context.anchor_font_size_pt.unwrap_or(run.font_size_pt),
-                    guess.context.anchor_h_scale_pct.unwrap_or(run.h_scale_pct),
+                    guess.context.font_size_pt.unwrap_or(run.font_size_pt),
+                    guess.context.h_scale_pct.unwrap_or(run.h_scale_pct),
                 )
             } else {
                 ("F1".to_owned(), 11.0_f32, 100.0_f32)
@@ -437,6 +442,7 @@ fn push_anchor_pair_overlays(
         redaction_index,
         redaction,
         guess,
+        anchor,
         selected_text,
         left_bbox,
         right_bbox,
@@ -445,8 +451,10 @@ fn push_anchor_pair_overlays(
         width_map,
         force_selected_only,
     } = input;
-    let context_left = guess.context.left_anchor_text.trim();
-    let context_right = guess.context.right_anchor_text.trim();
+    let context_left = anchor_left_text(anchor);
+    let context_right = anchor_right_text(anchor);
+    let anchor_left_x = anchor.and_then(|value| value.usable_left_edge_x_pt);
+    let anchor_right_x = anchor.and_then(|value| value.usable_right_edge_x_pt);
     let selected_text = normalize_overlay_line_breaks(selected_text.trim());
     if selected_text.is_empty() {
         return false;
@@ -480,42 +488,43 @@ fn push_anchor_pair_overlays(
             .or_else(|| select_run_by_bbox(runs, redaction.page_index, right_bbox))
     };
 
-    let anchor_left_x = guess.context.anchor_left_x;
     let run_style = left_anchor_run
         .or(right_anchor_run)
         .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
-    let nearby_run =
-        select_run_by_bbox(runs, redaction.page_index, Some(redaction.bbox))
-            .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
-    let (font_key, font_size_pt, h_scale_pct) = if let Some((font_key, run_font_size_pt, run_h_scale_pct)) =
-        run_style.or(nearby_run)
-    {
-        let context_font_size_pt = guess.context.anchor_font_size_pt;
-        let context_h_scale_pct = guess.context.anchor_h_scale_pct;
-        let context_style_compatible = context_font_size_pt
-            .map(|value| (value - run_font_size_pt).abs() <= OVERLAY_STYLE_FONT_SIZE_TOLERANCE_PT)
-            .unwrap_or(true)
-            && context_h_scale_pct
-                .map(|value| (value - run_h_scale_pct).abs() <= OVERLAY_STYLE_H_SCALE_TOLERANCE_PCT)
-                .unwrap_or(true);
-        let font_size_pt = if context_style_compatible {
-            context_font_size_pt.unwrap_or(run_font_size_pt)
+    let nearby_run = select_run_by_bbox(runs, redaction.page_index, Some(redaction.bbox))
+        .map(|run| (run.font_key.clone(), run.font_size_pt, run.h_scale_pct));
+    let (font_key, font_size_pt, h_scale_pct) =
+        if let Some((font_key, run_font_size_pt, run_h_scale_pct)) = run_style.or(nearby_run) {
+            let context_font_size_pt = guess.context.font_size_pt;
+            let context_h_scale_pct = guess.context.h_scale_pct;
+            let context_style_compatible = context_font_size_pt
+                .map(|value| {
+                    (value - run_font_size_pt).abs() <= OVERLAY_STYLE_FONT_SIZE_TOLERANCE_PT
+                })
+                .unwrap_or(true)
+                && context_h_scale_pct
+                    .map(|value| {
+                        (value - run_h_scale_pct).abs() <= OVERLAY_STYLE_H_SCALE_TOLERANCE_PCT
+                    })
+                    .unwrap_or(true);
+            let font_size_pt = if context_style_compatible {
+                context_font_size_pt.unwrap_or(run_font_size_pt)
+            } else {
+                run_font_size_pt
+            };
+            let h_scale_pct = if context_style_compatible {
+                context_h_scale_pct.unwrap_or(run_h_scale_pct)
+            } else {
+                run_h_scale_pct
+            };
+            (font_key, font_size_pt, h_scale_pct)
         } else {
-            run_font_size_pt
+            (
+                "F1".to_owned(),
+                guess.context.font_size_pt.unwrap_or(11.0_f32),
+                guess.context.h_scale_pct.unwrap_or(100.0_f32),
+            )
         };
-        let h_scale_pct = if context_style_compatible {
-            context_h_scale_pct.unwrap_or(run_h_scale_pct)
-        } else {
-            run_h_scale_pct
-        };
-        (font_key, font_size_pt, h_scale_pct)
-    } else {
-        (
-            "F1".to_owned(),
-            guess.context.anchor_font_size_pt.unwrap_or(11.0_f32),
-            guess.context.anchor_h_scale_pct.unwrap_or(100.0_f32),
-        )
-    };
     let y0 = left_anchor_run
         .map(|run| run.bbox.y0)
         .or_else(|| right_anchor_run.map(|run| run.bbox.y0))
@@ -547,8 +556,8 @@ fn push_anchor_pair_overlays(
                 y0,
                 y1,
                 anchor_mode: guess.context.anchor_mode.as_deref(),
-                anchor_left_x: guess.context.anchor_left_x,
-                anchor_right_x: guess.context.anchor_right_x,
+                anchor_left_x,
+                anchor_right_x,
                 left_anchor_text: left_text,
                 right_anchor_text: right_text,
                 prefer_anchor_placement: true,
@@ -561,7 +570,7 @@ fn push_anchor_pair_overlays(
     let left_x = left_anchor_run
         .map(|run| run.bbox.x0)
         .or(anchor_left_x)
-        .or(guess.context.anchor_right_x);
+        .or(anchor_right_x);
     let Some(left_x) = left_x else {
         return push_anchor_selected_only_overlay(
             overlays,
@@ -575,8 +584,8 @@ fn push_anchor_pair_overlays(
                 y0,
                 y1,
                 anchor_mode: guess.context.anchor_mode.as_deref(),
-                anchor_left_x: guess.context.anchor_left_x,
-                anchor_right_x: guess.context.anchor_right_x,
+                anchor_left_x,
+                anchor_right_x,
                 left_anchor_text: left_text,
                 right_anchor_text: right_text,
                 prefer_anchor_placement: true,
@@ -619,8 +628,8 @@ fn push_anchor_pair_overlays(
                 y0,
                 y1,
                 anchor_mode: guess.context.anchor_mode.as_deref(),
-                anchor_left_x: guess.context.anchor_left_x,
-                anchor_right_x: guess.context.anchor_right_x,
+                anchor_left_x,
+                anchor_right_x,
                 left_anchor_text: left_text,
                 right_anchor_text: right_text,
                 prefer_anchor_placement: true,
@@ -1068,6 +1077,20 @@ fn raster_overlay_layout(
 
 fn pick_best_guess(guess: &crate::types::guess_types::RedactionGuess) -> Option<&str> {
     guess.candidates.first().map(|c| c.text.as_str())
+}
+
+fn anchor_left_text(anchor: Option<&AnchorDecisionRecord>) -> &str {
+    anchor
+        .and_then(|value| value.left.as_ref())
+        .map(|side| side.text.trim())
+        .unwrap_or_default()
+}
+
+fn anchor_right_text(anchor: Option<&AnchorDecisionRecord>) -> &str {
+    anchor
+        .and_then(|value| value.right.as_ref())
+        .map(|side| side.text.trim())
+        .unwrap_or_default()
 }
 
 fn build_dense_anchor_row_flags(report: &RedactionReport) -> Vec<bool> {
@@ -1523,7 +1546,10 @@ fn deref_to_dict<'doc>(doc: &'doc Document, object: &'doc Object) -> Option<&'do
 mod tests {
     use super::{build_font_width_map, text_width_pt, VisualizationData};
     use crate::types::file_types::{FontRunReport, FontTextRun, Rect as FontRect};
-    use crate::types::guess_types::{GuessCandidate, GuessContext, GuessReport, RedactionGuess};
+    use crate::types::guess_types::{
+        AnchorDecisionRecord, AnchorSideDecision, AnchorType, GuessCandidate, GuessContext,
+        GuessReport, RedactionGuess,
+    };
     use crate::types::redaction_types::{
         Rect, RedactionKind, RedactionOccurrence, RedactionReport, UnderlyingTextHit,
     };
@@ -1628,84 +1654,132 @@ mod tests {
     }
 
     fn sample_guesses_with_candidate(top_text: &str) -> GuessReport {
+        let bbox = Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32);
         GuessReport {
             input_redactions: String::new(),
             input_fonts: String::new(),
             guesses: vec![RedactionGuess {
                 page_index: 0_u32,
-                bbox: Rect::new(100.0_f32, 200.0_f32, 170.0_f32, 214.0_f32),
+                bbox,
                 candidates: vec![GuessCandidate {
                     text: top_text.to_owned(),
-                    score: 1.0_f32,
+                    width_pt: 70.0_f32,
+                    glyph_width_sum_pt: 70.0_f32,
+                    char_spacing_total_pt: 0.0_f32,
+                    word_spacing_total_pt: 0.0_f32,
+                    predicted_right_edge_x_pt: Some(150.0_f32),
+                    actual_right_edge_x_pt: Some(150.0_f32),
+                    target_width_pt: 70.0_f32,
                     error_pt: 0.0_f32,
-                    word_count: 2_u32,
-                    width_pt: Some(70.0_f32),
                 }],
-                exact_matches: vec![],
                 context: GuessContext {
-                    left_anchor_text: "including".to_owned(),
-                    right_anchor_text: "and".to_owned(),
-                    gap_pt: 80.0_f32,
-                    char_width_pt: 5.0_f32,
-                    tol_pt: 8.0_f32,
-                    anchor_left_x: Some(80.0_f32),
-                    anchor_right_x: Some(190.0_f32),
-                    anchor_font_name: Some("Times-Roman".to_owned()),
-                    anchor_font_size_pt: Some(11.0_f32),
-                    anchor_h_scale_pct: Some(100.0_f32),
-                    anchor_row_bias_pt: Some(0.0_f32),
                     anchor_mode: Some("two_sided".to_owned()),
-                    confidence_score: None,
-                    confidence_factors: None,
-                    anchor_row_id: None,
-                    left_anchor_id: None,
-                    right_anchor_id: None,
-                    left_anchor_type: None,
-                    right_anchor_type: None,
-                    left_anchor_selected_source: None,
-                    right_anchor_selected_source: None,
-                    left_anchor_confidence: None,
-                    right_anchor_confidence: None,
-                    row_anchor_confidence: None,
-                    has_anchor_pair: true,
+                    usable_left_edge_x_pt: Some(80.0_f32),
+                    usable_right_edge_x_pt: Some(190.0_f32),
+                    target_width_pt: 110.0_f32,
+                    font_name: Some("Times-Roman".to_owned()),
+                    font_size_pt: Some(11.0_f32),
+                    h_scale_pct: Some(100.0_f32),
+                    char_spacing_pt: Some(0.0_f32),
+                    word_spacing_pt: Some(0.0_f32),
                 },
-                visual_compared_pixels: None,
-                visual_mean_abs_diff: None,
-                visual_changed_pixel_ratio: None,
-                visual_reason: None,
-                visual_dropped: false,
             }],
-            anchors: vec![],
+            anchors: vec![AnchorDecisionRecord {
+                anchor_row_id: "page0_row0".to_owned(),
+                page_index: 0_u32,
+                bbox,
+                anchor_mode: "two_sided".to_owned(),
+                left: Some(AnchorSideDecision {
+                    anchor_id: "left0".to_owned(),
+                    anchor_type: AnchorType::Left,
+                    text: "including".to_owned(),
+                    bbox: Rect::new(104.0_f32, 208.0_f32, 150.0_f32, 219.0_f32),
+                    x: 80.0_f32,
+                }),
+                right: Some(AnchorSideDecision {
+                    anchor_id: "right0".to_owned(),
+                    anchor_type: AnchorType::Right,
+                    text: "and".to_owned(),
+                    bbox: Rect::new(214.0_f32, 208.0_f32, 232.0_f32, 219.0_f32),
+                    x: 190.0_f32,
+                }),
+                usable_left_edge_x_pt: Some(80.0_f32),
+                usable_right_edge_x_pt: Some(190.0_f32),
+                target_width_pt: 110.0_f32,
+                font_name: "Times-Roman".to_owned(),
+                font_size_pt: 11.0_f32,
+                h_scale_pct: 100.0_f32,
+                char_spacing_pt: 0.0_f32,
+                word_spacing_pt: 0.0_f32,
+            }],
             diagnostics: vec![],
         }
     }
 
     fn sample_multi_anchor_pair_guesses() -> GuessReport {
-        let mut first = sample_guesses_with_candidate("SARAH KELLEN")
-            .guesses
-            .into_iter()
-            .next()
-            .expect("sample guess should exist");
-        first.context.anchor_left_x = Some(104.0_f32);
-        first.context.anchor_right_x = Some(214.0_f32);
+        let mut report = sample_guesses_with_candidate("SARAH KELLEN");
+        report.anchors[0].usable_left_edge_x_pt = Some(104.0_f32);
+        report.anchors[0].usable_right_edge_x_pt = Some(214.0_f32);
+        if let Some(left) = report.anchors[0].left.as_mut() {
+            left.x = 104.0_f32;
+        }
+        if let Some(right) = report.anchors[0].right.as_mut() {
+            right.x = 214.0_f32;
+        }
 
+        let first = report
+            .guesses
+            .first()
+            .cloned()
+            .expect("sample guess should exist");
         let mut second = first.clone();
         second.bbox = Rect::new(176.0_f32, 200.0_f32, 246.0_f32, 214.0_f32);
         second.candidates = vec![GuessCandidate {
             text: "ADRIANA MUCINSKA".to_owned(),
-            score: 0.95_f32,
+            width_pt: 75.0_f32,
+            glyph_width_sum_pt: 75.0_f32,
+            char_spacing_total_pt: 0.0_f32,
+            word_spacing_total_pt: 0.0_f32,
+            predicted_right_edge_x_pt: Some(225.0_f32),
+            actual_right_edge_x_pt: Some(225.0_f32),
+            target_width_pt: 75.0_f32,
             error_pt: 0.1_f32,
-            word_count: 2_u32,
-            width_pt: Some(75.0_f32),
         }];
-        second.context.anchor_left_x = Some(150.0_f32);
-        second.context.anchor_right_x = Some(260.0_f32);
+
+        let second_anchor = AnchorDecisionRecord {
+            anchor_row_id: "page0_row1".to_owned(),
+            page_index: 0_u32,
+            bbox: second.bbox,
+            anchor_mode: "two_sided".to_owned(),
+            left: Some(AnchorSideDecision {
+                anchor_id: "left1".to_owned(),
+                anchor_type: AnchorType::Left,
+                text: "including".to_owned(),
+                bbox: Rect::new(150.0_f32, 208.0_f32, 196.0_f32, 219.0_f32),
+                x: 150.0_f32,
+            }),
+            right: Some(AnchorSideDecision {
+                anchor_id: "right1".to_owned(),
+                anchor_type: AnchorType::Right,
+                text: "and".to_owned(),
+                bbox: Rect::new(260.0_f32, 208.0_f32, 278.0_f32, 219.0_f32),
+                x: 260.0_f32,
+            }),
+            usable_left_edge_x_pt: Some(150.0_f32),
+            usable_right_edge_x_pt: Some(260.0_f32),
+            target_width_pt: 110.0_f32,
+            font_name: "Times-Roman".to_owned(),
+            font_size_pt: 11.0_f32,
+            h_scale_pct: 100.0_f32,
+            char_spacing_pt: 0.0_f32,
+            word_spacing_pt: 0.0_f32,
+        };
 
         GuessReport {
             input_redactions: String::new(),
             input_fonts: String::new(),
             guesses: vec![first, second],
-            anchors: vec![],
+            anchors: vec![report.anchors.remove(0), second_anchor],
             diagnostics: vec![],
         }
     }
@@ -1864,10 +1938,9 @@ mod tests {
         let data = VisualizationData::new();
         let report = sample_anchor_pair_report();
         let mut guesses = sample_guesses();
-        guesses.guesses[0].context.anchor_left_x = Some(80.0_f32);
-        guesses.guesses[0].context.anchor_font_name = Some("Wrong-Font".to_owned());
-        guesses.guesses[0].context.anchor_font_size_pt = Some(17.0_f32);
-        guesses.guesses[0].context.anchor_h_scale_pct = Some(82.0_f32);
+        guesses.guesses[0].context.font_name = Some("Wrong-Font".to_owned());
+        guesses.guesses[0].context.font_size_pt = Some(17.0_f32);
+        guesses.guesses[0].context.h_scale_pct = Some(82.0_f32);
         let font_runs = sample_font_runs_with_anchor_row();
 
         let inputs = data
@@ -1921,10 +1994,7 @@ mod tests {
         let mut report = sample_anchor_pair_report();
         report.redactions[0].underlying_text[0].text = "(pilot),".to_owned();
         report.redactions[0].underlying_text[1].text = "(pilot),".to_owned();
-        let mut guesses = sample_guesses();
-        guesses.guesses[0].context.left_anchor_text = "(pilot),".to_owned();
-        guesses.guesses[0].context.right_anchor_text = "(pilot),".to_owned();
-        guesses.guesses[0].context.has_anchor_pair = true;
+        let guesses = sample_guesses();
         let font_runs = sample_font_runs_with_anchor_row();
 
         let inputs = data
@@ -1948,9 +2018,8 @@ mod tests {
         let data = VisualizationData::new();
         let report = sample_report();
         let mut guesses = sample_guesses_with_candidate("NADIA\nMARCINKOVA");
-        guesses.guesses[0].context.has_anchor_pair = false;
-        guesses.guesses[0].context.left_anchor_text.clear();
-        guesses.guesses[0].context.right_anchor_text.clear();
+        guesses.guesses[0].context.anchor_mode = None;
+        guesses.anchors.clear();
         let font_runs = sample_font_runs();
 
         let inputs = data

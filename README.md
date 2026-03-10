@@ -5,7 +5,7 @@ It works by combining:
 - redaction box detection,
 - nearby visible text,
 - PDF font/width measurements (including kerning and ligatures),
-- visual scoring against the rendered page.
+- deterministic error ranking from anchor geometry and PDF width metadata.
 
 ## Important Note
 UnRedact generates guesses. It does not guarantee the true hidden text.
@@ -36,7 +36,8 @@ cargo run --bin unredact-cli -- path/to/file.pdf --output-dir path/to/output
 This creates:
 - `file.redactions.json` (detected redaction regions)
 - `file.fonts.json` (detected text/font runs)
-- `file.guesses.json` (best guesses, scores, and diagnostics)
+- `file.guesses.json` (ranked guess candidates with width/error diagnostics)
+- `file.anchors.json` (resolved anchor geometry and measurement profile)
 
 ## Create a Visualized PDF
 If you want an output PDF with overlays:
@@ -77,7 +78,6 @@ If you do not provide one, UnRedact uses the built-in names list.
 - `--output-dir <path>`: optional output folder (default: OS temp directory + `unredact`)
 - `--dictionary <path>`: optional dictionary text file (one entry per line)
 - `--no-image-analysis`: optional flag to disable image/raster redaction detection
-- `--should-visually-score true|false`: optional toggle (default: `true`)
 - `--visualize`: optional flag to write `file.visualized.pdf`
 
 Show all `unredact-cli` options:
@@ -128,11 +128,9 @@ Current script parameters:
 - `--dictionary <path>`: optional dictionary file
 - `--repeats <n>`: measured runs per PDF (default: `3`)
 - `--warmup <n>`: warmup runs per PDF (default: `1`)
-- `--should-visually-score true|false` (default: `true`)
 - `--enable-image-analysis true|false` (default: `true`)
 - `--visualize true|false` (default: `false`)
 - `--raster-dpi <float>` (default: `200`)
-- `--visual-score-dpi <float>` (default: `200`)
 - `--out <path>`: output report path
 
 The report includes:

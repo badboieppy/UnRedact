@@ -28,7 +28,10 @@ fn should_insert_join_space(left: &str, right: &str, gap_pt: f64) -> bool {
     if left_last.is_whitespace() || right_first.is_whitespace() {
         return false;
     }
-    if matches!(right_first, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+    if matches!(
+        right_first,
+        ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+    ) {
         return false;
     }
     if matches!(left_last, '(' | '[' | '{' | '/') {

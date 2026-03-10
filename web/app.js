@@ -11,7 +11,6 @@ const pdfFileInput = document.getElementById("pdfFile");
 const pdfDirectoryInput = document.getElementById("pdfDirectory");
 const dictionaryFileInput = document.getElementById("dictionaryFile");
 const enableImageAnalysisInput = document.getElementById("enableImageAnalysis");
-const shouldVisuallyScoreInput = document.getElementById("shouldVisuallyScore");
 const visualizeOutputInput = document.getElementById("visualizeOutput");
 const runButton = document.getElementById("runButton");
 const clearResultsButton = document.getElementById("clearResultsButton");
@@ -371,15 +370,15 @@ function topGuessText(row) {
 
 function summarizeGuessReport(report) {
   const guesses = reportGuesses(report);
-  const rowsWithExact = guesses.filter(
-    (row) => Array.isArray(row?.exact_matches) && row.exact_matches.length > 0,
+  const rowsWithAnchors = guesses.filter(
+    (row) => typeof row?.context?.anchor_mode === "string",
   ).length;
   const rowsWithCandidates = guesses.filter(
     (row) => Array.isArray(row?.candidates) && row.candidates.length > 0,
   ).length;
   return [
     `redactions guessed: ${guesses.length}`,
-    `rows with exact matches: ${rowsWithExact}`,
+    `rows with anchors: ${rowsWithAnchors}`,
     `rows with candidate lists: ${rowsWithCandidates}`,
   ].join("\n");
 }
@@ -419,13 +418,6 @@ function reportGuesses(report) {
   return choose(Array.isArray(report?.guesses), report.guesses, []);
 }
 
-function exactMatchesText(row) {
-  if (!Array.isArray(row?.exact_matches) || row.exact_matches.length === 0) {
-    return "—";
-  }
-  return row.exact_matches.join("; ");
-}
-
 function topCandidate(row) {
   if (!Array.isArray(row?.candidates) || row.candidates.length === 0) {
     return null;
@@ -433,19 +425,14 @@ function topCandidate(row) {
   return row.candidates[0];
 }
 
-function anchorFontDisplay(context) {
-  const key = valueOrDash(context?.anchor_font_key);
-  const name = valueOrDash(context?.anchor_font_name);
-  if (key === "—" && name === "—") {
+function fontDisplay(context) {
+  const name = valueOrDash(context?.font_name);
+  const size = formatMaybeNumber(context?.font_size_pt, 2);
+  const hScale = formatMaybeNumber(context?.h_scale_pct, 1);
+  if (name === "—") {
     return "—";
   }
-  if (key === "—") {
-    return name;
-  }
-  if (name === "—") {
-    return key;
-  }
-  return `${key} (${name})`;
+  return `${name} @ ${size}pt / ${hScale}%`;
 }
 
 function guessBboxLabel(bbox) {
@@ -467,23 +454,33 @@ function buildFoundRedactionRows(report) {
       rowNumber: index + 1,
       pageNumber: normalizeNumber(row?.page_index, 0) + 1,
       guessText: topGuessText(row),
-      exactMatches: exactMatchesText(row),
       candidateCount: Array.isArray(row?.candidates)
         ? row.candidates.length
         : 0,
-      topScore: formatMaybeNumber(bestCandidate?.score, 4),
       topErrorPt: formatMaybeNumber(bestCandidate?.error_pt, 3),
       topWidthPt: formatMaybeNumber(bestCandidate?.width_pt, 3),
+      glyphWidthPt: formatMaybeNumber(bestCandidate?.glyph_width_sum_pt, 3),
+      charSpacingPt: formatMaybeNumber(bestCandidate?.char_spacing_total_pt, 3),
+      wordSpacingPt: formatMaybeNumber(bestCandidate?.word_spacing_total_pt, 3),
+      targetWidthPt: formatMaybeNumber(
+        bestCandidate?.target_width_pt ?? context?.target_width_pt,
+        3,
+      ),
+      predictedRightEdgePt: formatMaybeNumber(
+        bestCandidate?.predicted_right_edge_x_pt,
+        3,
+      ),
+      actualRightEdgePt: formatMaybeNumber(
+        bestCandidate?.actual_right_edge_x_pt,
+        3,
+      ),
       bboxLabel: guessBboxLabel(row?.bbox),
-      gapPt: formatMaybeNumber(context.gap_pt, 2),
       anchorMode: valueOrDash(context.anchor_mode),
-      anchorFont: anchorFontDisplay(context),
-      confidence: formatMaybeNumber(context.confidence_score, 3),
-      visualMeanAbsDiff: formatMaybeNumber(row?.visual_mean_abs_diff, 3),
-      visualChangedRatio: formatMaybeNumber(row?.visual_changed_pixel_ratio, 4),
-      visualDropped: choose(Boolean(row?.visual_dropped), "yes", "no"),
-      leftContext: valueOrDash(context.left_anchor_text),
-      rightContext: valueOrDash(context.right_anchor_text),
+      font: fontDisplay(context),
+      leftEdgePt: formatMaybeNumber(context.usable_left_edge_x_pt, 3),
+      rightEdgePt: formatMaybeNumber(context.usable_right_edge_x_pt, 3),
+      charSpacingModelPt: formatMaybeNumber(context.char_spacing_pt, 3),
+      wordSpacingModelPt: formatMaybeNumber(context.word_spacing_pt, 3),
     };
   });
 }
@@ -506,21 +503,22 @@ function buildFoundRedactionsTable(rows) {
     "Row",
     "Page",
     "Top Guess",
-    "Exact Matches",
     "Candidate Count",
-    "Top Score",
     "Top Error (pt)",
     "Top Width (pt)",
+    "Glyph Width (pt)",
+    "Char Spacing (pt)",
+    "Word Spacing (pt)",
+    "Target Width (pt)",
+    "Predicted Right Edge (pt)",
+    "Actual Right Edge (pt)",
     "BBox (pt)",
-    "Gap (pt)",
     "Anchor Mode",
-    "Anchor Font",
-    "Confidence",
-    "Visual MAD",
-    "Visual Changed",
-    "Visual Dropped",
-    "Left Context",
-    "Right Context",
+    "Font",
+    "Left Edge (pt)",
+    "Right Edge (pt)",
+    "Model Char Spacing (pt)",
+    "Model Word Spacing (pt)",
   ];
 
   const wrapper = document.createElement("div");
@@ -545,21 +543,22 @@ function buildFoundRedactionsTable(rows) {
     appendTextCell(row, String(rowData.rowNumber));
     appendTextCell(row, String(rowData.pageNumber));
     appendGuessCell(row, rowData.guessText);
-    appendTextCell(row, rowData.exactMatches, "cell-exact-matches");
     appendTextCell(row, String(rowData.candidateCount));
-    appendTextCell(row, rowData.topScore);
     appendTextCell(row, rowData.topErrorPt);
     appendTextCell(row, rowData.topWidthPt);
+    appendTextCell(row, rowData.glyphWidthPt);
+    appendTextCell(row, rowData.charSpacingPt);
+    appendTextCell(row, rowData.wordSpacingPt);
+    appendTextCell(row, rowData.targetWidthPt);
+    appendTextCell(row, rowData.predictedRightEdgePt);
+    appendTextCell(row, rowData.actualRightEdgePt);
     appendTextCell(row, rowData.bboxLabel);
-    appendTextCell(row, rowData.gapPt);
     appendTextCell(row, rowData.anchorMode);
-    appendTextCell(row, rowData.anchorFont);
-    appendTextCell(row, rowData.confidence);
-    appendTextCell(row, rowData.visualMeanAbsDiff);
-    appendTextCell(row, rowData.visualChangedRatio);
-    appendTextCell(row, rowData.visualDropped);
-    appendTextCell(row, rowData.leftContext, "cell-context");
-    appendTextCell(row, rowData.rightContext, "cell-context");
+    appendTextCell(row, rowData.font);
+    appendTextCell(row, rowData.leftEdgePt);
+    appendTextCell(row, rowData.rightEdgePt);
+    appendTextCell(row, rowData.charSpacingModelPt);
+    appendTextCell(row, rowData.wordSpacingModelPt);
     body.appendChild(row);
   }
   table.appendChild(body);
@@ -1079,9 +1078,7 @@ function buildRequestConfig() {
   return {
     include_details: false,
     enable_image_analysis: Boolean(enableImageAnalysisInput.checked),
-    guess: {
-      visual_score: Boolean(shouldVisuallyScoreInput.checked),
-    },
+    guess: {},
     visualize: Boolean(visualizeOutputInput.checked),
     visualizer: {
       color: [1.0, 0.0, 0.0],

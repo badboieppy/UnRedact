@@ -9,8 +9,6 @@ use crate::types::runtime_defaults::{
 };
 use crate::types::visualizer_config::VisualizerConfig;
 
-pub mod guess_input_types;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineConfig {
