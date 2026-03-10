@@ -57,7 +57,6 @@ pub struct GuessContext {
     pub usable_left_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub usable_right_edge_x_pt: Option<f32>,
-    #[serde(alias = "target_guess_width_pt")]
     pub target_width_pt: f32,
     #[serde(default)]
     pub font_name: Option<String>,
@@ -101,7 +100,6 @@ pub struct AnchorDecisionRecord {
     pub usable_left_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub usable_right_edge_x_pt: Option<f32>,
-    #[serde(alias = "target_guess_width_pt")]
     pub target_width_pt: f32,
     pub font_name: String,
     pub font_size_pt: f32,
