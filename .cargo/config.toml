@@ -1,5 +1,4 @@
 [build]
-rustc-wrapper = "clippy-driver"
 rustflags = ["-Dwarnings"]
 
 [target.'cfg(target_arch = "x86_64")']

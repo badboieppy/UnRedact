@@ -97,20 +97,20 @@ You can run UnRedact directly in a browser from a static site.
 
 ### Build the Web App Locally
 1. Install `wasm-pack`
-2. Install Binaryen (`wasm-opt`) `version_126` or newer
-3. Build the wasm package:
+2. Build the wasm package from `web_bindings/`:
 
 ```bash
-wasm-pack build --target web --out-dir web/pkg --release --no-default-features --features "shared-bytes-workflow,web-entry"
+cd web_bindings
+wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
 ```
 
-4. Serve the static files in `web/`:
+3. Serve the static files in `web/`:
 
 ```bash
 python -m http.server 8080 --directory web
 ```
 
-5. Open `http://localhost:8080`.
+4. Open `http://localhost:8080`.
 
 ### Local WASM Benchmark
 You can benchmark the real `run_unredact_web` wasm path locally with Node.js.
@@ -145,7 +145,8 @@ You can run an automated browser test that drives the real web UI batch flow, th
 1. Build wasm first:
 
 ```bash
-wasm-pack build --target web --out-dir web/pkg --release --no-default-features --features "shared-bytes-workflow,web-entry"
+cd web_bindings
+wasm-pack build --target web --out-dir ../web/pkg --out-name unredact --release
 ```
 
 2. Install Playwright test tooling and Chromium once:

@@ -15,6 +15,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy
+        run: cargo clippy --release --all-features --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo test --release --all-features
@@ -40,10 +45,19 @@ jobs:
       - name: Setup Rust + wasm target
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
+
+      - name: Run wasm clippy
+        run: >
+          cargo clippy
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features "shared-bytes-workflow,web-entry"
+          -- -D warnings
 
       - name: Check wasm build with warnings denied
         env:
@@ -55,13 +69,13 @@ jobs:
           --features "shared-bytes-workflow,web-entry"
 
       - name: Build wasm package
+        working-directory: web_bindings
         run: >
           wasm-pack build
+          --out-name unredact
           --target web
-          --out-dir web/pkg
+          --out-dir ../web/pkg
           --release
-          --no-default-features
-          --features "shared-bytes-workflow,web-entry"
 
       - name: Run wasm Node smoke test
         run: npm run test:wasm-smoke

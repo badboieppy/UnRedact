@@ -14,4 +14,4 @@ wasm-bindgen = "=0.2.108"
 unredact_core = { package = "unredact", path = "..", default-features = false, features = ["shared-bytes-workflow", "web-entry"] }
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--all-features"]
+wasm-opt = false

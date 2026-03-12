@@ -31,13 +31,13 @@ jobs:
         run: cargo install wasm-pack --locked
 
       - name: Build wasm package
+        working-directory: web_bindings
         run: >
           wasm-pack build
+          --out-name unredact
           --target web
-          --out-dir web/pkg
+          --out-dir ../web/pkg
           --release
-          --no-default-features
-          --features "shared-bytes-workflow,web-entry"
 
       - name: Prepare site artifact
         run: |
