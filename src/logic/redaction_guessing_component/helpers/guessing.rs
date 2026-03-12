@@ -32,6 +32,7 @@ pub struct RunGuessFromBytesRequest<'a> {
     pub preloaded_font_runs: Option<&'a FontRunReport>,
     pub preloaded_font_runs_elapsed_ms: Option<u128>,
     pub cfg: &'a GuessConfig,
+    pub collect_diagnostics: bool,
 }
 
 #[cfg(feature = "cli-entry")]
@@ -39,69 +40,86 @@ pub struct RunAnchorFromBytesRequest<'a> {
     pub pdf_name: &'a str,
     pub pdf_bytes: &'a [u8],
     pub redactions: &'a RedactionReport,
-    pub diagnostics: &'a [String],
     pub preloaded_font_runs: Option<&'a FontRunReport>,
     pub preloaded_font_runs_elapsed_ms: Option<u128>,
 }
 
+pub struct RunGuessFromBytesOutput {
+    pub report: GuessReport,
+    pub diagnostics: Option<Vec<DiagnosticRecord>>,
+}
+
 #[inline]
-pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<GuessReport, String> {
+pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<RunGuessFromBytesOutput, String> {
     let started = Instant::now();
     let _preloaded_font_runs = req.preloaded_font_runs;
     let _preloaded_font_runs_elapsed_ms = req.preloaded_font_runs_elapsed_ms;
     let _cfg = req.cfg;
 
-    let mut diagnostics = translate_input_diagnostics(req.diagnostics);
+    let mut diagnostics = req
+        .collect_diagnostics
+        .then(|| translate_input_diagnostics(req.diagnostics));
 
     let evidence_started = Instant::now();
     let evidence = collect_redaction_evidence(CollectRedactionEvidenceRequest {
         input_name: req.pdf_name,
         pdf_bytes: req.pdf_bytes,
         redactions: req.redactions,
+        collect_diagnostics: req.collect_diagnostics,
     })?;
-    diagnostics.push(timing_diagnostic(
-        "guess_redaction_evidence",
-        evidence_started.elapsed().as_millis(),
-    ));
-    diagnostics.extend(
-        evidence
-            .diagnostics
-            .iter()
-            .map(translate_evidence_diagnostic),
-    );
+    if let Some(items) = diagnostics.as_mut() {
+        items.push(timing_diagnostic(
+            "guess_redaction_evidence",
+            evidence_started.elapsed().as_millis(),
+        ));
+        items.extend(
+            evidence
+                .diagnostics
+                .iter()
+                .map(translate_evidence_diagnostic),
+        );
+    }
 
     let candidate_started = Instant::now();
     let candidate_set = collect_guess_candidates(CollectGuessCandidatesRequest {
         evidence: &evidence,
         dictionary: req.dictionary,
+        collect_diagnostics: req.collect_diagnostics,
     })?;
-    diagnostics.push(timing_diagnostic(
-        "guess_candidate_data",
-        candidate_started.elapsed().as_millis(),
-    ));
-    diagnostics.extend(
-        candidate_set
-            .diagnostics
-            .iter()
-            .map(translate_candidate_diagnostic),
-    );
+    if let Some(items) = diagnostics.as_mut() {
+        items.push(timing_diagnostic(
+            "guess_candidate_data",
+            candidate_started.elapsed().as_millis(),
+        ));
+        items.extend(
+            candidate_set
+                .diagnostics
+                .iter()
+                .map(translate_candidate_diagnostic),
+        );
+    }
 
     let build_started = Instant::now();
     let (guesses, anchors) = build_guess_outputs(req.redactions, &candidate_set);
-    diagnostics.push(timing_diagnostic(
-        "guess_build_report",
-        build_started.elapsed().as_millis(),
-    ));
-    diagnostics.push(timing_diagnostic(
-        "guess_run_from_bytes_total",
-        started.elapsed().as_millis(),
-    ));
+    if let Some(items) = diagnostics.as_mut() {
+        items.push(timing_diagnostic(
+            "guess_build_report",
+            build_started.elapsed().as_millis(),
+        ));
+        items.push(timing_diagnostic(
+            "guess_run_from_bytes_total",
+            started.elapsed().as_millis(),
+        ));
+    }
 
-    Ok(GuessReport {
-        input_redactions: format!("memory://{}.redactions.json", req.pdf_name),
-        input_fonts: format!("memory://{}.fonts.json", req.pdf_name),
-        guesses,
-        anchors,
+    Ok(RunGuessFromBytesOutput {
+        report: GuessReport {
+            input_redactions: format!("memory://{}.redactions.json", req.pdf_name),
+            input_fonts: format!("memory://{}.fonts.json", req.pdf_name),
+            guesses,
+            anchors,
+            stage_timings: Vec::new(),
+        },
         diagnostics,
     })
 }
@@ -109,35 +127,18 @@ pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<GuessReport, 
 #[cfg(feature = "cli-entry")]
 #[inline]
 pub fn run_anchor_from_bytes(req: RunAnchorFromBytesRequest<'_>) -> Result<AnchorReport, String> {
-    let started = Instant::now();
     let _preloaded_font_runs = req.preloaded_font_runs;
     let _preloaded_font_runs_elapsed_ms = req.preloaded_font_runs_elapsed_ms;
-    let mut diagnostics = translate_input_diagnostics(req.diagnostics);
-    let evidence_started = Instant::now();
     let evidence = collect_redaction_evidence(CollectRedactionEvidenceRequest {
         input_name: req.pdf_name,
         pdf_bytes: req.pdf_bytes,
         redactions: req.redactions,
+        collect_diagnostics: false,
     })?;
-    diagnostics.push(timing_diagnostic(
-        "anchor_redaction_evidence",
-        evidence_started.elapsed().as_millis(),
-    ));
-    diagnostics.extend(
-        evidence
-            .diagnostics
-            .iter()
-            .map(translate_evidence_diagnostic),
-    );
     let decisions = build_anchor_outputs(req.redactions, &evidence);
-    diagnostics.push(timing_diagnostic(
-        "anchor_run_from_bytes_total",
-        started.elapsed().as_millis(),
-    ));
     Ok(AnchorReport {
         input_redactions: format!("memory://{}.redactions.json", req.pdf_name),
         decisions,
-        diagnostics,
     })
 }
 

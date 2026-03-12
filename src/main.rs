@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use unredact::service::unredact_cli_entry::{
-    run_batch_from_paths, run_from_paths, UnredactServiceConfig,
+    run_batch_from_paths_with_diagnostics, run_from_paths_with_diagnostics, UnredactServiceConfig,
 };
 use unredact::types::guess_types::GuessConfig;
 use unredact::types::visualizer_config::VisualizerConfig;
@@ -26,6 +26,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     visualize: bool,
+
+    #[arg(long, default_value_t = false)]
+    diagnostics: bool,
 }
 
 fn main() -> std::process::ExitCode {
@@ -53,7 +56,13 @@ fn run() -> Result<(), String> {
 
     if args.input.is_dir() {
         let batch =
-            run_batch_from_paths(&args.input, &output_dir, args.dictionary.as_deref(), cfg)?;
+            run_batch_from_paths_with_diagnostics(
+                &args.input,
+                &output_dir,
+                args.dictionary.as_deref(),
+                cfg,
+                args.diagnostics,
+            )?;
         println!(
             "processed={} success={} failed={} elapsed_ms={} manifest={}",
             batch.results.len(),
@@ -63,7 +72,13 @@ fn run() -> Result<(), String> {
             batch.manifest_path.display()
         );
     } else {
-        let outputs = run_from_paths(&args.input, &output_dir, args.dictionary.as_deref(), cfg)?;
+        let outputs = run_from_paths_with_diagnostics(
+            &args.input,
+            &output_dir,
+            args.dictionary.as_deref(),
+            cfg,
+            args.diagnostics,
+        )?;
         println!(
             "{}",
             outputs

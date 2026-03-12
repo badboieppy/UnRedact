@@ -7,7 +7,7 @@ use crate::logic::{
     read_dictionary_input, read_input_pdf_bytes, render_visualization,
     run_redaction_guessing_component, validate_batch_input_directory, write_batch_manifest,
     write_encoded_outputs, BytesPipelineRequest, OutputFilePaths, PipelineConfig,
-    VisualizationRenderRequest,
+    PipelineExecutionOptions, VisualizationRenderRequest,
 };
 use crate::types::time::Instant;
 
@@ -19,6 +19,7 @@ pub struct UnredactServiceRequest {
     pub output_dir: PathBuf,
     pub dictionary_path: Option<PathBuf>,
     pub cfg: UnredactServiceConfig,
+    pub write_diagnostics: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub struct UnredactServiceOutputs {
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
     pub anchors_path: PathBuf,
-    pub diagnostics_path: PathBuf,
+    pub diagnostics_path: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -43,6 +44,7 @@ pub struct UnredactBatchRequest {
     pub output_dir: PathBuf,
     pub dictionary_path: Option<PathBuf>,
     pub cfg: UnredactServiceConfig,
+    pub write_diagnostics: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,11 +77,23 @@ pub fn run_from_paths(
     dictionary_path: Option<&Path>,
     cfg: UnredactServiceConfig,
 ) -> Result<UnredactServiceOutputs, String> {
+    run_from_paths_with_diagnostics(input, output_dir, dictionary_path, cfg, false)
+}
+
+#[inline]
+pub fn run_from_paths_with_diagnostics(
+    input: &Path,
+    output_dir: &Path,
+    dictionary_path: Option<&Path>,
+    cfg: UnredactServiceConfig,
+    write_diagnostics: bool,
+) -> Result<UnredactServiceOutputs, String> {
     run(UnredactServiceRequest {
         input: input.to_path_buf(),
         output_dir: output_dir.to_path_buf(),
         dictionary_path: dictionary_path.map(PathBuf::from),
         cfg,
+        write_diagnostics,
     })
 }
 
@@ -90,17 +104,30 @@ pub fn run_batch_from_paths(
     dictionary_path: Option<&Path>,
     cfg: UnredactServiceConfig,
 ) -> Result<UnredactBatchOutputs, String> {
+    run_batch_from_paths_with_diagnostics(input_dir, output_dir, dictionary_path, cfg, false)
+}
+
+#[inline]
+pub fn run_batch_from_paths_with_diagnostics(
+    input_dir: &Path,
+    output_dir: &Path,
+    dictionary_path: Option<&Path>,
+    cfg: UnredactServiceConfig,
+    write_diagnostics: bool,
+) -> Result<UnredactBatchOutputs, String> {
     run_batch(UnredactBatchRequest {
         input_dir: input_dir.to_path_buf(),
         output_dir: output_dir.to_path_buf(),
         dictionary_path: dictionary_path.map(PathBuf::from),
         cfg,
+        write_diagnostics,
     })
 }
 
 #[inline]
 pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String> {
-    let output_paths: OutputFilePaths = build_output_file_paths(&req.input, &req.output_dir)?;
+    let output_paths: OutputFilePaths =
+        build_output_file_paths(&req.input, &req.output_dir, req.write_diagnostics)?;
     let dictionary_bytes = read_dictionary_input(req.dictionary_path.as_deref())?;
     let should_visualize = req.cfg.visualize;
     let visualizer = req.cfg.visualizer;
@@ -109,6 +136,9 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         pdf_bytes: read_input_pdf_bytes(&req.input)?,
         dictionary_bytes,
         cfg: req.cfg,
+        execution: PipelineExecutionOptions {
+            collect_diagnostics: req.write_diagnostics,
+        },
     };
     let mut bytes_outputs = run_redaction_guessing_component(bytes_req)?;
     let visualize_ms = if should_visualize {
@@ -124,13 +154,7 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
     } else {
         0_u128
     };
-    let mut visualize_record =
-        crate::types::diagnostic_types::DiagnosticRecord::info("service", "visualize", "timing_ms");
-    visualize_record.metrics.insert(
-        "value_ms".to_owned(),
-        crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
-    );
-    bytes_outputs.guesses.diagnostics.push(visualize_record);
+    append_visualize_timing(&mut bytes_outputs, visualize_ms);
     bytes_outputs.visualization_payload = None;
     let encoded_outputs = crate::logic::encode_outputs(&bytes_outputs)?;
     write_encoded_outputs(&output_paths, &encoded_outputs)?;
@@ -162,6 +186,7 @@ pub fn run_batch(req: UnredactBatchRequest) -> Result<UnredactBatchOutputs, Stri
         &req.output_dir,
         req.dictionary_path.as_deref(),
         &req.cfg,
+        req.write_diagnostics,
     )?;
     results.sort_by(|left, right| left.input.cmp(&right.input));
 
@@ -197,10 +222,18 @@ fn run_batch_serial(
     output_dir: &Path,
     dictionary_path: Option<&Path>,
     cfg: &UnredactServiceConfig,
+    write_diagnostics: bool,
 ) -> Result<Vec<UnredactBatchFileResult>, String> {
     let mut out = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let result = run_batch_item(input, input_dir, output_dir, dictionary_path, cfg);
+        let result = run_batch_item(
+            input,
+            input_dir,
+            output_dir,
+            dictionary_path,
+            cfg,
+            write_diagnostics,
+        );
         out.push(result);
     }
     Ok(out)
@@ -212,6 +245,7 @@ fn run_batch_item(
     output_dir: &Path,
     dictionary_path: Option<&Path>,
     cfg: &UnredactServiceConfig,
+    write_diagnostics: bool,
 ) -> UnredactBatchFileResult {
     let started = Instant::now();
     let item_output_dir = match ensure_batch_output_dir_for_input(output_dir, input_dir, input) {
@@ -232,7 +266,13 @@ fn run_batch_item(
         }
     };
 
-    let run = run_from_paths(input, &item_output_dir, dictionary_path, cfg.clone());
+    let run = run_from_paths_with_diagnostics(
+        input,
+        &item_output_dir,
+        dictionary_path,
+        cfg.clone(),
+        write_diagnostics,
+    );
     match run {
         Ok(outputs) => UnredactBatchFileResult {
             input: input.to_path_buf(),
@@ -241,7 +281,7 @@ fn run_batch_item(
             fonts_path: Some(outputs.fonts_path),
             guesses_path: Some(outputs.guesses_path),
             anchors_path: Some(outputs.anchors_path),
-            diagnostics_path: Some(outputs.diagnostics_path),
+            diagnostics_path: outputs.diagnostics_path,
             visualized_pdf_path: outputs.visualized_pdf_path,
             error: None,
             elapsed_ms: started.elapsed().as_millis(),
@@ -261,13 +301,34 @@ fn run_batch_item(
     }
 }
 
+fn append_visualize_timing(
+    outputs: &mut crate::logic::types::BytesPipelineOutputs,
+    visualize_ms: u128,
+) {
+    outputs.guesses.stage_timings.push(
+        crate::types::guess_types::StageTimingRecord::new("visualize", visualize_ms),
+    );
+    if let Some(diagnostics) = outputs.diagnostics.as_mut() {
+        let mut record =
+            crate::types::diagnostic_types::DiagnosticRecord::info("service", "visualize", "timing_ms");
+        record.metrics.insert(
+            "value_ms".to_owned(),
+            crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
+        );
+        diagnostics.push(record);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use crate::types::diagnostic_types::DiagnosticReport;
 
-    use super::{run_batch_from_paths, run_from_paths, BatchFileStatus, UnredactServiceConfig};
+    use super::{
+        run_batch_from_paths, run_from_paths, run_from_paths_with_diagnostics, BatchFileStatus,
+        UnredactServiceConfig,
+    };
 
     fn test_dir(tag: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -365,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn run_from_paths_writes_diagnostics_json() {
+    fn run_from_paths_skips_diagnostics_by_default() {
         let input = Path::new("test_data/EFTA00101126.pdf");
         assert!(input.exists(), "missing test input: {}", input.display());
 
@@ -376,20 +437,47 @@ mod tests {
         let outputs = run_from_paths(input, &output_dir, None, UnredactServiceConfig::default())
             .expect("service run should succeed");
         assert!(
-            outputs.diagnostics_path.exists(),
-            "expected diagnostics file {}",
-            outputs.diagnostics_path.display()
+            outputs.diagnostics_path.is_none(),
+            "default service run should not write diagnostics"
         );
-        let bytes = std::fs::read(&outputs.diagnostics_path).unwrap_or_else(|error| {
+    }
+
+    #[test]
+    fn run_from_paths_with_diagnostics_writes_diagnostics_json() {
+        let input = Path::new("test_data/EFTA00101126.pdf");
+        assert!(input.exists(), "missing test input: {}", input.display());
+
+        let output_dir = test_dir("service_diagnostics_output_opt_in");
+        std::fs::create_dir_all(&output_dir)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+
+        let outputs = run_from_paths_with_diagnostics(
+            input,
+            &output_dir,
+            None,
+            UnredactServiceConfig::default(),
+            true,
+        )
+        .expect("service run should succeed");
+        let diagnostics_path = outputs
+            .diagnostics_path
+            .as_ref()
+            .expect("diagnostics path should be present when explicitly enabled");
+        assert!(
+            diagnostics_path.exists(),
+            "expected diagnostics file {}",
+            diagnostics_path.display()
+        );
+        let bytes = std::fs::read(diagnostics_path).unwrap_or_else(|error| {
             panic!(
                 "failed to read diagnostics {}: {error}",
-                outputs.diagnostics_path.display()
+                diagnostics_path.display()
             )
         });
         let report = serde_json::from_slice::<DiagnosticReport>(&bytes).unwrap_or_else(|error| {
             panic!(
                 "failed to parse diagnostics {}: {error}",
-                outputs.diagnostics_path.display()
+                diagnostics_path.display()
             )
         });
         assert!(

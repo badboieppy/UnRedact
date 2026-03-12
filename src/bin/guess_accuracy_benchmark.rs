@@ -10,8 +10,7 @@ use unredact::benchmarks::types::known_redaction_contract::{
 };
 use unredact::service::tooling_entry::default_name_dictionary_entries;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use unredact::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
-use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
+use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess, StageTimingRecord};
 use unredact::types::runtime_defaults::MULTI_SPAN_GAP_RATIO_THRESHOLD;
 use unredact::types::visualizer_config::VisualizerConfig;
 
@@ -504,14 +503,6 @@ fn stddev(values: &[f64]) -> Option<f64> {
     Some(variance.sqrt())
 }
 
-fn metric_f64(record: &DiagnosticRecord, key: &str) -> Option<f64> {
-    match record.metrics.get(key) {
-        Some(DiagnosticValue::Float(value)) if value.is_finite() => Some(*value),
-        Some(DiagnosticValue::Integer(value)) => Some(*value as f64),
-        _ => None,
-    }
-}
-
 fn is_multi_span_guess(guess: &RedactionGuess) -> bool {
     if guess.context.anchor_mode.as_deref() != Some("two_sided") {
         return false;
@@ -611,15 +602,10 @@ fn merge_quality_summaries(summaries: &[QualitySummary]) -> QualitySummary {
     merged
 }
 
-fn timing_accumulator_from_diagnostics(diagnostics: &[DiagnosticRecord]) -> TimingAccumulator {
+fn timing_accumulator_from_stage_timings(stage_timings: &[StageTimingRecord]) -> TimingAccumulator {
     let mut acc = TimingAccumulator::default();
-    for record in diagnostics {
-        if record.code != "timing_ms" {
-            continue;
-        }
-        let Some(value) = metric_f64(record, "value_ms") else {
-            continue;
-        };
+    for record in stage_timings {
+        let value = record.value_ms as f64;
         match record.stage.as_str() {
             "redactions" => acc.redactions_ms.push(value),
             "fonts" => acc.fonts_ms.push(value),
@@ -875,7 +861,7 @@ fn evaluate_efta00101126(
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let timing_accumulator = timing_accumulator_from_stage_timings(&report.stage_timings);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);
@@ -967,7 +953,7 @@ fn evaluate_efta00038617(
         .iter()
         .map(|target| target.best_rank)
         .collect::<Vec<_>>();
-    let timing_accumulator = timing_accumulator_from_diagnostics(&report.diagnostics);
+    let timing_accumulator = timing_accumulator_from_stage_timings(&report.stage_timings);
     let candidate_accumulator = candidate_accumulator_from_guesses(&report.guesses);
     let quality_summary = quality_summary_from_guesses(&report.guesses);
     let timing_summary = summarize_timing_accumulator(&timing_accumulator);

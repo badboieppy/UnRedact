@@ -1,7 +1,22 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::diagnostic_types::DiagnosticRecord;
 use crate::types::redaction_types::Rect;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageTimingRecord {
+    pub stage: String,
+    pub value_ms: u64,
+}
+
+impl StageTimingRecord {
+    #[inline]
+    pub fn new(stage: &str, value_ms: u128) -> Self {
+        Self {
+            stage: stage.to_owned(),
+            value_ms: value_ms.min(u128::from(u64::MAX)) as u64,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -15,15 +30,13 @@ pub struct GuessReport {
     #[serde(default)]
     pub anchors: Vec<AnchorDecisionRecord>,
     #[serde(default)]
-    pub diagnostics: Vec<DiagnosticRecord>,
+    pub stage_timings: Vec<StageTimingRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnchorReport {
     pub input_redactions: String,
     pub decisions: Vec<AnchorDecisionRecord>,
-    #[serde(default)]
-    pub diagnostics: Vec<DiagnosticRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

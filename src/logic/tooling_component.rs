@@ -100,7 +100,9 @@ pub fn run_guess_from_redactions(req: ToolingGuessRequest<'_>) -> Result<GuessRe
         preloaded_font_runs: None,
         preloaded_font_runs_elapsed_ms: None,
         cfg: req.guess,
+        collect_diagnostics: false,
     })
+    .map(|output| output.report)
 }
 
 #[inline]
@@ -109,7 +111,6 @@ pub fn run_anchor_from_redactions(req: ToolingAnchorRequest<'_>) -> Result<Ancho
         pdf_name: req.input_name,
         pdf_bytes: req.pdf_bytes,
         redactions: req.redactions,
-        diagnostics: req.diagnostics,
         preloaded_font_runs: None,
         preloaded_font_runs_elapsed_ms: None,
     })

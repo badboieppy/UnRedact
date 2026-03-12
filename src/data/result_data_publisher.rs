@@ -8,7 +8,7 @@ pub struct ResultPublishPaths<'a> {
     pub fonts_path: &'a Path,
     pub guesses_path: &'a Path,
     pub anchors_path: &'a Path,
-    pub diagnostics_path: &'a Path,
+    pub diagnostics_path: Option<&'a Path>,
     pub visualized_pdf_path: Option<&'a Path>,
 }
 
@@ -18,7 +18,7 @@ pub struct ResultPublishPayload<'a> {
     pub fonts_json: &'a [u8],
     pub guesses_json: &'a [u8],
     pub anchors_json: &'a [u8],
-    pub diagnostics_json: &'a [u8],
+    pub diagnostics_json: Option<&'a [u8]>,
     pub visualized_pdf_bytes: Option<&'a [u8]>,
 }
 
@@ -51,8 +51,10 @@ impl ResultDataPublisher {
             .write_exact(req.paths.guesses_path, req.payload.guesses_json)?;
         self.file_store
             .write_exact(req.paths.anchors_path, req.payload.anchors_json)?;
-        self.file_store
-            .write_exact(req.paths.diagnostics_path, req.payload.diagnostics_json)?;
+        if let (Some(path), Some(bytes)) = (req.paths.diagnostics_path, req.payload.diagnostics_json)
+        {
+            self.file_store.write_exact(path, bytes)?;
+        }
         if let (Some(path), Some(bytes)) = (
             req.paths.visualized_pdf_path,
             req.payload.visualized_pdf_bytes,

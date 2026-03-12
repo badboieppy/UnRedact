@@ -9,6 +9,7 @@ pub struct CollectRedactionEvidenceRequest<'a> {
     pub input_name: &'a str,
     pub pdf_bytes: &'a [u8],
     pub redactions: &'a crate::types::redaction_types::RedactionReport,
+    pub collect_diagnostics: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

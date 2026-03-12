@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use unredact::service::unredact_web_entry::{run, UnredactWebConfig, UnredactWebRequest};
-use unredact::types::diagnostic_types::DiagnosticReport;
 use unredact::types::guess_types::{GuessConfig, GuessReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
@@ -61,17 +60,9 @@ fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
         report_result.err()
     );
     let report = report_result.expect("web guesses should decode");
-    let diagnostics_result =
-        serde_json::from_slice::<DiagnosticReport>(&web_outputs.diagnostics_json);
     assert!(
-        diagnostics_result.is_ok(),
-        "failed to decode web diagnostics json: {:?}",
-        diagnostics_result.err()
-    );
-    let diagnostics = diagnostics_result.expect("web diagnostics should decode");
-    assert!(
-        !diagnostics.items.is_empty(),
-        "expected typed diagnostics in web response"
+        report.stage_timings.iter().any(|item| item.stage == "visualize"),
+        "expected web guesses to include lightweight stage timings"
     );
 
     assert!(

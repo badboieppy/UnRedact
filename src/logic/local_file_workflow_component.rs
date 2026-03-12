@@ -15,7 +15,7 @@ pub struct OutputFilePaths {
     pub fonts_path: PathBuf,
     pub guesses_path: PathBuf,
     pub anchors_path: PathBuf,
-    pub diagnostics_path: PathBuf,
+    pub diagnostics_path: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -26,7 +26,11 @@ pub fn read_input_pdf_bytes(input: &Path) -> Result<Vec<u8>, String> {
 }
 
 #[inline]
-pub fn build_output_file_paths(input: &Path, output_dir: &Path) -> Result<OutputFilePaths, String> {
+pub fn build_output_file_paths(
+    input: &Path,
+    output_dir: &Path,
+    include_diagnostics: bool,
+) -> Result<OutputFilePaths, String> {
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
@@ -36,7 +40,8 @@ pub fn build_output_file_paths(input: &Path, output_dir: &Path) -> Result<Output
         fonts_path: output_dir.join(format!("{stem}.fonts.json")),
         guesses_path: output_dir.join(format!("{stem}.guesses.json")),
         anchors_path: output_dir.join(format!("{stem}.anchors.json")),
-        diagnostics_path: output_dir.join(format!("{stem}.diagnostics.json")),
+        diagnostics_path: include_diagnostics
+            .then(|| output_dir.join(format!("{stem}.diagnostics.json"))),
         visualized_pdf_path: Some(output_dir.join(format!("{stem}.visualized.pdf"))),
     })
 }
@@ -53,7 +58,7 @@ pub fn write_encoded_outputs(
             fonts_path: output_paths.fonts_path.as_path(),
             guesses_path: output_paths.guesses_path.as_path(),
             anchors_path: output_paths.anchors_path.as_path(),
-            diagnostics_path: output_paths.diagnostics_path.as_path(),
+            diagnostics_path: output_paths.diagnostics_path.as_deref(),
             visualized_pdf_path: output_paths.visualized_pdf_path.as_deref(),
         },
         payload: ResultPublishPayload {
@@ -61,7 +66,7 @@ pub fn write_encoded_outputs(
             fonts_json: encoded.fonts_json.as_slice(),
             guesses_json: encoded.guesses_json.as_slice(),
             anchors_json: encoded.anchors_json.as_slice(),
-            diagnostics_json: encoded.diagnostics_json.as_slice(),
+            diagnostics_json: encoded.diagnostics_json.as_deref(),
             visualized_pdf_bytes: encoded.visualized_pdf_bytes.as_deref(),
         },
     })
@@ -183,7 +188,7 @@ mod tests {
     fn build_output_file_paths_uses_stem_and_dir() {
         let input = Path::new("C:/data/report.pdf");
         let output_dir = std::env::temp_dir().join("unredact_output_path_test");
-        let out = build_output_file_paths(input, &output_dir).expect("expected output paths");
+        let out = build_output_file_paths(input, &output_dir, true).expect("expected output paths");
         assert_eq!(
             out.redactions_path,
             output_dir.join("report.redactions.json")
@@ -193,7 +198,7 @@ mod tests {
         assert_eq!(out.anchors_path, output_dir.join("report.anchors.json"));
         assert_eq!(
             out.diagnostics_path,
-            output_dir.join("report.diagnostics.json")
+            Some(output_dir.join("report.diagnostics.json"))
         );
         assert_eq!(
             out.visualized_pdf_path,

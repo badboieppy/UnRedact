@@ -1712,7 +1712,7 @@ mod tests {
                 char_spacing_pt: 0.0_f32,
                 word_spacing_pt: 0.0_f32,
             }],
-            diagnostics: vec![],
+            stage_timings: vec![],
         }
     }
 
@@ -1780,7 +1780,7 @@ mod tests {
             input_fonts: String::new(),
             guesses: vec![first, second],
             anchors: vec![report.anchors.remove(0), second_anchor],
-            diagnostics: vec![],
+            stage_timings: vec![],
         }
     }
 

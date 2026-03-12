@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::diagnostic_types::DiagnosticReport;
+use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticReport};
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{AnchorReport, GuessConfig, GuessReport};
 use crate::types::redaction_types::RedactionReport;
@@ -32,12 +32,18 @@ impl Default for PipelineConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PipelineExecutionOptions {
+    pub collect_diagnostics: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BytesPipelineRequest {
     pub input_name: String,
     pub pdf_bytes: Vec<u8>,
     pub dictionary_bytes: Option<Vec<u8>>,
     pub cfg: PipelineConfig,
+    pub execution: PipelineExecutionOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +57,7 @@ pub struct BytesPipelineOutputs {
     pub redactions: RedactionReport,
     pub fonts: FontDetectionReport,
     pub guesses: GuessReport,
+    pub diagnostics: Option<Vec<DiagnosticRecord>>,
     pub visualization_payload: Option<VisualizationPayload>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
@@ -61,7 +68,7 @@ pub struct EncodedPipelineOutputs {
     pub fonts_json: Vec<u8>,
     pub guesses_json: Vec<u8>,
     pub anchors_json: Vec<u8>,
-    pub diagnostics_json: Vec<u8>,
+    pub diagnostics_json: Option<Vec<u8>>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
 
@@ -71,7 +78,6 @@ impl GuessReport {
         AnchorReport {
             input_redactions: self.input_redactions.clone(),
             decisions: self.anchors.clone(),
-            diagnostics: self.diagnostics.clone(),
         }
     }
 }
@@ -87,10 +93,16 @@ pub fn encode_outputs(outputs: &BytesPipelineOutputs) -> Result<EncodedPipelineO
     let anchors_report: AnchorReport = outputs.guesses.to_anchor_report();
     let anchors_json = serde_json::to_vec_pretty(&anchors_report)
         .map_err(|error| format!("failed to encode anchors json: {error}"))?;
-    let diagnostics_json = serde_json::to_vec_pretty(&DiagnosticReport {
-        items: outputs.guesses.diagnostics.clone(),
-    })
-    .map_err(|error| format!("failed to encode diagnostics json: {error}"))?;
+    let diagnostics_json = outputs
+        .diagnostics
+        .as_ref()
+        .map(|items| {
+            serde_json::to_vec_pretty(&DiagnosticReport {
+                items: items.clone(),
+            })
+            .map_err(|error| format!("failed to encode diagnostics json: {error}"))
+        })
+        .transpose()?;
     Ok(EncodedPipelineOutputs {
         redactions_json,
         fonts_json,

@@ -15,5 +15,6 @@ pub(crate) use local_file_workflow_component::{
 pub(crate) use redaction_guessing_component::run_redaction_guessing_component;
 pub(crate) use types::{
     encode_outputs, BytesPipelineRequest, EncodedPipelineOutputs, PipelineConfig,
+    PipelineExecutionOptions,
 };
 pub(crate) use visualization_component::{render_visualization, VisualizationRenderRequest};

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logic::{
     encode_outputs, render_visualization, run_redaction_guessing_component, BytesPipelineRequest,
-    EncodedPipelineOutputs, PipelineConfig, VisualizationRenderRequest,
+    EncodedPipelineOutputs, PipelineConfig, PipelineExecutionOptions, VisualizationRenderRequest,
 };
 use crate::types::time::Instant;
 
@@ -23,7 +23,6 @@ pub struct UnredactWebOutputs {
     pub fonts_json: Vec<u8>,
     pub guesses_json: Vec<u8>,
     pub anchors_json: Vec<u8>,
-    pub diagnostics_json: Vec<u8>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
 
@@ -36,6 +35,7 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
         pdf_bytes: req.pdf_bytes,
         dictionary_bytes: req.dictionary_file_bytes,
         cfg: req.cfg,
+        execution: PipelineExecutionOptions::default(),
     })?;
     let visualize_ms = if should_visualize {
         let visualize_started = Instant::now();
@@ -50,13 +50,9 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
     } else {
         0_u128
     };
-    let mut visualize_record =
-        crate::types::diagnostic_types::DiagnosticRecord::info("service", "visualize", "timing_ms");
-    visualize_record.metrics.insert(
-        "value_ms".to_owned(),
-        crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
+    outputs.guesses.stage_timings.push(
+        crate::types::guess_types::StageTimingRecord::new("visualize", visualize_ms),
     );
-    outputs.guesses.diagnostics.push(visualize_record);
     outputs.visualization_payload = None;
     let encoded: EncodedPipelineOutputs = encode_outputs(&outputs)?;
     Ok(UnredactWebOutputs {
@@ -64,7 +60,6 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
         fonts_json: encoded.fonts_json,
         guesses_json: encoded.guesses_json,
         anchors_json: encoded.anchors_json,
-        diagnostics_json: encoded.diagnostics_json,
         visualized_pdf_bytes: encoded.visualized_pdf_bytes,
     })
 }

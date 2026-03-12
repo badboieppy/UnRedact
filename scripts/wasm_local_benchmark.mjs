@@ -253,15 +253,17 @@ function summarizeSeries(values) {
   };
 }
 
-function parseStageTimings(diagnostics) {
+function parseStageTimings(stageTimings) {
   const stageMap = new Map();
-  const pattern = /^timing_ms stage=([^ ]+) value=([0-9]+(?:\.[0-9]+)?)$/;
-  for (const line of diagnostics ?? []) {
-    const match = pattern.exec(line);
-    if (!match) {
+  for (const item of stageTimings ?? []) {
+    if (
+      !item ||
+      typeof item.stage !== "string" ||
+      !Number.isFinite(Number(item.value_ms))
+    ) {
       continue;
     }
-    stageMap.set(match[1], Number.parseFloat(match[2]));
+    stageMap.set(item.stage, Number(item.value_ms));
   }
   return stageMap;
 }
@@ -393,7 +395,7 @@ async function runCase(pdfPath, dictionaryBytes, options, rootDir) {
     const guessesJson = asUint8Array(outputs.guesses_json);
     const guessesReport = decodeJsonBytes(guessesJson);
 
-    const stageMap = parseStageTimings(guessesReport.diagnostics ?? []);
+    const stageMap = parseStageTimings(guessesReport.stage_timings ?? []);
     stageMaps.push(stageMap);
 
     const guesses = guessesReport.guesses ?? [];

@@ -36,8 +36,17 @@ cargo run --bin unredact-cli -- path/to/file.pdf --output-dir path/to/output
 This creates:
 - `file.redactions.json` (detected redaction regions)
 - `file.fonts.json` (detected text/font runs)
-- `file.guesses.json` (ranked guess candidates with width/error diagnostics)
+- `file.guesses.json` (ranked guess candidates with width/error measurements and stage timings)
 - `file.anchors.json` (resolved anchor geometry and measurement profile)
+
+To also write the full diagnostics sidecar:
+
+```bash
+cargo run --bin unredact-cli -- path/to/file.pdf --output-dir path/to/output --diagnostics
+```
+
+This also creates:
+- `file.diagnostics.json`
 
 ## Create a Visualized PDF
 If you want an output PDF with overlays:
@@ -79,6 +88,7 @@ If you do not provide one, UnRedact uses the built-in names list.
 - `--dictionary <path>`: optional dictionary text file (one entry per line)
 - `--no-image-analysis`: optional flag to disable image/raster redaction detection
 - `--visualize`: optional flag to write `file.visualized.pdf`
+- `--diagnostics`: optional flag to write `file.diagnostics.json`
 
 Show all `unredact-cli` options:
 
@@ -135,7 +145,7 @@ Current script parameters:
 
 The report includes:
 - wall clock latency stats (`min/mean/p50/p90/max`),
-- internal stage timings parsed from diagnostics (`timing_ms stage=*`),
+- internal stage timings parsed from `guesses.json` `stage_timings`,
 - output size stats,
 - repeat consistency via top-guess signature stability.
 

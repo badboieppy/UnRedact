@@ -11,6 +11,7 @@ use super::redaction_evidence_types::{
 pub struct CollectGuessCandidatesRequest<'a> {
     pub evidence: &'a RedactionEvidenceSet,
     pub dictionary: &'a [String],
+    pub collect_diagnostics: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

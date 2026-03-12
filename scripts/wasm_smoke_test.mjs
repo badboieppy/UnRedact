@@ -77,18 +77,13 @@ async function main() {
     asUint8Array(outputs.anchors_json, "anchors_json"),
     "anchors_json",
   );
-  const diagnostics = decodeJson(
-    asUint8Array(outputs.diagnostics_json, "diagnostics_json"),
-    "diagnostics_json",
-  );
-
   assert.equal(outputs.visualized_pdf_bytes ?? null, null);
   assert.ok(Array.isArray(redactions.redactions), "redactions payload should decode");
   assert.ok(redactions.redactions.length > 0, "expected detected redactions");
   assert.ok(Array.isArray(guesses.guesses), "guesses payload should decode");
   assert.ok(guesses.guesses.length > 0, "expected guessed rows");
   assert.ok(Array.isArray(anchors.decisions), "anchors payload should decode");
-  assert.ok(Array.isArray(diagnostics.items), "diagnostics payload should decode");
+  assert.ok(Array.isArray(guesses.stage_timings), "stage timings should decode");
 
   for (const row of guesses.guesses) {
     assert.equal(typeof row.page_index, "number");
@@ -102,7 +97,7 @@ async function main() {
         redaction_count: redactions.redactions.length,
         guess_rows: guesses.guesses.length,
         anchor_rows: anchors.decisions.length,
-        diagnostics_count: diagnostics.items.length,
+        stage_timing_count: guesses.stage_timings.length,
       },
       null,
       2,

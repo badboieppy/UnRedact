@@ -69,48 +69,54 @@ pub fn collect_redaction_evidence(
         let redaction_id = format!("page{}_redaction{index:03}", redaction.page_index);
         let key = normalized_redaction_key(redaction);
         if !seen_redactions.insert(key) {
-            diagnostics.push(build_diagnostic(
-                DiagnosticLocation {
-                    row_id: None,
-                    redaction_id: Some(redaction_id),
-                    page_index: redaction.page_index,
-                    bbox: redaction.bbox,
-                },
-                "redaction_evidence",
-                "redaction_duplicate",
-                "duplicate redaction geometry",
-                BTreeMap::new(),
-            ));
+            if req.collect_diagnostics {
+                diagnostics.push(build_diagnostic(
+                    DiagnosticLocation {
+                        row_id: None,
+                        redaction_id: Some(redaction_id),
+                        page_index: redaction.page_index,
+                        bbox: redaction.bbox,
+                    },
+                    "redaction_evidence",
+                    "redaction_duplicate",
+                    "duplicate redaction geometry",
+                    BTreeMap::new(),
+                ));
+            }
             continue;
         }
         let Some(page_box) = page_boxes.get(&redaction.page_index).copied() else {
-            diagnostics.push(build_diagnostic(
-                DiagnosticLocation {
-                    row_id: None,
-                    redaction_id: Some(redaction_id),
-                    page_index: redaction.page_index,
-                    bbox: redaction.bbox,
-                },
-                "redaction_evidence",
-                "redaction_out_of_page_bounds",
-                "page box missing for redaction page",
-                BTreeMap::new(),
-            ));
+            if req.collect_diagnostics {
+                diagnostics.push(build_diagnostic(
+                    DiagnosticLocation {
+                        row_id: None,
+                        redaction_id: Some(redaction_id),
+                        page_index: redaction.page_index,
+                        bbox: redaction.bbox,
+                    },
+                    "redaction_evidence",
+                    "redaction_out_of_page_bounds",
+                    "page box missing for redaction page",
+                    BTreeMap::new(),
+                ));
+            }
             continue;
         };
         if let Err(reason_code) = validate_redaction(redaction, page_box) {
-            diagnostics.push(build_diagnostic(
-                DiagnosticLocation {
-                    row_id: None,
-                    redaction_id: Some(redaction_id),
-                    page_index: redaction.page_index,
-                    bbox: redaction.bbox,
-                },
-                "redaction_evidence",
-                reason_code,
-                "redaction failed trusted geometry checks",
-                BTreeMap::new(),
-            ));
+            if req.collect_diagnostics {
+                diagnostics.push(build_diagnostic(
+                    DiagnosticLocation {
+                        row_id: None,
+                        redaction_id: Some(redaction_id),
+                        page_index: redaction.page_index,
+                        bbox: redaction.bbox,
+                    },
+                    "redaction_evidence",
+                    reason_code,
+                    "redaction failed trusted geometry checks",
+                    BTreeMap::new(),
+                ));
+            }
             continue;
         }
         let Some(line_bucket) = select_line_bucket(
@@ -119,18 +125,20 @@ pub fn collect_redaction_evidence(
                 .get(&redaction.page_index)
                 .map(Vec::as_slice),
         ) else {
-            diagnostics.push(build_diagnostic(
-                DiagnosticLocation {
-                    row_id: None,
-                    redaction_id: Some(redaction_id),
-                    page_index: redaction.page_index,
-                    bbox: redaction.bbox,
-                },
-                "redaction_evidence",
-                "line_bucket_not_found",
-                "no same-line visible text bucket for redaction",
-                BTreeMap::new(),
-            ));
+            if req.collect_diagnostics {
+                diagnostics.push(build_diagnostic(
+                    DiagnosticLocation {
+                        row_id: None,
+                        redaction_id: Some(redaction_id),
+                        page_index: redaction.page_index,
+                        bbox: redaction.bbox,
+                    },
+                    "redaction_evidence",
+                    "line_bucket_not_found",
+                    "no same-line visible text bucket for redaction",
+                    BTreeMap::new(),
+                ));
+            }
             continue;
         };
         let row_id = format!("page{}_row{index}", redaction.page_index);
@@ -142,18 +150,22 @@ pub fn collect_redaction_evidence(
             &font_runs.pdf_report.runs,
         ) {
             Ok(row) => rows.push(row),
-            Err(error) => diagnostics.push(build_diagnostic(
-                DiagnosticLocation {
-                    row_id: Some(row_id),
-                    redaction_id: Some(redaction_id),
-                    page_index: redaction.page_index,
-                    bbox: redaction.bbox,
-                },
-                "redaction_evidence",
-                error.reason_code,
-                &error.message,
-                error.metrics,
-            )),
+            Err(error) => {
+                if req.collect_diagnostics {
+                    diagnostics.push(build_diagnostic(
+                        DiagnosticLocation {
+                            row_id: Some(row_id),
+                            redaction_id: Some(redaction_id),
+                            page_index: redaction.page_index,
+                            bbox: redaction.bbox,
+                        },
+                        "redaction_evidence",
+                        error.reason_code,
+                        &error.message,
+                        error.metrics,
+                    ));
+                }
+            }
         }
     }
 

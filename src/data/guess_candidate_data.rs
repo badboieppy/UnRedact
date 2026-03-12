@@ -20,34 +20,38 @@ pub fn collect_guess_candidates(
         for variant in &variants {
             let trimmed = variant.trim();
             if trimmed.is_empty() {
-                diagnostics.push(GuessCandidateDiagnostic {
-                    row_id: row.row_id.clone(),
-                    page_index: row.page_index,
-                    bbox: row.redaction.bbox,
-                    stage: "guess_candidate_data".to_owned(),
-                    reason_code: "candidate_empty_after_trim".to_owned(),
-                    message: "dictionary variant is empty after trim".to_owned(),
-                    metrics: BTreeMap::new(),
-                });
+                if req.collect_diagnostics {
+                    diagnostics.push(GuessCandidateDiagnostic {
+                        row_id: row.row_id.clone(),
+                        page_index: row.page_index,
+                        bbox: row.redaction.bbox,
+                        stage: "guess_candidate_data".to_owned(),
+                        reason_code: "candidate_empty_after_trim".to_owned(),
+                        message: "dictionary variant is empty after trim".to_owned(),
+                        metrics: BTreeMap::new(),
+                    });
+                }
                 continue;
             }
             if !supports_text(&row.measurement_model, trimmed) {
-                let mut metrics = BTreeMap::new();
-                metrics.insert(
-                    "candidate_text".to_owned(),
-                    DiagnosticValue::Text(trimmed.to_owned()),
-                );
-                diagnostics.push(GuessCandidateDiagnostic {
-                    row_id: row.row_id.clone(),
-                    page_index: row.page_index,
-                    bbox: row.redaction.bbox,
-                    stage: "guess_candidate_data".to_owned(),
-                    reason_code: "unsupported_candidate_character".to_owned(),
-                    message: format!(
-                        "candidate contains character outside the trusted character model: {trimmed}"
-                    ),
-                    metrics,
-                });
+                if req.collect_diagnostics {
+                    let mut metrics = BTreeMap::new();
+                    metrics.insert(
+                        "candidate_text".to_owned(),
+                        DiagnosticValue::Text(trimmed.to_owned()),
+                    );
+                    diagnostics.push(GuessCandidateDiagnostic {
+                        row_id: row.row_id.clone(),
+                        page_index: row.page_index,
+                        bbox: row.redaction.bbox,
+                        stage: "guess_candidate_data".to_owned(),
+                        reason_code: "unsupported_candidate_character".to_owned(),
+                        message: format!(
+                            "candidate contains character outside the trusted character model: {trimmed}"
+                        ),
+                        metrics,
+                    });
+                }
                 continue;
             }
             let measurement = measure_text_width(&row.measurement_model, trimmed)?;
@@ -196,6 +200,7 @@ mod tests {
         let out = collect_guess_candidates(CollectGuessCandidatesRequest {
             evidence: &evidence,
             dictionary: &["AAA".to_owned(), "AAAA".to_owned()],
+            collect_diagnostics: false,
         })
         .expect("candidate collection should succeed");
         assert_eq!(out.rows.len(), 1);
@@ -228,6 +233,7 @@ mod tests {
         let out = collect_guess_candidates(CollectGuessCandidatesRequest {
             evidence: &evidence,
             dictionary: &["AA".to_owned()],
+            collect_diagnostics: false,
         })
         .expect("candidate collection should succeed");
 
@@ -248,6 +254,7 @@ mod tests {
         let out = collect_guess_candidates(CollectGuessCandidatesRequest {
             evidence: &evidence,
             dictionary: &["AA".to_owned()],
+            collect_diagnostics: false,
         })
         .expect("candidate collection should succeed");
 
@@ -272,6 +279,7 @@ mod tests {
                 "alph  ".to_owned(),
                 "BETA".to_owned(),
             ],
+            collect_diagnostics: false,
         })
         .expect("candidate collection should succeed");
 
