@@ -41,11 +41,14 @@ pub struct MeasuredCandidate {
     pub char_spacing_total_pt: f32,
     pub word_spacing_total_pt: f32,
     #[serde(default)]
+    pub predicted_left_edge_x_pt: Option<f32>,
+    #[serde(default)]
     pub predicted_right_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub actual_right_edge_x_pt: Option<f32>,
     pub target_width_pt: f32,
     pub error_pt: f32,
+    pub normalized_error: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

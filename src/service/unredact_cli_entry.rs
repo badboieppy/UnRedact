@@ -305,12 +305,19 @@ fn append_visualize_timing(
     outputs: &mut crate::logic::types::BytesPipelineOutputs,
     visualize_ms: u128,
 ) {
-    outputs.guesses.stage_timings.push(
-        crate::types::guess_types::StageTimingRecord::new("visualize", visualize_ms),
-    );
+    outputs
+        .guesses
+        .stage_timings
+        .push(crate::types::guess_types::StageTimingRecord::new(
+            "visualize",
+            visualize_ms,
+        ));
     if let Some(diagnostics) = outputs.diagnostics.as_mut() {
-        let mut record =
-            crate::types::diagnostic_types::DiagnosticRecord::info("service", "visualize", "timing_ms");
+        let mut record = crate::types::diagnostic_types::DiagnosticRecord::info(
+            "service",
+            "visualize",
+            "timing_ms",
+        );
         record.metrics.insert(
             "value_ms".to_owned(),
             crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),

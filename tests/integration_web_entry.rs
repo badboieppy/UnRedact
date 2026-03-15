@@ -13,10 +13,7 @@ fn allowed_guess_width_pt(guess: &unredact::types::guess_types::RedactionGuess) 
         guess.context.usable_right_edge_x_pt,
     ) {
         (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
-        _ => guess
-            .context
-            .target_width_pt
-            .max(guess.bbox.width().abs()),
+        _ => guess.context.target_width_pt.max(guess.bbox.width().abs()),
     }
 }
 
@@ -61,7 +58,10 @@ fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
     );
     let report = report_result.expect("web guesses should decode");
     assert!(
-        report.stage_timings.iter().any(|item| item.stage == "visualize"),
+        report
+            .stage_timings
+            .iter()
+            .any(|item| item.stage == "visualize"),
         "expected web guesses to include lightweight stage timings"
     );
 

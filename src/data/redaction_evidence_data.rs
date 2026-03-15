@@ -14,6 +14,7 @@ use crate::data::types::redaction_evidence_types::{
     RedactionEvidenceRow, RedactionEvidenceSet, TrustedRedaction,
 };
 use crate::dependency::pdf_font_run_types::PdfFontTextRun;
+use crate::dependency::pdf_font_truth_accessor::{FontWidthSource, PdfFontTruthCatalog};
 use crate::types::diagnostic_types::DiagnosticValue;
 use crate::types::redaction_types::{Rect, RedactionOccurrence};
 
@@ -57,7 +58,9 @@ pub fn collect_redaction_evidence(
     req: CollectRedactionEvidenceRequest<'_>,
 ) -> Result<RedactionEvidenceSet, String> {
     let page_boxes = build_page_boxes(req.pdf_bytes)?;
-    let font_runs = FontsData::new().load_font_runs_from_bytes(req.input_name, req.pdf_bytes)?;
+    let fonts_data = FontsData::new();
+    let font_runs = fonts_data.load_font_runs_from_bytes(req.input_name, req.pdf_bytes)?;
+    let font_truth = fonts_data.load_font_truth_from_bytes(req.input_name, req.pdf_bytes)?;
     let runs_by_page = build_runs_by_page(&font_runs.pdf_report.runs);
     let line_buckets_by_page = build_line_buckets_by_page(&runs_by_page);
 
@@ -142,14 +145,13 @@ pub fn collect_redaction_evidence(
             continue;
         };
         let row_id = format!("page{}_row{index}", redaction.page_index);
-        match build_row(
-            redaction,
-            &redaction_id,
-            &row_id,
-            line_bucket,
-            &font_runs.pdf_report.runs,
-        ) {
-            Ok(row) => rows.push(row),
+        match build_row(redaction, &redaction_id, &row_id, line_bucket, &font_truth) {
+            Ok(row) => {
+                if req.collect_diagnostics {
+                    diagnostics.extend(build_backend_diagnostics(&row));
+                }
+                rows.push(row);
+            }
             Err(error) => {
                 if req.collect_diagnostics {
                     diagnostics.push(build_diagnostic(
@@ -170,6 +172,13 @@ pub fn collect_redaction_evidence(
     }
 
     populate_neighbor_facts(&mut rows);
+    diagnostics.sort_by(|left, right| {
+        left.page_index
+            .cmp(&right.page_index)
+            .then_with(|| left.row_id.cmp(&right.row_id))
+            .then_with(|| left.reason_code.cmp(&right.reason_code))
+            .then_with(|| left.stage.cmp(&right.stage))
+    });
 
     Ok(RedactionEvidenceSet {
         input: req.input_name.to_owned(),
@@ -327,7 +336,7 @@ fn build_row(
     redaction_id: &str,
     row_id: &str,
     line_bucket: &LineBucket<'_>,
-    all_runs: &[PdfFontTextRun],
+    font_truth: &PdfFontTruthCatalog,
 ) -> Result<RedactionEvidenceRow, EvidenceBuildError> {
     let left_run = select_anchor_run(redaction, &line_bucket.runs, true);
     let right_run = select_anchor_run(redaction, &line_bucket.runs, false);
@@ -342,7 +351,7 @@ fn build_row(
     let right_anchor =
         right_run.map(|run| build_anchor_side(row_id, run, &line_bucket.runs, false));
     let resolved =
-        resolve_anchor_measurement(left_run, right_run, left_anchor, right_anchor, all_runs)?;
+        resolve_anchor_measurement(left_run, right_run, left_anchor, right_anchor, font_truth)?;
     let ResolvedAnchorMeasurement {
         mode,
         left_anchor,
@@ -354,20 +363,15 @@ fn build_row(
         .as_ref()
         .map(|anchor| measure_text(&measurement_model, &anchor.text))
         .transpose()
-        .map_err(|message| {
-            build_error_with_metrics(
-                "character_model_unbuildable",
-                &message,
-                width_metrics_map(&measurement_model, left_run.or(right_run)),
-            )
-        })?
-        .unwrap_or(0.0_f32);
+        .ok()
+        .flatten();
     let (line_bias_pt, tolerance_pt) =
         estimate_row_geometry(line_bucket, left_run.or(right_run), &measurement_model);
 
-    let usable_left_edge_x_pt = left_anchor
-        .as_ref()
-        .map(|anchor| anchor.text_edge_x_pt + left_anchor_width_pt + boundary_space_width_pt);
+    let usable_left_edge_x_pt = left_anchor.as_ref().and_then(|anchor| {
+        left_anchor_width_pt
+            .map(|anchor_width| anchor.text_edge_x_pt + anchor_width + boundary_space_width_pt)
+    });
     let usable_right_edge_x_pt = right_anchor
         .as_ref()
         .map(|anchor| anchor.text_edge_x_pt - boundary_space_width_pt);
@@ -402,11 +406,15 @@ fn build_row(
             },
         },
         font: MeasurementFont {
+            font_key: measurement_model.font_key.clone(),
             font_name: measurement_model.font_name.clone(),
+            base_font: measurement_model.base_font.clone(),
             font_size_pt: measurement_model.font_size_pt,
             h_scale_pct: measurement_model.h_scale_pct,
             char_spacing_pt: measurement_model.char_spacing_pt,
             word_spacing_pt: measurement_model.word_spacing_pt,
+            width_source: Some(measurement_model.width_source.as_str().to_owned()),
+            encoding_source: Some(measurement_model.encoding_source.as_str().to_owned()),
         },
         neighbor_facts: NeighborFacts {
             line_id: line_bucket.line_id.clone(),
@@ -421,7 +429,7 @@ fn resolve_anchor_measurement(
     right_run: Option<&PdfFontTextRun>,
     left_anchor: Option<AnchorSide>,
     right_anchor: Option<AnchorSide>,
-    all_runs: &[PdfFontTextRun],
+    font_truth: &PdfFontTruthCatalog,
 ) -> Result<ResolvedAnchorMeasurement, EvidenceBuildError> {
     let mut last_error = None::<EvidenceBuildError>;
 
@@ -431,7 +439,7 @@ fn resolve_anchor_measurement(
         left_anchor.clone(),
         right_anchor.clone(),
     ) {
-        match build_measurement_model(Some(left_run), Some(right_run), all_runs) {
+        match build_measurement_model(Some(left_run), Some(right_run), font_truth) {
             Ok(measurement_model) => {
                 return Ok(ResolvedAnchorMeasurement {
                     mode: AnchorMode::TwoSided,
@@ -445,7 +453,7 @@ fn resolve_anchor_measurement(
     }
 
     if let (Some(left_run), Some(left_anchor)) = (left_run, left_anchor) {
-        match build_measurement_model(Some(left_run), None, all_runs) {
+        match build_measurement_model(Some(left_run), None, font_truth) {
             Ok(measurement_model) => {
                 return Ok(ResolvedAnchorMeasurement {
                     mode: AnchorMode::LeftOnly,
@@ -459,7 +467,7 @@ fn resolve_anchor_measurement(
     }
 
     if let (Some(right_run), Some(right_anchor)) = (right_run, right_anchor) {
-        match build_measurement_model(None, Some(right_run), all_runs) {
+        match build_measurement_model(None, Some(right_run), font_truth) {
             Ok(measurement_model) => {
                 return Ok(ResolvedAnchorMeasurement {
                     mode: AnchorMode::RightOnly,
@@ -615,7 +623,7 @@ fn runs_are_neighbors(left: &PdfFontTextRun, right: &PdfFontTextRun) -> bool {
 fn build_measurement_model(
     left_run: Option<&PdfFontTextRun>,
     right_run: Option<&PdfFontTextRun>,
-    all_runs: &[PdfFontTextRun],
+    font_truth: &PdfFontTruthCatalog,
 ) -> Result<CandidateWidthModel, EvidenceBuildError> {
     let seed_run = left_run.or(right_run).ok_or_else(|| {
         build_error(
@@ -643,122 +651,75 @@ fn build_measurement_model(
             width_profile_metrics("seed", seed_run),
         ));
     }
-    let matching_runs = all_runs
-        .iter()
-        .filter(|run| same_base_advance_family(run, seed_run))
-        .collect::<Vec<_>>();
-    if matching_runs.is_empty() {
-        return Err(build_error_with_metrics(
-            "character_model_unbuildable",
-            &format!("missing matching runs for {}", seed_run.font_name),
-            width_profile_metrics("seed", seed_run),
-        ));
-    }
-    let mut advance_samples = BTreeMap::<char, Vec<f32>>::new();
-    for run in &matching_runs {
-        let chars = run.text.chars().collect::<Vec<_>>();
-        let advances = &run.width_metrics.base_char_advances_pt;
-        if chars.len() != advances.len() {
-            continue;
-        }
-        for (ch, advance_pt) in chars.into_iter().zip(advances.iter().copied()) {
-            if advance_pt.is_finite() && advance_pt > 0.0_f32 {
-                advance_samples.entry(ch).or_default().push(advance_pt);
-            }
-        }
-    }
-    let mut base_advances_pt = advance_samples
-        .into_iter()
-        .filter_map(|(ch, mut values)| median_value(&mut values).map(|median| (ch, median)))
-        .collect::<BTreeMap<_, _>>();
-    if let std::collections::btree_map::Entry::Vacant(entry) = base_advances_pt.entry(' ') {
-        if let Some(derived_space) = derive_base_space_advance_from_runs(seed_run, &matching_runs) {
-            entry.insert(derived_space);
-        }
-    }
-    if base_advances_pt.is_empty() {
-        return Err(build_error_with_metrics(
-            "character_model_unbuildable",
-            &format!(
-                "missing reusable character samples for {}",
-                seed_run.font_name
-            ),
-            width_profile_metrics("seed", seed_run),
-        ));
-    }
+    let resource_key = crate::data::types::redaction_evidence_types::MeasurementFontKey {
+        page_index: seed_run.page_index,
+        font_key: seed_run.font_key.clone(),
+    };
+    let backend = font_truth.resources.get(
+        &crate::dependency::pdf_font_truth_accessor::FontResourceKey {
+            page_index: resource_key.page_index,
+            font_key: resource_key.font_key.clone(),
+        },
+    );
     Ok(CandidateWidthModel {
+        resource_key,
+        font_key: seed_run.font_key.clone(),
         font_name,
+        base_font: backend.and_then(|entry| entry.base_font.clone()),
+        subtype: backend.and_then(|entry| entry.subtype.clone()),
         font_size_pt: normalize_font_size_pt(seed_run.font_size_pt),
         h_scale_pct: normalize_h_scale_pct(seed_run.h_scale_pct),
         char_spacing_pt: normalize_spacing_pt(seed_run.width_metrics.char_spacing_pt),
         word_spacing_pt: normalize_spacing_pt(seed_run.width_metrics.word_spacing_pt),
-        base_advances_pt,
+        width_source: backend
+            .map(|entry| match entry.width_source {
+                FontWidthSource::PdfWidthTable => {
+                    crate::data::types::redaction_evidence_types::MeasurementWidthSource::PdfWidthTable
+                }
+                FontWidthSource::Standard14Font => {
+                    crate::data::types::redaction_evidence_types::MeasurementWidthSource::Standard14Font
+                }
+                FontWidthSource::None => {
+                    crate::data::types::redaction_evidence_types::MeasurementWidthSource::None
+                }
+            })
+            .unwrap_or_default(),
+        encoding_source: backend
+            .map(|entry| match entry.encoding_source {
+                crate::dependency::pdf_font_truth_accessor::FontUnicodeSource::ToUnicode => {
+                    crate::data::types::redaction_evidence_types::MeasurementEncodingSource::ToUnicode
+                }
+                crate::dependency::pdf_font_truth_accessor::FontUnicodeSource::EncodingDictionary => {
+                    crate::data::types::redaction_evidence_types::MeasurementEncodingSource::EncodingDictionary
+                }
+                crate::dependency::pdf_font_truth_accessor::FontUnicodeSource::NamedEncoding => {
+                    crate::data::types::redaction_evidence_types::MeasurementEncodingSource::NamedEncoding
+                }
+                crate::dependency::pdf_font_truth_accessor::FontUnicodeSource::StandardDefaultEncoding => {
+                    crate::data::types::redaction_evidence_types::MeasurementEncodingSource::StandardDefaultEncoding
+                }
+                crate::dependency::pdf_font_truth_accessor::FontUnicodeSource::None => {
+                    crate::data::types::redaction_evidence_types::MeasurementEncodingSource::None
+                }
+            })
+            .unwrap_or_default(),
+        has_to_unicode: backend.map(|entry| entry.has_to_unicode).unwrap_or(false),
+        has_encoding_dictionary: backend
+            .map(|entry| entry.has_encoding_dictionary)
+            .unwrap_or(false),
+        has_named_encoding: backend.map(|entry| entry.has_named_encoding).unwrap_or(false),
+        has_explicit_widths: backend.map(|entry| entry.has_explicit_widths).unwrap_or(false),
+        unicode_to_codes: backend
+            .map(|entry| entry.unicode_to_codes.clone())
+            .unwrap_or_default(),
+        code_to_width_units: backend
+            .map(|entry| entry.code_to_width_units.clone())
+            .unwrap_or_default(),
     })
 }
 
 fn same_width_profile(run: &PdfFontTextRun, seed_run: &PdfFontTextRun) -> bool {
     width_profile_from_run(run) == width_profile_from_run(seed_run)
-}
-
-fn same_base_advance_family(run: &PdfFontTextRun, seed_run: &PdfFontTextRun) -> bool {
-    normalized_font_name(&run.font_name) == normalized_font_name(&seed_run.font_name)
-        && normalize_font_size_pt(run.font_size_pt) == normalize_font_size_pt(seed_run.font_size_pt)
-        && normalize_h_scale_pct(run.h_scale_pct) == normalize_h_scale_pct(seed_run.h_scale_pct)
-}
-
-fn derive_base_space_advance_from_runs(
-    seed_run: &PdfFontTextRun,
-    matching_runs: &[&PdfFontTextRun],
-) -> Option<f32> {
-    let mut ordered = matching_runs.to_vec();
-    ordered.sort_by(|left, right| {
-        left.page_index
-            .cmp(&right.page_index)
-            .then_with(|| {
-                left.bbox
-                    .y1
-                    .partial_cmp(&right.bbox.y1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                left.bbox
-                    .x0
-                    .partial_cmp(&right.bbox.x0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
-    let mut gaps = Vec::<f32>::new();
-    for window in ordered.windows(2) {
-        let left = window[0];
-        let right = window[1];
-        if left.page_index != right.page_index {
-            continue;
-        }
-        if (left.bbox.y1 - right.bbox.y1).abs() > SAME_LINE_BASELINE_TOLERANCE_PT {
-            continue;
-        }
-        let gap = right.bbox.x0 - left.bbox.x1;
-        if gap.is_finite() && gap >= 0.5_f32 && gap <= seed_run.font_size_pt * 1.5_f32 {
-            let base_gap = gap
-                - seed_run.width_metrics.char_spacing_pt
-                - seed_run.width_metrics.word_spacing_pt;
-            if base_gap.is_finite() && base_gap > 0.0_f32 {
-                gaps.push(base_gap);
-            }
-        }
-    }
-    median_value(&mut gaps)
-}
-
-fn median_value(values: &mut [f32]) -> Option<f32> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let median_index = ((values.len() as f32) * 0.5_f32).floor() as usize;
-    values
-        .get(median_index.min(values.len().saturating_sub(1)))
-        .copied()
 }
 
 fn estimate_row_geometry(
@@ -879,47 +840,17 @@ fn width_profile_metrics(prefix: &str, run: &PdfFontTextRun) -> BTreeMap<String,
     metrics
 }
 
-fn width_metrics_map(
-    model: &CandidateWidthModel,
-    run: Option<&PdfFontTextRun>,
-) -> BTreeMap<String, DiagnosticValue> {
-    let mut metrics = BTreeMap::new();
-    metrics.insert(
-        "model_font_name".to_owned(),
-        DiagnosticValue::Text(model.font_name.clone()),
-    );
-    metrics.insert(
-        "model_font_size_pt".to_owned(),
-        DiagnosticValue::Float(model.font_size_pt as f64),
-    );
-    metrics.insert(
-        "model_h_scale_pct".to_owned(),
-        DiagnosticValue::Float(model.h_scale_pct as f64),
-    );
-    metrics.insert(
-        "model_char_spacing_pt".to_owned(),
-        DiagnosticValue::Float(model.char_spacing_pt as f64),
-    );
-    metrics.insert(
-        "model_word_spacing_pt".to_owned(),
-        DiagnosticValue::Float(model.word_spacing_pt as f64),
-    );
-    if let Some(run) = run {
-        extend_metrics(&mut metrics, width_profile_metrics("seed", run));
-        metrics.insert(
-            "seed_explicit_tj_total_pt".to_owned(),
-            DiagnosticValue::Float(run.width_metrics.explicit_tj_total_pt as f64),
-        );
-        metrics.insert(
-            "seed_residual_width_delta_pt".to_owned(),
-            DiagnosticValue::Float(run.width_metrics.residual_width_delta_pt as f64),
-        );
-    }
-    metrics
-}
-
 fn boundary_space_width_pt(model: &CandidateWidthModel) -> f32 {
-    model.base_advances_pt.get(&' ').copied().unwrap_or(0.0_f32)
+    let scale = (model.h_scale_pct / 100.0_f32).max(0.01_f32);
+    let space_width_units = model
+        .unicode_to_codes
+        .get(&' ')
+        .into_iter()
+        .flat_map(|codes| codes.iter())
+        .find_map(|code| model.code_to_width_units.get(code))
+        .copied()
+        .unwrap_or_default();
+    space_width_units as f32 * (model.font_size_pt / 1000.0_f32) * scale
         + model.char_spacing_pt
         + model.word_spacing_pt
 }
@@ -1003,6 +934,146 @@ fn build_diagnostic(
         message: message.to_owned(),
         metrics,
     }
+}
+
+fn build_backend_diagnostics(row: &RedactionEvidenceRow) -> Vec<RedactionEvidenceDiagnostic> {
+    let location = DiagnosticLocation {
+        row_id: Some(row.row_id.clone()),
+        redaction_id: Some(row.redaction.redaction_id.clone()),
+        page_index: row.page_index,
+        bbox: row.redaction.bbox,
+    };
+    let mut diagnostics = Vec::with_capacity(3);
+
+    let mut font_metrics = BTreeMap::new();
+    font_metrics.insert(
+        "font_key".to_owned(),
+        DiagnosticValue::Text(row.font.font_key.clone()),
+    );
+    font_metrics.insert(
+        "base_font".to_owned(),
+        DiagnosticValue::Text(row.font.base_font.clone().unwrap_or_default()),
+    );
+    font_metrics.insert(
+        "encoding_source".to_owned(),
+        DiagnosticValue::Text(
+            row.font
+                .encoding_source
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+    );
+    font_metrics.insert(
+        "width_source".to_owned(),
+        DiagnosticValue::Text(
+            row.font
+                .width_source
+                .clone()
+                .unwrap_or_else(|| "none".to_owned()),
+        ),
+    );
+    font_metrics.insert(
+        "has_to_unicode".to_owned(),
+        DiagnosticValue::Bool(row.measurement_model.has_to_unicode),
+    );
+    font_metrics.insert(
+        "has_encoding_dictionary".to_owned(),
+        DiagnosticValue::Bool(row.measurement_model.has_encoding_dictionary),
+    );
+    font_metrics.insert(
+        "has_named_encoding".to_owned(),
+        DiagnosticValue::Bool(row.measurement_model.has_named_encoding),
+    );
+    font_metrics.insert(
+        "has_explicit_widths".to_owned(),
+        DiagnosticValue::Bool(row.measurement_model.has_explicit_widths),
+    );
+
+    diagnostics.push(build_diagnostic(
+        DiagnosticLocation {
+            row_id: location.row_id.clone(),
+            redaction_id: location.redaction_id.clone(),
+            page_index: location.page_index,
+            bbox: location.bbox,
+        },
+        "redaction_evidence",
+        "font_width_backend_selected",
+        "selected width backend for row font",
+        font_metrics.clone(),
+    ));
+    diagnostics.push(build_diagnostic(
+        DiagnosticLocation {
+            row_id: location.row_id.clone(),
+            redaction_id: location.redaction_id.clone(),
+            page_index: location.page_index,
+            bbox: location.bbox,
+        },
+        "redaction_evidence",
+        "font_unicode_backend_selected",
+        "selected unicode backend for row font",
+        font_metrics.clone(),
+    ));
+
+    let mut row_metrics = font_metrics;
+    row_metrics.insert(
+        "anchor_mode".to_owned(),
+        DiagnosticValue::Text(row.anchor_set.mode.as_str().to_owned()),
+    );
+    row_metrics.insert(
+        "font_size_pt".to_owned(),
+        DiagnosticValue::Float(row.font.font_size_pt as f64),
+    );
+    row_metrics.insert(
+        "h_scale_pct".to_owned(),
+        DiagnosticValue::Float(row.font.h_scale_pct as f64),
+    );
+    row_metrics.insert(
+        "char_spacing_pt".to_owned(),
+        DiagnosticValue::Float(row.font.char_spacing_pt as f64),
+    );
+    row_metrics.insert(
+        "word_spacing_pt".to_owned(),
+        DiagnosticValue::Float(row.font.word_spacing_pt as f64),
+    );
+    row_metrics.insert(
+        "tolerance_pt".to_owned(),
+        DiagnosticValue::Float(row.anchor_set.geometry.tolerance_pt as f64),
+    );
+    row_metrics.insert(
+        "supported_unicode_count".to_owned(),
+        DiagnosticValue::Integer(row.measurement_model.unicode_to_codes.len() as i64),
+    );
+    row_metrics.insert(
+        "code_width_count".to_owned(),
+        DiagnosticValue::Integer(row.measurement_model.code_to_width_units.len() as i64),
+    );
+
+    let row_reason = match (
+        row.measurement_model.encoding_source,
+        row.measurement_model.width_source,
+    ) {
+        (crate::data::types::redaction_evidence_types::MeasurementEncodingSource::None, _) => {
+            "row_unicode_backend_missing"
+        }
+        (_, crate::data::types::redaction_evidence_types::MeasurementWidthSource::None) => {
+            "row_width_backend_missing"
+        }
+        _ => "row_backend_ready",
+    };
+    let row_message = match row_reason {
+        "row_unicode_backend_missing" => "row font is missing a unicode backend",
+        "row_width_backend_missing" => "row font is missing a width backend",
+        _ => "row font backends are ready",
+    };
+    diagnostics.push(build_diagnostic(
+        location,
+        "redaction_evidence",
+        row_reason,
+        row_message,
+        row_metrics,
+    ));
+
+    diagnostics
 }
 
 #[cfg(test)]

@@ -55,14 +55,13 @@ fn run() -> Result<(), String> {
     };
 
     if args.input.is_dir() {
-        let batch =
-            run_batch_from_paths_with_diagnostics(
-                &args.input,
-                &output_dir,
-                args.dictionary.as_deref(),
-                cfg,
-                args.diagnostics,
-            )?;
+        let batch = run_batch_from_paths_with_diagnostics(
+            &args.input,
+            &output_dir,
+            args.dictionary.as_deref(),
+            cfg,
+            args.diagnostics,
+        )?;
         println!(
             "processed={} success={} failed={} elapsed_ms={} manifest={}",
             batch.results.len(),

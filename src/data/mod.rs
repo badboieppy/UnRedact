@@ -6,11 +6,11 @@ pub(crate) mod helpers;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod local_file_workflow_data;
 pub(crate) mod model;
+pub(crate) mod page_boxes_data;
 pub(crate) mod redaction_evidence_data;
 pub(crate) mod redaction_scan_data;
 pub(crate) mod redactions_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod result_data_publisher;
 pub(crate) mod types;
-pub(crate) mod page_boxes_data;
 pub(crate) mod visualization_data;

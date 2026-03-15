@@ -51,7 +51,8 @@ impl ResultDataPublisher {
             .write_exact(req.paths.guesses_path, req.payload.guesses_json)?;
         self.file_store
             .write_exact(req.paths.anchors_path, req.payload.anchors_json)?;
-        if let (Some(path), Some(bytes)) = (req.paths.diagnostics_path, req.payload.diagnostics_json)
+        if let (Some(path), Some(bytes)) =
+            (req.paths.diagnostics_path, req.payload.diagnostics_json)
         {
             self.file_store.write_exact(path, bytes)?;
         }

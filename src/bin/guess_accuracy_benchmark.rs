@@ -511,8 +511,7 @@ fn is_multi_span_guess(guess: &RedactionGuess) -> bool {
     if width <= 0.0_f64 {
         return false;
     }
-    let span_delta =
-        (guess.context.target_width_pt as f64 - guess.bbox.width().abs() as f64).abs();
+    let span_delta = (guess.context.target_width_pt as f64 - guess.bbox.width().abs() as f64).abs();
     span_delta / width >= MULTI_SPAN_GAP_RATIO_THRESHOLD
 }
 

@@ -50,9 +50,13 @@ pub fn run(req: UnredactWebRequest) -> Result<UnredactWebOutputs, String> {
     } else {
         0_u128
     };
-    outputs.guesses.stage_timings.push(
-        crate::types::guess_types::StageTimingRecord::new("visualize", visualize_ms),
-    );
+    outputs
+        .guesses
+        .stage_timings
+        .push(crate::types::guess_types::StageTimingRecord::new(
+            "visualize",
+            visualize_ms,
+        ));
     outputs.visualization_payload = None;
     let encoded: EncodedPipelineOutputs = encode_outputs(&outputs)?;
     Ok(UnredactWebOutputs {

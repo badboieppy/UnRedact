@@ -94,11 +94,66 @@ pub struct GuessGeometry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeasurementFont {
+    pub font_key: String,
     pub font_name: String,
+    #[serde(default)]
+    pub base_font: Option<String>,
     pub font_size_pt: f32,
     pub h_scale_pct: f32,
     pub char_spacing_pt: f32,
     pub word_spacing_pt: f32,
+    #[serde(default)]
+    pub width_source: Option<String>,
+    #[serde(default)]
+    pub encoding_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) struct MeasurementFontKey {
+    pub page_index: u32,
+    pub font_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MeasurementWidthSource {
+    PdfWidthTable,
+    Standard14Font,
+    #[default]
+    None,
+}
+
+impl MeasurementWidthSource {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PdfWidthTable => "pdf_width_table",
+            Self::Standard14Font => "standard_14_font",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MeasurementEncodingSource {
+    ToUnicode,
+    EncodingDictionary,
+    NamedEncoding,
+    StandardDefaultEncoding,
+    #[default]
+    None,
+}
+
+impl MeasurementEncodingSource {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToUnicode => "to_unicode",
+            Self::EncodingDictionary => "encoding_dictionary",
+            Self::NamedEncoding => "named_encoding",
+            Self::StandardDefaultEncoding => "standard_default_encoding",
+            Self::None => "none",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -122,12 +177,23 @@ pub struct NeighborRef {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct CandidateWidthModel {
+    pub resource_key: MeasurementFontKey,
+    pub font_key: String,
     pub font_name: String,
+    pub base_font: Option<String>,
+    pub subtype: Option<String>,
     pub font_size_pt: f32,
     pub h_scale_pct: f32,
     pub char_spacing_pt: f32,
     pub word_spacing_pt: f32,
-    pub base_advances_pt: BTreeMap<char, f32>,
+    pub width_source: MeasurementWidthSource,
+    pub encoding_source: MeasurementEncodingSource,
+    pub has_to_unicode: bool,
+    pub has_encoding_dictionary: bool,
+    pub has_named_encoding: bool,
+    pub has_explicit_widths: bool,
+    pub unicode_to_codes: BTreeMap<char, Vec<u16>>,
+    pub code_to_width_units: BTreeMap<u16, i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

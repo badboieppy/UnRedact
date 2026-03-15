@@ -50,7 +50,9 @@ pub struct RunGuessFromBytesOutput {
 }
 
 #[inline]
-pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<RunGuessFromBytesOutput, String> {
+pub fn run_from_bytes(
+    req: RunGuessFromBytesRequest<'_>,
+) -> Result<RunGuessFromBytesOutput, String> {
     let started = Instant::now();
     let _preloaded_font_runs = req.preloaded_font_runs;
     let _preloaded_font_runs_elapsed_ms = req.preloaded_font_runs_elapsed_ms;
@@ -110,6 +112,14 @@ pub fn run_from_bytes(req: RunGuessFromBytesRequest<'_>) -> Result<RunGuessFromB
             "guess_run_from_bytes_total",
             started.elapsed().as_millis(),
         ));
+        items.sort_by(|left, right| {
+            left.page_index
+                .cmp(&right.page_index)
+                .then_with(|| left.row_id.cmp(&right.row_id))
+                .then_with(|| left.stage.cmp(&right.stage))
+                .then_with(|| left.code.cmp(&right.code))
+                .then_with(|| left.layer.cmp(&right.layer))
+        });
     }
 
     Ok(RunGuessFromBytesOutput {
@@ -205,11 +215,15 @@ fn build_guess_for_row(row: &GuessCandidateRow) -> RedactionGuess {
             usable_left_edge_x_pt: row.anchor_set.geometry.usable_left_edge_x_pt,
             usable_right_edge_x_pt: row.anchor_set.geometry.usable_right_edge_x_pt,
             target_width_pt: row.anchor_set.geometry.target_width_pt,
+            font_key: Some(row.font.font_key.clone()),
             font_name: Some(row.font.font_name.clone()),
+            base_font: row.font.base_font.clone(),
             font_size_pt: Some(row.font.font_size_pt),
             h_scale_pct: Some(row.font.h_scale_pct),
             char_spacing_pt: Some(row.font.char_spacing_pt),
             word_spacing_pt: Some(row.font.word_spacing_pt),
+            width_source: row.font.width_source.clone(),
+            encoding_source: row.font.encoding_source.clone(),
         },
     }
 }
@@ -221,10 +235,12 @@ fn build_guess_candidate(candidate: &MeasuredCandidate) -> GuessCandidate {
         glyph_width_sum_pt: candidate.glyph_width_sum_pt,
         char_spacing_total_pt: candidate.char_spacing_total_pt,
         word_spacing_total_pt: candidate.word_spacing_total_pt,
+        predicted_left_edge_x_pt: candidate.predicted_left_edge_x_pt,
         predicted_right_edge_x_pt: candidate.predicted_right_edge_x_pt,
         actual_right_edge_x_pt: candidate.actual_right_edge_x_pt,
         target_width_pt: candidate.target_width_pt,
         error_pt: candidate.error_pt,
+        normalized_error: Some(candidate.normalized_error),
     }
 }
 
@@ -238,11 +254,15 @@ fn build_placeholder_guess(redaction: &RedactionOccurrence) -> RedactionGuess {
             usable_left_edge_x_pt: None,
             usable_right_edge_x_pt: None,
             target_width_pt: redaction.bbox.width().abs(),
+            font_key: None,
             font_name: None,
+            base_font: None,
             font_size_pt: None,
             h_scale_pct: None,
             char_spacing_pt: None,
             word_spacing_pt: None,
+            width_source: None,
+            encoding_source: None,
         },
     }
 }
@@ -258,11 +278,15 @@ fn build_anchor_record_from_row(row: &GuessCandidateRow) -> AnchorDecisionRecord
         usable_left_edge_x_pt: row.anchor_set.geometry.usable_left_edge_x_pt,
         usable_right_edge_x_pt: row.anchor_set.geometry.usable_right_edge_x_pt,
         target_width_pt: row.anchor_set.geometry.target_width_pt,
+        font_key: &row.font.font_key,
         font_name: &row.font.font_name,
+        base_font: row.font.base_font.as_deref(),
         font_size_pt: row.font.font_size_pt,
         h_scale_pct: row.font.h_scale_pct,
         char_spacing_pt: row.font.char_spacing_pt,
         word_spacing_pt: row.font.word_spacing_pt,
+        width_source: row.font.width_source.as_deref(),
+        encoding_source: row.font.encoding_source.as_deref(),
     })
 }
 
@@ -278,11 +302,15 @@ fn build_anchor_record_from_evidence(row: &RedactionEvidenceRow) -> AnchorDecisi
         usable_left_edge_x_pt: row.anchor_set.geometry.usable_left_edge_x_pt,
         usable_right_edge_x_pt: row.anchor_set.geometry.usable_right_edge_x_pt,
         target_width_pt: row.anchor_set.geometry.target_width_pt,
+        font_key: &row.font.font_key,
         font_name: &row.font.font_name,
+        base_font: row.font.base_font.as_deref(),
         font_size_pt: row.font.font_size_pt,
         h_scale_pct: row.font.h_scale_pct,
         char_spacing_pt: row.font.char_spacing_pt,
         word_spacing_pt: row.font.word_spacing_pt,
+        width_source: row.font.width_source.as_deref(),
+        encoding_source: row.font.encoding_source.as_deref(),
     })
 }
 
@@ -296,11 +324,15 @@ struct AnchorRecordInput<'a> {
     usable_left_edge_x_pt: Option<f32>,
     usable_right_edge_x_pt: Option<f32>,
     target_width_pt: f32,
+    font_key: &'a str,
     font_name: &'a str,
+    base_font: Option<&'a str>,
     font_size_pt: f32,
     h_scale_pct: f32,
     char_spacing_pt: f32,
     word_spacing_pt: f32,
+    width_source: Option<&'a str>,
+    encoding_source: Option<&'a str>,
 }
 
 fn build_anchor_record(input: AnchorRecordInput<'_>) -> AnchorDecisionRecord {
@@ -318,11 +350,15 @@ fn build_anchor_record(input: AnchorRecordInput<'_>) -> AnchorDecisionRecord {
         usable_left_edge_x_pt: input.usable_left_edge_x_pt,
         usable_right_edge_x_pt: input.usable_right_edge_x_pt,
         target_width_pt: input.target_width_pt,
+        font_key: input.font_key.to_owned(),
         font_name: input.font_name.to_owned(),
+        base_font: input.base_font.map(str::to_owned),
         font_size_pt: input.font_size_pt,
         h_scale_pct: input.h_scale_pct,
         char_spacing_pt: input.char_spacing_pt,
         word_spacing_pt: input.word_spacing_pt,
+        width_source: input.width_source.map(str::to_owned),
+        encoding_source: input.encoding_source.map(str::to_owned),
     }
 }
 
@@ -350,11 +386,15 @@ fn build_placeholder_anchor_record(
         usable_left_edge_x_pt: None,
         usable_right_edge_x_pt: None,
         target_width_pt: redaction.bbox.width().abs(),
+        font_key: String::new(),
         font_name: String::new(),
+        base_font: None,
         font_size_pt: 0.0_f32,
         h_scale_pct: 0.0_f32,
         char_spacing_pt: 0.0_f32,
         word_spacing_pt: 0.0_f32,
+        width_source: None,
+        encoding_source: None,
     }
 }
 

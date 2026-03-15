@@ -3,6 +3,9 @@ use crate::dependency::pdf_font_occurrence_accessor::{
 };
 use crate::dependency::pdf_font_run_accessor::build_font_run_report_from_input_name;
 use crate::dependency::pdf_font_run_types::PdfFontRunReport;
+use crate::dependency::pdf_font_truth_accessor::{
+    build_font_truth_catalog_from_bytes, PdfFontTruthCatalog,
+};
 use crate::types::file_types::{
     aggregate_counts, distinct_fonts_from_counts, FileFontReport, FontDetectionReport,
     FontRunReport, FontsFound,
@@ -49,6 +52,15 @@ impl FontsData {
         let pdf_report = build_font_run_report_from_input_name(input_name, pdf_bytes)?;
         let report = pdf_report.to_public_report();
         Ok(FontRunInputs { report, pdf_report })
+    }
+
+    #[inline]
+    pub(crate) fn load_font_truth_from_bytes(
+        &self,
+        input_name: &str,
+        pdf_bytes: &[u8],
+    ) -> Result<PdfFontTruthCatalog, String> {
+        build_font_truth_catalog_from_bytes(input_name, pdf_bytes)
     }
 }
 

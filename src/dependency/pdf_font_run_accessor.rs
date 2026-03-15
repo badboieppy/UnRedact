@@ -1,3 +1,4 @@
+use crate::dependency::helpers::standard_14_widths::standard_14_font_width;
 use crate::dependency::pdf_font_run_types::{PdfFontRunReport, PdfFontTextRun, PdfWidthMetrics};
 use crate::types::file_types::{FontAsset, FontTextRun, Rect};
 use crate::types::runtime_defaults::{DEFAULT_FONT_METRICS_DPI, GLYPH_UNITS_SCALE};
@@ -681,18 +682,9 @@ fn core_font_metrics(
     scale: f32,
     dpi: f32,
 ) -> Option<TextMetrics> {
-    let normalized = font_name.to_ascii_lowercase();
-    let table: fn(char) -> i32 = if normalized.contains("times") && normalized.contains("roman") {
-        times_roman_width as fn(char) -> i32
-    } else if normalized.contains("helvetica") {
-        helvetica_width as fn(char) -> i32
-    } else {
-        return None;
-    };
-
     let mut base_char_advances_pt = Vec::with_capacity(text.chars().count());
     for ch in text.chars() {
-        let unit_width = table(ch) as f32;
+        let unit_width = core_font_width(font_name, ch)? as f32;
         base_char_advances_pt.push(unit_width * (font_size_pt / 1000.0_f32) * scale);
     }
     let width_pt = base_char_advances_pt.iter().sum::<f32>();
@@ -719,6 +711,11 @@ fn core_font_metrics(
         tj_adjustments_pt_by_gap: vec![0.0_f32; text.chars().count().saturating_sub(1)],
         residual_width_delta_pt: 0.0_f32,
     })
+}
+
+#[inline]
+pub(crate) fn core_font_width(font_name: &str, ch: char) -> Option<i32> {
+    standard_14_font_width(font_name, ch)
 }
 
 fn contextual_char_advances_units(text: &str, shaped: &rustybuzz::GlyphBuffer) -> Vec<f32> {
@@ -833,208 +830,6 @@ fn fallback_text_metrics(text: &str, font_size_pt: f32, h_scale_pct: f32, dpi: f
 
 fn points_to_pixels(points: f32, dpi: f32) -> f32 {
     points * (dpi / 72.0_f32)
-}
-
-fn times_roman_width(ch: char) -> i32 {
-    match ch {
-        ' ' => 250,
-        '!' => 333,
-        '"' => 408,
-        '#' => 500,
-        '$' => 500,
-        '%' => 833,
-        '&' => 778,
-        '\'' => 180,
-        '(' => 333,
-        ')' => 333,
-        '*' => 500,
-        '+' => 564,
-        ',' => 250,
-        '-' => 333,
-        '.' => 250,
-        '/' => 278,
-        '0' => 500,
-        '1' => 500,
-        '2' => 500,
-        '3' => 500,
-        '4' => 500,
-        '5' => 500,
-        '6' => 500,
-        '7' => 500,
-        '8' => 500,
-        '9' => 500,
-        ':' => 278,
-        ';' => 278,
-        '<' => 564,
-        '=' => 564,
-        '>' => 564,
-        '?' => 444,
-        '@' => 921,
-        'A' => 722,
-        'B' => 667,
-        'C' => 667,
-        'D' => 722,
-        'E' => 611,
-        'F' => 556,
-        'G' => 722,
-        'H' => 722,
-        'I' => 333,
-        'J' => 389,
-        'K' => 722,
-        'L' => 611,
-        'M' => 889,
-        'N' => 722,
-        'O' => 722,
-        'P' => 556,
-        'Q' => 722,
-        'R' => 667,
-        'S' => 556,
-        'T' => 611,
-        'U' => 722,
-        'V' => 722,
-        'W' => 944,
-        'X' => 722,
-        'Y' => 722,
-        'Z' => 611,
-        '[' => 333,
-        '\\' => 278,
-        ']' => 333,
-        '^' => 469,
-        '_' => 500,
-        '`' => 333,
-        'a' => 444,
-        'b' => 500,
-        'c' => 444,
-        'd' => 500,
-        'e' => 444,
-        'f' => 333,
-        'g' => 500,
-        'h' => 500,
-        'i' => 278,
-        'j' => 278,
-        'k' => 500,
-        'l' => 278,
-        'm' => 778,
-        'n' => 500,
-        'o' => 500,
-        'p' => 500,
-        'q' => 500,
-        'r' => 333,
-        's' => 389,
-        't' => 278,
-        'u' => 500,
-        'v' => 500,
-        'w' => 722,
-        'x' => 500,
-        'y' => 500,
-        'z' => 444,
-        '{' => 480,
-        '|' => 200,
-        '}' => 480,
-        '~' => 541,
-        _ => 500,
-    }
-}
-
-fn helvetica_width(ch: char) -> i32 {
-    match ch {
-        ' ' => 278,
-        '!' => 278,
-        '"' => 355,
-        '#' => 556,
-        '$' => 556,
-        '%' => 889,
-        '&' => 667,
-        '\'' => 191,
-        '(' => 333,
-        ')' => 333,
-        '*' => 389,
-        '+' => 584,
-        ',' => 278,
-        '-' => 333,
-        '.' => 278,
-        '/' => 278,
-        '0' => 556,
-        '1' => 556,
-        '2' => 556,
-        '3' => 556,
-        '4' => 556,
-        '5' => 556,
-        '6' => 556,
-        '7' => 556,
-        '8' => 556,
-        '9' => 556,
-        ':' => 278,
-        ';' => 278,
-        '<' => 584,
-        '=' => 584,
-        '>' => 584,
-        '?' => 556,
-        '@' => 1015,
-        'A' => 667,
-        'B' => 667,
-        'C' => 722,
-        'D' => 722,
-        'E' => 667,
-        'F' => 611,
-        'G' => 778,
-        'H' => 722,
-        'I' => 278,
-        'J' => 500,
-        'K' => 667,
-        'L' => 556,
-        'M' => 833,
-        'N' => 722,
-        'O' => 778,
-        'P' => 667,
-        'Q' => 778,
-        'R' => 722,
-        'S' => 667,
-        'T' => 611,
-        'U' => 722,
-        'V' => 667,
-        'W' => 944,
-        'X' => 667,
-        'Y' => 667,
-        'Z' => 611,
-        '[' => 278,
-        '\\' => 278,
-        ']' => 278,
-        '^' => 469,
-        '_' => 556,
-        '`' => 222,
-        'a' => 556,
-        'b' => 556,
-        'c' => 500,
-        'd' => 556,
-        'e' => 556,
-        'f' => 278,
-        'g' => 556,
-        'h' => 556,
-        'i' => 222,
-        'j' => 222,
-        'k' => 500,
-        'l' => 222,
-        'm' => 833,
-        'n' => 556,
-        'o' => 556,
-        'p' => 556,
-        'q' => 556,
-        'r' => 333,
-        's' => 500,
-        't' => 278,
-        'u' => 556,
-        'v' => 500,
-        'w' => 722,
-        'x' => 500,
-        'y' => 500,
-        'z' => 500,
-        '{' => 334,
-        '|' => 260,
-        '}' => 334,
-        '~' => 584,
-        _ => 500,
-    }
 }
 
 fn decode_pdf_text(obj: &Object) -> Option<String> {

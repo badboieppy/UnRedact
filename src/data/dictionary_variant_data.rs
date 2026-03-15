@@ -82,12 +82,19 @@ fn normalize_dictionary_entry(value: &str) -> String {
 fn build_name_variants(canonical: &str) -> Vec<String> {
     let mut template_seen = BTreeSet::<String>::new();
     let mut templates = Vec::<String>::new();
-    push_unique_variant(&mut template_seen, &mut templates, canonical.to_owned());
-
     let tokens = canonical
         .split_whitespace()
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
+    let preserve_raw_input_shape = should_preserve_raw_input_shape(canonical, &tokens);
+    push_template_variant(
+        &mut template_seen,
+        &mut templates,
+        canonical,
+        preserve_raw_input_shape,
+        canonical.to_owned(),
+    );
+
     if !tokens.is_empty() && has_special_name_structure(canonical, &tokens) {
         let parts = parse_name_parts(canonical, &tokens);
         let core = join_name_tokens(&parts.core_tokens);
@@ -99,33 +106,47 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
         let suffix = join_name_tokens(&parts.suffix_tokens);
 
         if !core.is_empty() {
-            push_unique_variant(&mut template_seen, &mut templates, core.clone());
-        }
-        if !given_first.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
+                core.clone(),
+            );
+        }
+        if !given_first.is_empty() && !surname.is_empty() {
+            push_template_variant(
+                &mut template_seen,
+                &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{given_first} {surname}"),
             );
         }
         if !surname.is_empty() && !given_first.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{surname}, {given_first}"),
             );
         }
         if !prefix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{prefix} {given_first} {surname}"),
             );
         }
         if !suffix.is_empty() && !given_first.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{given_first} {surname} {suffix}"),
             );
         }
@@ -134,60 +155,92 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             && !given_first.is_empty()
             && !surname.is_empty()
         {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{prefix} {given_first} {surname} {suffix}"),
             );
         }
         if !given.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{given} {surname}"),
             );
         }
         if !given.is_empty() && !surname.is_empty() && !suffix.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{given} {surname} {suffix}"),
             );
         }
         if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{prefix} {given} {surname}"),
             );
         }
         if !prefix.is_empty() && !given.is_empty() && !surname.is_empty() && !suffix.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{prefix} {given} {surname} {suffix}"),
             );
         }
         if !given_first.is_empty() {
-            push_unique_variant(&mut template_seen, &mut templates, given_first.clone());
-        }
-        if !surname.is_empty() {
-            push_unique_variant(&mut template_seen, &mut templates, surname.clone());
-        }
-        if !surname_last.is_empty() {
-            push_unique_variant(&mut template_seen, &mut templates, surname_last);
-        }
-        if !prefix.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
+                given_first.clone(),
+            );
+        }
+        if !surname.is_empty() {
+            push_template_variant(
+                &mut template_seen,
+                &mut templates,
+                canonical,
+                preserve_raw_input_shape,
+                surname.clone(),
+            );
+        }
+        if !surname_last.is_empty() {
+            push_template_variant(
+                &mut template_seen,
+                &mut templates,
+                canonical,
+                preserve_raw_input_shape,
+                surname_last,
+            );
+        }
+        if !prefix.is_empty() && !surname.is_empty() {
+            push_template_variant(
+                &mut template_seen,
+                &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{prefix} {surname}"),
             );
         }
         if !suffix.is_empty() && !surname.is_empty() {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{surname} {suffix}"),
             );
         }
@@ -195,9 +248,11 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             let mut split = core.split_whitespace();
             if let (Some(first), Some(last)) = (split.next(), core.split_whitespace().last()) {
                 if first != last {
-                    push_unique_variant(
+                    push_template_variant(
                         &mut template_seen,
                         &mut templates,
+                        canonical,
+                        preserve_raw_input_shape,
                         format!("{last}, {first}"),
                     );
                 }
@@ -211,9 +266,11 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join(" ");
             if !middle_initials.is_empty() && !given_first.is_empty() {
-                push_unique_variant(
+                push_template_variant(
                     &mut template_seen,
                     &mut templates,
+                    canonical,
+                    preserve_raw_input_shape,
                     format!("{given_first} {middle_initials} {surname}"),
                 );
             }
@@ -221,25 +278,47 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
     } else if tokens.len() >= 2 {
         let first = tokens[0];
         let last = tokens[tokens.len() - 1];
-        push_unique_variant(
+        push_template_variant(
             &mut template_seen,
             &mut templates,
+            canonical,
+            preserve_raw_input_shape,
             format!("{first} {last}"),
         );
         if !canonical.contains(',') {
-            push_unique_variant(
+            push_template_variant(
                 &mut template_seen,
                 &mut templates,
+                canonical,
+                preserve_raw_input_shape,
                 format!("{last}, {first}"),
             );
         }
-        push_unique_variant(&mut template_seen, &mut templates, first.to_owned());
-        push_unique_variant(&mut template_seen, &mut templates, last.to_owned());
+        push_template_variant(
+            &mut template_seen,
+            &mut templates,
+            canonical,
+            preserve_raw_input_shape,
+            first.to_owned(),
+        );
+        push_template_variant(
+            &mut template_seen,
+            &mut templates,
+            canonical,
+            preserve_raw_input_shape,
+            last.to_owned(),
+        );
     }
     if tokens.len() >= 2 {
         let parts = parse_name_parts(canonical, &tokens);
         if should_add_role_aware_aliases(&parts) {
-            add_role_aware_alias_templates(&parts, &mut template_seen, &mut templates);
+            add_role_aware_alias_templates(
+                canonical,
+                preserve_raw_input_shape,
+                &parts,
+                &mut template_seen,
+                &mut templates,
+            );
         }
     }
 
@@ -257,6 +336,13 @@ fn has_special_name_structure(canonical: &str, tokens: &[&str]) -> bool {
             .any(|token| is_surname_particle_token(token))
 }
 
+fn should_preserve_raw_input_shape(canonical: &str, tokens: &[&str]) -> bool {
+    if tokens.len() <= 1 {
+        return true;
+    }
+    !has_special_name_structure(canonical, tokens) && tokens.len() <= 2
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NameTokenRole {
     Given,
@@ -264,6 +350,8 @@ enum NameTokenRole {
 }
 
 fn add_role_aware_alias_templates(
+    canonical: &str,
+    preserve_raw_input_shape: bool,
     parts: &NameParts,
     template_seen: &mut BTreeSet<String>,
     templates: &mut Vec<String>,
@@ -283,12 +371,24 @@ fn add_role_aware_alias_templates(
             if combo_count >= MAX_ROLE_COMBINATIONS_PER_ENTRY {
                 return;
             }
-            push_unique_variant(template_seen, templates, format!("{given} {surname}"));
+            push_template_variant(
+                template_seen,
+                templates,
+                canonical,
+                preserve_raw_input_shape,
+                format!("{given} {surname}"),
+            );
             combo_count += 1;
             if combo_count >= MAX_ROLE_COMBINATIONS_PER_ENTRY {
                 return;
             }
-            push_unique_variant(template_seen, templates, format!("{surname}, {given}"));
+            push_template_variant(
+                template_seen,
+                templates,
+                canonical,
+                preserve_raw_input_shape,
+                format!("{surname}, {given}"),
+            );
             combo_count += 1;
         }
     }
@@ -678,6 +778,27 @@ fn push_unique_variant(seen: &mut BTreeSet<String>, out: &mut Vec<String>, value
     }
 }
 
+fn push_template_variant(
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<String>,
+    canonical: &str,
+    preserve_raw_input_shape: bool,
+    value: String,
+) {
+    let normalized = normalize_dictionary_entry(&value);
+    if normalized.is_empty() {
+        return;
+    }
+    let canonical = normalize_dictionary_entry(canonical);
+    if !preserve_raw_input_shape && normalized == canonical {
+        return;
+    }
+    if canonical.contains(',') && normalized.contains(',') {
+        return;
+    }
+    push_unique_variant(seen, out, normalized);
+}
+
 fn title_case_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut new_word = true;
@@ -756,5 +877,30 @@ mod tests {
 
         assert!(!variants.iter().any(|value| value == "Les Kellen"));
         assert!(!variants.iter().any(|value| value == "Sarah Wexner"));
+    }
+
+    #[test]
+    fn build_dictionary_variants_drops_raw_alternate_input_shapes() {
+        let dictionary = vec![
+            "KELLEN, SARAH".to_owned(),
+            "GROFF, LESLEY".to_owned(),
+            "MR. LES WEXNER".to_owned(),
+            "DR. RICHARD BARNETT".to_owned(),
+            "OMEGA BRUNEL TOKEN".to_owned(),
+            "RODGERS, DAVID".to_owned(),
+        ];
+        let variants = build_dictionary_variants(&dictionary);
+
+        assert!(!variants.iter().any(|value| value == "KELLEN, SARAH"));
+        assert!(!variants.iter().any(|value| value == "GROFF, LESLEY"));
+        assert!(!variants.iter().any(|value| value == "MR. LES WEXNER"));
+        assert!(!variants.iter().any(|value| value == "DR. RICHARD BARNETT"));
+        assert!(!variants.iter().any(|value| value == "OMEGA BRUNEL TOKEN"));
+        assert!(!variants.iter().any(|value| value == "RODGERS, DAVID"));
+        assert!(variants.iter().any(|value| value == "SARAH KELLEN"));
+        assert!(variants.iter().any(|value| value == "LESLEY GROFF"));
+        assert!(variants.iter().any(|value| value == "MR. WEXNER"));
+        assert!(variants.iter().any(|value| value == "DR. BARNETT"));
+        assert!(variants.iter().any(|value| value == "DAVID ROGERS"));
     }
 }

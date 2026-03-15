@@ -91,3 +91,8 @@ required-features = ["cli-entry"]
 name = "combined_accuracy_benchmark"
 path = "src/bin/combined_accuracy_benchmark.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "pdf_metric_extractor"
+path = "src/bin/pdf_metric_extractor.rs"
+required-features = ["cli-entry"]

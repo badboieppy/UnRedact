@@ -55,11 +55,15 @@ pub struct GuessCandidate {
     pub char_spacing_total_pt: f32,
     pub word_spacing_total_pt: f32,
     #[serde(default)]
+    pub predicted_left_edge_x_pt: Option<f32>,
+    #[serde(default)]
     pub predicted_right_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub actual_right_edge_x_pt: Option<f32>,
     pub target_width_pt: f32,
     pub error_pt: f32,
+    #[serde(default)]
+    pub normalized_error: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +76,11 @@ pub struct GuessContext {
     pub usable_right_edge_x_pt: Option<f32>,
     pub target_width_pt: f32,
     #[serde(default)]
+    pub font_key: Option<String>,
+    #[serde(default)]
     pub font_name: Option<String>,
+    #[serde(default)]
+    pub base_font: Option<String>,
     #[serde(default)]
     pub font_size_pt: Option<f32>,
     #[serde(default)]
@@ -81,6 +89,10 @@ pub struct GuessContext {
     pub char_spacing_pt: Option<f32>,
     #[serde(default)]
     pub word_spacing_pt: Option<f32>,
+    #[serde(default)]
+    pub width_source: Option<String>,
+    #[serde(default)]
+    pub encoding_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,9 +126,17 @@ pub struct AnchorDecisionRecord {
     #[serde(default)]
     pub usable_right_edge_x_pt: Option<f32>,
     pub target_width_pt: f32,
+    #[serde(default)]
+    pub font_key: String,
     pub font_name: String,
+    #[serde(default)]
+    pub base_font: Option<String>,
     pub font_size_pt: f32,
     pub h_scale_pct: f32,
     pub char_spacing_pt: f32,
     pub word_spacing_pt: f32,
+    #[serde(default)]
+    pub width_source: Option<String>,
+    #[serde(default)]
+    pub encoding_source: Option<String>,
 }

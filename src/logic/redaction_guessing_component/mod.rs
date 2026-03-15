@@ -110,11 +110,8 @@ pub fn run_redaction_guessing_component(
         guess_stage.elapsed_ms,
     );
 
-    let visualization_stage = build_visualization_payload_stage(
-        pdf_bytes,
-        &cfg,
-        &font_runs_stage.font_runs,
-    )?;
+    let visualization_stage =
+        build_visualization_payload_stage(pdf_bytes, &cfg, &font_runs_stage.font_runs)?;
 
     push_stage_timing(
         &mut guess_stage.guesses,
@@ -243,7 +240,9 @@ fn push_stage_timing(
     stage: &str,
     elapsed_ms: u128,
 ) {
-    guesses.stage_timings.push(stage_timing_record(stage, elapsed_ms));
+    guesses
+        .stage_timings
+        .push(stage_timing_record(stage, elapsed_ms));
     if let Some(items) = diagnostics.as_mut() {
         items.push(stage_timing_diagnostic(stage, elapsed_ms));
     }
