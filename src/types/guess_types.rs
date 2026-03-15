@@ -127,6 +127,16 @@ pub struct AnchorDecisionRecord {
     pub usable_right_edge_x_pt: Option<f32>,
     pub target_width_pt: f32,
     #[serde(default)]
+    pub measurement_seed_side: Option<String>,
+    #[serde(default)]
+    pub selected_line_id: Option<String>,
+    #[serde(default)]
+    pub selection_reason: Option<String>,
+    #[serde(default)]
+    pub selected_left_gap_pt: Option<f32>,
+    #[serde(default)]
+    pub selected_right_gap_pt: Option<f32>,
+    #[serde(default)]
     pub font_key: String,
     pub font_name: String,
     #[serde(default)]

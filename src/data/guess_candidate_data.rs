@@ -36,6 +36,18 @@ pub fn collect_guess_candidates(
     >::new();
 
     for row in &req.evidence.rows {
+        if row.anchor_set.mode == AnchorMode::Unresolved {
+            rows.push(GuessCandidateRow {
+                row_id: row.row_id.clone(),
+                page_index: row.page_index,
+                redaction: row.redaction.clone(),
+                anchor_set: row.anchor_set.clone(),
+                font: row.font.clone(),
+                neighbor_facts: row.neighbor_facts.clone(),
+                candidates: Vec::new(),
+            });
+            continue;
+        }
         let row_cache = support_cache
             .entry(row.measurement_model.resource_key.clone())
             .or_default();
@@ -241,11 +253,13 @@ fn score_candidate(
             .geometry
             .usable_right_edge_x_pt
             .map(|usable_right_edge_x_pt| usable_right_edge_x_pt - measurement.width_pt),
+        AnchorMode::Unresolved => None,
     };
     let predicted_right_edge_x_pt = match row.anchor_set.mode {
         AnchorMode::TwoSided | AnchorMode::LeftOnly => predicted_left_edge_x_pt
             .map(|predicted_left_edge_x_pt| predicted_left_edge_x_pt + measurement.width_pt),
         AnchorMode::RightOnly => row.anchor_set.geometry.usable_right_edge_x_pt,
+        AnchorMode::Unresolved => None,
     };
     let actual_right_edge_x_pt = row.anchor_set.geometry.usable_right_edge_x_pt;
     let error_pt = match row.anchor_set.mode {
@@ -262,6 +276,7 @@ fn score_candidate(
             let predicted_left_edge_x_pt = predicted_left_edge_x_pt?;
             (predicted_left_edge_x_pt - row.anchor_set.geometry.redaction_left_x_pt).abs()
         }
+        AnchorMode::Unresolved => return None,
     };
 
     Some((
@@ -608,6 +623,11 @@ mod tests {
                 mode: anchor_mode,
                 left: None,
                 right: None,
+                measurement_seed_side: None,
+                selected_line_id: None,
+                selection_reason: None,
+                selected_left_gap_pt: None,
+                selected_right_gap_pt: None,
                 geometry: GuessGeometry {
                     redaction_left_x_pt: 10.0,
                     redaction_right_x_pt: 20.0,

@@ -10,8 +10,8 @@ use crate::data::helpers::text_runs::{join_adjacent_run_text, normalize_transpor
 use crate::data::page_boxes_data::build_page_boxes;
 use crate::data::types::redaction_evidence_types::{
     AnchorMode, AnchorSet, AnchorSide, CandidateWidthModel, CollectRedactionEvidenceRequest,
-    GuessGeometry, MeasurementFont, NeighborFacts, NeighborRef, RedactionEvidenceDiagnostic,
-    RedactionEvidenceRow, RedactionEvidenceSet, TrustedRedaction,
+    GuessGeometry, MeasurementFont, MeasurementSeedSide, NeighborFacts, NeighborRef,
+    RedactionEvidenceDiagnostic, RedactionEvidenceRow, RedactionEvidenceSet, TrustedRedaction,
 };
 use crate::dependency::pdf_font_run_types::PdfFontTextRun;
 use crate::dependency::pdf_font_truth_accessor::{FontWidthSource, PdfFontTruthCatalog};
@@ -34,19 +34,63 @@ struct LineBucket<'a> {
     runs: Vec<&'a PdfFontTextRun>,
 }
 
-struct ResolvedAnchorMeasurement {
+struct LineBucketCandidate<'a> {
+    line_bucket: &'a LineBucket<'a>,
+    vertical_overlap_pt: f32,
+    baseline_delta_pt: f32,
+}
+
+struct AnchorRunCandidate<'a> {
+    run: &'a PdfFontTextRun,
+    visibility_rank: i32,
+    gap_pt: f32,
+    width_pt: f32,
+}
+
+#[derive(Clone)]
+struct AnchorSpanCandidate<'a> {
+    candidate_id: String,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    run: &'a PdfFontTextRun,
+    left_side: bool,
+    anchor: AnchorSide,
+    visibility_rank: i32,
+    gap_pt: f32,
+    width_pt: f32,
+}
+
+#[derive(Clone)]
+struct AnchorPairCandidate<'a> {
+    pair_id: String,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    left: AnchorSpanCandidate<'a>,
+    right: AnchorSpanCandidate<'a>,
+}
+
+struct BucketAnchorCandidates<'a> {
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    left_candidates: Vec<AnchorSpanCandidate<'a>>,
+    right_candidates: Vec<AnchorSpanCandidate<'a>>,
+}
+
+struct RowBuildOutput {
+    row: RedactionEvidenceRow,
+    diagnostics: Vec<RedactionEvidenceDiagnostic>,
+}
+
+struct AnchorResolutionDecision<'a> {
     mode: AnchorMode,
-    left_anchor: Option<AnchorSide>,
-    right_anchor: Option<AnchorSide>,
-    measurement_model: CandidateWidthModel,
+    selected_line_bucket: Option<&'a LineBucket<'a>>,
+    left: Option<AnchorSpanCandidate<'a>>,
+    right: Option<AnchorSpanCandidate<'a>>,
+    measurement_seed_side: Option<MeasurementSeedSide>,
+    selection_reason: String,
 }
 
-struct EvidenceBuildError {
-    reason_code: &'static str,
-    message: String,
-    metrics: BTreeMap<String, DiagnosticValue>,
-}
-
+#[derive(Clone)]
 struct DiagnosticLocation {
     row_id: Option<String>,
     redaction_id: Option<String>,
@@ -70,12 +114,13 @@ pub fn collect_redaction_evidence(
 
     for (index, redaction) in req.redactions.redactions.iter().enumerate() {
         let redaction_id = format!("page{}_redaction{index:03}", redaction.page_index);
+        let row_id = format!("page{}_row{index}", redaction.page_index);
         let key = normalized_redaction_key(redaction);
         if !seen_redactions.insert(key) {
             if req.collect_diagnostics {
                 diagnostics.push(build_diagnostic(
                     DiagnosticLocation {
-                        row_id: None,
+                        row_id: Some(row_id.clone()),
                         redaction_id: Some(redaction_id),
                         page_index: redaction.page_index,
                         bbox: redaction.bbox,
@@ -92,7 +137,7 @@ pub fn collect_redaction_evidence(
             if req.collect_diagnostics {
                 diagnostics.push(build_diagnostic(
                     DiagnosticLocation {
-                        row_id: None,
+                        row_id: Some(row_id.clone()),
                         redaction_id: Some(redaction_id),
                         page_index: redaction.page_index,
                         bbox: redaction.bbox,
@@ -109,7 +154,7 @@ pub fn collect_redaction_evidence(
             if req.collect_diagnostics {
                 diagnostics.push(build_diagnostic(
                     DiagnosticLocation {
-                        row_id: None,
+                        row_id: Some(row_id.clone()),
                         redaction_id: Some(redaction_id),
                         page_index: redaction.page_index,
                         bbox: redaction.bbox,
@@ -122,53 +167,21 @@ pub fn collect_redaction_evidence(
             }
             continue;
         }
-        let Some(line_bucket) = select_line_bucket(
+        let output = build_row(
             redaction,
+            &redaction_id,
+            &row_id,
             line_buckets_by_page
                 .get(&redaction.page_index)
                 .map(Vec::as_slice),
-        ) else {
-            if req.collect_diagnostics {
-                diagnostics.push(build_diagnostic(
-                    DiagnosticLocation {
-                        row_id: None,
-                        redaction_id: Some(redaction_id),
-                        page_index: redaction.page_index,
-                        bbox: redaction.bbox,
-                    },
-                    "redaction_evidence",
-                    "line_bucket_not_found",
-                    "no same-line visible text bucket for redaction",
-                    BTreeMap::new(),
-                ));
-            }
-            continue;
-        };
-        let row_id = format!("page{}_row{index}", redaction.page_index);
-        match build_row(redaction, &redaction_id, &row_id, line_bucket, &font_truth) {
-            Ok(row) => {
-                if req.collect_diagnostics {
-                    diagnostics.extend(build_backend_diagnostics(&row));
-                }
-                rows.push(row);
-            }
-            Err(error) => {
-                if req.collect_diagnostics {
-                    diagnostics.push(build_diagnostic(
-                        DiagnosticLocation {
-                            row_id: Some(row_id),
-                            redaction_id: Some(redaction_id),
-                            page_index: redaction.page_index,
-                            bbox: redaction.bbox,
-                        },
-                        "redaction_evidence",
-                        error.reason_code,
-                        &error.message,
-                        error.metrics,
-                    ));
-                }
-            }
+            &font_truth,
+            req.collect_diagnostics,
+        );
+        if req.collect_diagnostics {
+            diagnostics.extend(output.diagnostics);
+            diagnostics.extend(build_backend_diagnostics(&output.row));
         }
+        rows.push(output.row);
     }
 
     populate_neighbor_facts(&mut rows);
@@ -176,8 +189,11 @@ pub fn collect_redaction_evidence(
         left.page_index
             .cmp(&right.page_index)
             .then_with(|| left.row_id.cmp(&right.row_id))
-            .then_with(|| left.reason_code.cmp(&right.reason_code))
             .then_with(|| left.stage.cmp(&right.stage))
+            .then_with(|| left.reason_code.cmp(&right.reason_code))
+            .then_with(|| {
+                diagnostic_stable_candidate_id(left).cmp(&diagnostic_stable_candidate_id(right))
+            })
     });
 
     Ok(RedactionEvidenceSet {
@@ -297,250 +313,1222 @@ fn validate_redaction(redaction: &RedactionOccurrence, page_box: Rect) -> Result
     Ok(())
 }
 
+#[cfg(test)]
 fn select_line_bucket<'a>(
     redaction: &RedactionOccurrence,
     line_buckets: Option<&'a [LineBucket<'a>]>,
 ) -> Option<&'a LineBucket<'a>> {
-    let buckets = line_buckets?;
-    buckets
-        .iter()
-        .filter(|line| {
-            vertical_overlap_pt(line.y0, line.y1, redaction.bbox.y0, redaction.bbox.y1) > 0.0_f32
-                || (line.baseline_y1 - redaction.bbox.y1).abs() <= SAME_LINE_BASELINE_TOLERANCE_PT
-        })
-        .min_by(|left, right| {
-            let left_overlap =
-                vertical_overlap_pt(left.y0, left.y1, redaction.bbox.y0, redaction.bbox.y1);
-            let right_overlap =
-                vertical_overlap_pt(right.y0, right.y1, redaction.bbox.y0, redaction.bbox.y1);
-            let left_baseline_delta = (left.baseline_y1 - redaction.bbox.y1).abs();
-            let right_baseline_delta = (right.baseline_y1 - redaction.bbox.y1).abs();
-            right_overlap
-                .partial_cmp(&left_overlap)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    left_baseline_delta
-                        .partial_cmp(&right_baseline_delta)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| left.line_id.cmp(&right.line_id))
-        })
+    ranked_line_bucket_candidates(redaction, line_buckets)
+        .first()
+        .map(|candidate| candidate.line_bucket)
 }
 
 fn vertical_overlap_pt(y0_a: f32, y1_a: f32, y0_b: f32, y1_b: f32) -> f32 {
     (y1_a.min(y1_b) - y0_a.max(y0_b)).max(0.0_f32)
 }
 
+fn ranked_line_bucket_candidates<'a>(
+    redaction: &RedactionOccurrence,
+    line_buckets: Option<&'a [LineBucket<'a>]>,
+) -> Vec<LineBucketCandidate<'a>> {
+    let Some(buckets) = line_buckets else {
+        return Vec::new();
+    };
+    let mut candidates = buckets
+        .iter()
+        .filter_map(|line_bucket| {
+            let vertical_overlap = vertical_overlap_pt(
+                line_bucket.y0,
+                line_bucket.y1,
+                redaction.bbox.y0,
+                redaction.bbox.y1,
+            );
+            let baseline_delta = (line_bucket.baseline_y1 - redaction.bbox.y1).abs();
+            ((vertical_overlap > 0.0_f32) || (baseline_delta <= SAME_LINE_BASELINE_TOLERANCE_PT))
+                .then_some(LineBucketCandidate {
+                    line_bucket,
+                    vertical_overlap_pt: vertical_overlap,
+                    baseline_delta_pt: baseline_delta,
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .vertical_overlap_pt
+            .partial_cmp(&left.vertical_overlap_pt)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.baseline_delta_pt
+                    .partial_cmp(&right.baseline_delta_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.line_bucket.line_id.cmp(&right.line_bucket.line_id))
+    });
+    candidates
+}
+
+fn ranked_anchor_run_candidates<'a>(
+    redaction: &RedactionOccurrence,
+    line_runs: &[&'a PdfFontTextRun],
+    left_side: bool,
+) -> Vec<AnchorRunCandidate<'a>> {
+    let mut candidates = line_runs
+        .iter()
+        .copied()
+        .filter_map(|run| {
+            let trimmed = run.text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let allowed = if left_side {
+                run.bbox.x1 <= redaction.bbox.x0
+            } else {
+                run.bbox.x0 >= redaction.bbox.x1
+            };
+            if !allowed {
+                return None;
+            }
+            let gap_pt = if left_side {
+                (redaction.bbox.x0 - run.bbox.x1).abs()
+            } else {
+                (run.bbox.x0 - redaction.bbox.x1).abs()
+            };
+            Some(AnchorRunCandidate {
+                run,
+                visibility_rank: visibility_rank(run),
+                gap_pt,
+                width_pt: (run.bbox.x1 - run.bbox.x0).abs(),
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.visibility_rank
+            .cmp(&right.visibility_rank)
+            .then_with(|| {
+                left.gap_pt
+                    .partial_cmp(&right.gap_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                left.width_pt
+                    .partial_cmp(&right.width_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| anchor_run_sort_key(left.run).cmp(&anchor_run_sort_key(right.run)))
+    });
+    candidates
+}
+
 fn build_row(
     redaction: &RedactionOccurrence,
     redaction_id: &str,
     row_id: &str,
-    line_bucket: &LineBucket<'_>,
+    line_buckets: Option<&[LineBucket<'_>]>,
     font_truth: &PdfFontTruthCatalog,
-) -> Result<RedactionEvidenceRow, EvidenceBuildError> {
-    let left_run = select_anchor_run(redaction, &line_bucket.runs, true);
-    let right_run = select_anchor_run(redaction, &line_bucket.runs, false);
-    if left_run.is_none() && right_run.is_none() {
-        return Err(build_error(
-            "same_line_anchor_missing",
-            "no same-line visible anchor spans available",
-        ));
-    }
-
-    let left_anchor = left_run.map(|run| build_anchor_side(row_id, run, &line_bucket.runs, true));
-    let right_anchor =
-        right_run.map(|run| build_anchor_side(row_id, run, &line_bucket.runs, false));
-    let resolved =
-        resolve_anchor_measurement(left_run, right_run, left_anchor, right_anchor, font_truth)?;
-    let ResolvedAnchorMeasurement {
-        mode,
-        left_anchor,
-        right_anchor,
-        measurement_model,
-    } = resolved;
-    let boundary_space_width_pt = boundary_space_width_pt(&measurement_model);
+    collect_diagnostics: bool,
+) -> RowBuildOutput {
+    let location = DiagnosticLocation {
+        row_id: Some(row_id.to_owned()),
+        redaction_id: Some(redaction_id.to_owned()),
+        page_index: redaction.page_index,
+        bbox: redaction.bbox,
+    };
+    let line_bucket_candidates = ranked_line_bucket_candidates(redaction, line_buckets);
+    let (resolution, diagnostics) = resolve_anchor_set_for_redaction(
+        redaction,
+        row_id,
+        location.clone(),
+        &line_bucket_candidates,
+        collect_diagnostics,
+    );
+    let measurement_seed_run = measurement_seed_run(&resolution);
+    let measurement_model = measurement_seed_run
+        .map(|seed_run| build_measurement_model(seed_run, font_truth))
+        .unwrap_or_default();
+    let boundary_space = resolution
+        .measurement_seed_side
+        .map(|_| boundary_space_width_pt(&measurement_model))
+        .unwrap_or(0.0_f32);
+    let left_anchor = resolution
+        .left
+        .as_ref()
+        .map(|candidate| candidate.anchor.clone());
+    let right_anchor = resolution
+        .right
+        .as_ref()
+        .map(|candidate| candidate.anchor.clone());
     let left_anchor_width_pt = left_anchor
         .as_ref()
         .map(|anchor| measure_text(&measurement_model, &anchor.text))
         .transpose()
         .ok()
         .flatten();
-    let (line_bias_pt, tolerance_pt) =
-        estimate_row_geometry(line_bucket, left_run.or(right_run), &measurement_model);
-
+    let geometry_line_bucket = resolution.selected_line_bucket.or_else(|| {
+        line_bucket_candidates
+            .first()
+            .map(|candidate| candidate.line_bucket)
+    });
+    let (line_bias_pt, tolerance_pt) = geometry_line_bucket
+        .map(|line_bucket| {
+            estimate_row_geometry(line_bucket, measurement_seed_run, &measurement_model)
+        })
+        .unwrap_or((0.0_f32, ROW_EPSILON_MIN_PT as f32));
     let usable_left_edge_x_pt = left_anchor.as_ref().and_then(|anchor| {
         left_anchor_width_pt
-            .map(|anchor_width| anchor.text_edge_x_pt + anchor_width + boundary_space_width_pt)
+            .map(|anchor_width| anchor.text_edge_x_pt + anchor_width + boundary_space)
     });
     let usable_right_edge_x_pt = right_anchor
         .as_ref()
-        .map(|anchor| anchor.text_edge_x_pt - boundary_space_width_pt);
+        .map(|anchor| anchor.text_edge_x_pt - boundary_space);
     let target_width_pt = match (usable_left_edge_x_pt, usable_right_edge_x_pt) {
         (Some(left_edge), Some(right_edge)) if right_edge > left_edge => right_edge - left_edge,
         _ => redaction.bbox.width().abs(),
     };
 
-    Ok(RedactionEvidenceRow {
-        row_id: row_id.to_owned(),
-        page_index: redaction.page_index,
-        redaction: TrustedRedaction {
-            redaction_id: redaction_id.to_owned(),
+    RowBuildOutput {
+        row: RedactionEvidenceRow {
+            row_id: row_id.to_owned(),
             page_index: redaction.page_index,
-            bbox: redaction.bbox,
-            kind: redaction.kind.clone(),
-            score: redaction.score,
-        },
-        anchor_set: AnchorSet {
-            mode,
-            left: left_anchor,
-            right: right_anchor,
-            geometry: GuessGeometry {
-                redaction_left_x_pt: redaction.bbox.x0,
-                redaction_right_x_pt: redaction.bbox.x1,
-                redaction_width_pt: redaction.bbox.width().abs(),
-                usable_left_edge_x_pt,
-                usable_right_edge_x_pt,
-                target_width_pt,
-                line_bias_pt,
-                tolerance_pt,
+            redaction: TrustedRedaction {
+                redaction_id: redaction_id.to_owned(),
+                page_index: redaction.page_index,
+                bbox: redaction.bbox,
+                kind: redaction.kind.clone(),
+                score: redaction.score,
             },
+            anchor_set: AnchorSet {
+                mode: resolution.mode,
+                left: left_anchor,
+                right: right_anchor,
+                measurement_seed_side: resolution.measurement_seed_side,
+                selected_line_id: resolution
+                    .selected_line_bucket
+                    .map(|line_bucket| line_bucket.line_id.clone()),
+                selection_reason: Some(resolution.selection_reason),
+                selected_left_gap_pt: resolution.left.as_ref().map(|candidate| candidate.gap_pt),
+                selected_right_gap_pt: resolution.right.as_ref().map(|candidate| candidate.gap_pt),
+                geometry: GuessGeometry {
+                    redaction_left_x_pt: redaction.bbox.x0,
+                    redaction_right_x_pt: redaction.bbox.x1,
+                    redaction_width_pt: redaction.bbox.width().abs(),
+                    usable_left_edge_x_pt,
+                    usable_right_edge_x_pt,
+                    target_width_pt,
+                    line_bias_pt,
+                    tolerance_pt,
+                },
+            },
+            font: MeasurementFont {
+                font_key: measurement_model.font_key.clone(),
+                font_name: measurement_model.font_name.clone(),
+                base_font: measurement_model.base_font.clone(),
+                font_size_pt: measurement_model.font_size_pt,
+                h_scale_pct: measurement_model.h_scale_pct,
+                char_spacing_pt: measurement_model.char_spacing_pt,
+                word_spacing_pt: measurement_model.word_spacing_pt,
+                width_source: Some(measurement_model.width_source.as_str().to_owned()),
+                encoding_source: Some(measurement_model.encoding_source.as_str().to_owned()),
+            },
+            neighbor_facts: NeighborFacts {
+                line_id: resolution
+                    .selected_line_bucket
+                    .map(|line_bucket| line_bucket.line_id.clone())
+                    .unwrap_or_else(|| format!("{row_id}_unresolved")),
+                ..NeighborFacts::default()
+            },
+            measurement_model,
         },
-        font: MeasurementFont {
-            font_key: measurement_model.font_key.clone(),
-            font_name: measurement_model.font_name.clone(),
-            base_font: measurement_model.base_font.clone(),
-            font_size_pt: measurement_model.font_size_pt,
-            h_scale_pct: measurement_model.h_scale_pct,
-            char_spacing_pt: measurement_model.char_spacing_pt,
-            word_spacing_pt: measurement_model.word_spacing_pt,
-            width_source: Some(measurement_model.width_source.as_str().to_owned()),
-            encoding_source: Some(measurement_model.encoding_source.as_str().to_owned()),
-        },
-        neighbor_facts: NeighborFacts {
-            line_id: line_bucket.line_id.clone(),
-            ..NeighborFacts::default()
-        },
-        measurement_model,
-    })
+        diagnostics,
+    }
 }
 
-fn resolve_anchor_measurement(
-    left_run: Option<&PdfFontTextRun>,
-    right_run: Option<&PdfFontTextRun>,
-    left_anchor: Option<AnchorSide>,
-    right_anchor: Option<AnchorSide>,
-    font_truth: &PdfFontTruthCatalog,
-) -> Result<ResolvedAnchorMeasurement, EvidenceBuildError> {
-    let mut last_error = None::<EvidenceBuildError>;
-
-    if let (Some(left_run), Some(right_run), Some(left_anchor), Some(right_anchor)) = (
-        left_run,
-        right_run,
-        left_anchor.clone(),
-        right_anchor.clone(),
-    ) {
-        match build_measurement_model(Some(left_run), Some(right_run), font_truth) {
-            Ok(measurement_model) => {
-                return Ok(ResolvedAnchorMeasurement {
-                    mode: AnchorMode::TwoSided,
-                    left_anchor: Some(left_anchor),
-                    right_anchor: Some(right_anchor),
-                    measurement_model,
-                });
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    if let (Some(left_run), Some(left_anchor)) = (left_run, left_anchor) {
-        match build_measurement_model(Some(left_run), None, font_truth) {
-            Ok(measurement_model) => {
-                return Ok(ResolvedAnchorMeasurement {
-                    mode: AnchorMode::LeftOnly,
-                    left_anchor: Some(left_anchor),
-                    right_anchor: None,
-                    measurement_model,
-                });
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    if let (Some(right_run), Some(right_anchor)) = (right_run, right_anchor) {
-        match build_measurement_model(None, Some(right_run), font_truth) {
-            Ok(measurement_model) => {
-                return Ok(ResolvedAnchorMeasurement {
-                    mode: AnchorMode::RightOnly,
-                    left_anchor: None,
-                    right_anchor: Some(right_anchor),
-                    measurement_model,
-                });
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        build_error(
-            "character_model_unbuildable",
-            "failed to resolve a same-line measurement model",
-        )
-    }))
-}
-
+#[cfg(test)]
 fn select_anchor_run<'a>(
     redaction: &RedactionOccurrence,
     line_runs: &[&'a PdfFontTextRun],
     left_side: bool,
 ) -> Option<&'a PdfFontTextRun> {
-    line_runs
+    ranked_anchor_run_candidates(redaction, line_runs, left_side)
+        .first()
+        .map(|candidate| candidate.run)
+}
+
+fn resolve_anchor_set_for_redaction<'a>(
+    redaction: &RedactionOccurrence,
+    row_id: &str,
+    location: DiagnosticLocation,
+    line_bucket_candidates: &'a [LineBucketCandidate<'a>],
+    collect_diagnostics: bool,
+) -> (
+    AnchorResolutionDecision<'a>,
+    Vec<RedactionEvidenceDiagnostic>,
+) {
+    let mut diagnostics = Vec::new();
+    let mut bucket_candidates = Vec::<BucketAnchorCandidates<'a>>::new();
+
+    for (line_bucket_rank, candidate) in line_bucket_candidates.iter().enumerate() {
+        let bucket = build_bucket_anchor_candidates(
+            redaction,
+            row_id,
+            candidate.line_bucket,
+            line_bucket_rank,
+            location.clone(),
+            collect_diagnostics,
+        );
+        diagnostics.extend(bucket.1);
+        bucket_candidates.push(bucket.0);
+    }
+
+    let mut selected_line_id = None::<String>;
+    let mut valid_pairs = Vec::<AnchorPairCandidate<'a>>::new();
+    for bucket in &bucket_candidates {
+        for left in &bucket.left_candidates {
+            for right in &bucket.right_candidates {
+                let pair_candidate = AnchorPairCandidate {
+                    pair_id: format!("{}|{}", left.candidate_id, right.candidate_id),
+                    line_bucket: bucket.line_bucket,
+                    line_bucket_rank: bucket.line_bucket_rank,
+                    left: left.clone(),
+                    right: right.clone(),
+                };
+                if collect_diagnostics {
+                    diagnostics.push(build_diagnostic(
+                        location.clone(),
+                        "redaction_evidence",
+                        "anchor_pair_candidate_considered",
+                        "considered anchor pair candidate",
+                        pair_candidate_metrics(&pair_candidate, line_bucket_candidates.len()),
+                    ));
+                }
+                if let Some((reason_code, message)) =
+                    pair_rejection_reason(&pair_candidate.left, &pair_candidate.right)
+                {
+                    if collect_diagnostics {
+                        diagnostics.push(build_diagnostic(
+                            location.clone(),
+                            "redaction_evidence",
+                            reason_code,
+                            message,
+                            pair_candidate_metrics(&pair_candidate, line_bucket_candidates.len()),
+                        ));
+                    }
+                    continue;
+                }
+                valid_pairs.push(pair_candidate);
+            }
+        }
+    }
+
+    valid_pairs.sort_by(compare_pair_candidates);
+    if let Some(selected_pair) = valid_pairs.first().cloned() {
+        if collect_diagnostics {
+            diagnostics.extend(build_line_bucket_diagnostics(
+                location.clone(),
+                redaction,
+                line_bucket_candidates,
+                Some(selected_pair.line_bucket.line_id.as_str()),
+            ));
+            diagnostics.push(build_diagnostic(
+                location.clone(),
+                "redaction_evidence",
+                "anchor_pair_selected",
+                "selected anchor pair candidate",
+                pair_candidate_metrics(&selected_pair, line_bucket_candidates.len()),
+            ));
+        }
+        let measurement_seed_side = select_measurement_seed_side(
+            AnchorMode::TwoSided,
+            Some(selected_pair.left.gap_pt),
+            Some(selected_pair.right.gap_pt),
+        );
+        if collect_diagnostics {
+            diagnostics.push(build_anchor_resolution_final_diagnostic(
+                location.clone(),
+                selected_pair.line_bucket.line_id.as_str(),
+                AnchorMode::TwoSided,
+                Some(&selected_pair.left),
+                Some(&selected_pair.right),
+                measurement_seed_side,
+                "pair_candidate_selected",
+            ));
+            diagnostics.push(build_measurement_seed_diagnostic(
+                location.clone(),
+                selected_pair.line_bucket.line_id.as_str(),
+                measurement_seed_side,
+                Some(&selected_pair.left),
+                Some(&selected_pair.right),
+            ));
+        }
+        return (
+            AnchorResolutionDecision {
+                mode: AnchorMode::TwoSided,
+                selected_line_bucket: Some(selected_pair.line_bucket),
+                left: Some(selected_pair.left),
+                right: Some(selected_pair.right),
+                measurement_seed_side,
+                selection_reason: "pair_candidate_selected".to_owned(),
+            },
+            diagnostics,
+        );
+    }
+
+    let mut all_left_candidates = bucket_candidates
         .iter()
-        .copied()
-        .filter(|run| {
-            let trimmed = run.text.trim();
-            if trimmed.is_empty() {
-                return false;
+        .flat_map(|bucket| bucket.left_candidates.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut all_right_candidates = bucket_candidates
+        .iter()
+        .flat_map(|bucket| bucket.right_candidates.iter().cloned())
+        .collect::<Vec<_>>();
+    all_left_candidates.sort_by(compare_side_candidates);
+    all_right_candidates.sort_by(compare_side_candidates);
+
+    let decision = match (
+        all_left_candidates.first().cloned(),
+        all_right_candidates.first().cloned(),
+    ) {
+        (Some(left), Some(right)) => {
+            let left_key = (
+                ordered_f32(left.gap_pt),
+                left.line_bucket_rank,
+                left.candidate_id.clone(),
+            );
+            let right_key = (
+                ordered_f32(right.gap_pt),
+                right.line_bucket_rank,
+                right.candidate_id.clone(),
+            );
+            if left_key <= right_key {
+                AnchorResolutionDecision {
+                    mode: AnchorMode::LeftOnly,
+                    selected_line_bucket: Some(left.line_bucket),
+                    left: Some(left),
+                    right: None,
+                    measurement_seed_side: Some(MeasurementSeedSide::Left),
+                    selection_reason: "one_sided_no_valid_pair_left_gap_selected".to_owned(),
+                }
+            } else {
+                AnchorResolutionDecision {
+                    mode: AnchorMode::RightOnly,
+                    selected_line_bucket: Some(right.line_bucket),
+                    left: None,
+                    right: Some(right),
+                    measurement_seed_side: Some(MeasurementSeedSide::Right),
+                    selection_reason: "one_sided_no_valid_pair_right_gap_selected".to_owned(),
+                }
             }
-            if left_side {
-                run.bbox.x1 <= redaction.bbox.x0
+        }
+        (Some(left), None) => AnchorResolutionDecision {
+            mode: AnchorMode::LeftOnly,
+            selected_line_bucket: Some(left.line_bucket),
+            left: Some(left),
+            right: None,
+            measurement_seed_side: Some(MeasurementSeedSide::Left),
+            selection_reason: "one_sided_only_left_candidate_available".to_owned(),
+        },
+        (None, Some(right)) => AnchorResolutionDecision {
+            mode: AnchorMode::RightOnly,
+            selected_line_bucket: Some(right.line_bucket),
+            left: None,
+            right: Some(right),
+            measurement_seed_side: Some(MeasurementSeedSide::Right),
+            selection_reason: "one_sided_only_right_candidate_available".to_owned(),
+        },
+        (None, None) => AnchorResolutionDecision {
+            mode: AnchorMode::Unresolved,
+            selected_line_bucket: line_bucket_candidates
+                .first()
+                .map(|candidate| candidate.line_bucket),
+            left: None,
+            right: None,
+            measurement_seed_side: None,
+            selection_reason: if line_bucket_candidates.is_empty() {
+                "unresolved_no_eligible_line_bucket".to_owned()
             } else {
-                run.bbox.x0 >= redaction.bbox.x1
+                "unresolved_no_valid_anchor_spans".to_owned()
+            },
+        },
+    };
+
+    if let Some(line_bucket) = decision.selected_line_bucket {
+        selected_line_id = Some(line_bucket.line_id.clone());
+    }
+    if collect_diagnostics {
+        diagnostics.extend(build_line_bucket_diagnostics(
+            location.clone(),
+            redaction,
+            line_bucket_candidates,
+            selected_line_id.as_deref(),
+        ));
+        match decision.mode {
+            AnchorMode::LeftOnly | AnchorMode::RightOnly => {
+                diagnostics.push(build_diagnostic(
+                    location.clone(),
+                    "redaction_evidence",
+                    "anchor_one_sided_selected",
+                    "selected one-sided anchor candidate",
+                    side_selection_metrics(&decision, line_bucket_candidates.len()),
+                ));
             }
+            AnchorMode::Unresolved => {}
+            AnchorMode::TwoSided => {}
+        }
+        diagnostics.push(build_anchor_resolution_final_diagnostic(
+            location.clone(),
+            selected_line_id.as_deref().unwrap_or_default(),
+            decision.mode,
+            decision.left.as_ref(),
+            decision.right.as_ref(),
+            decision.measurement_seed_side,
+            &decision.selection_reason,
+        ));
+        if decision.measurement_seed_side.is_some() {
+            diagnostics.push(build_measurement_seed_diagnostic(
+                location,
+                selected_line_id.as_deref().unwrap_or_default(),
+                decision.measurement_seed_side,
+                decision.left.as_ref(),
+                decision.right.as_ref(),
+            ));
+        }
+    }
+
+    (decision, diagnostics)
+}
+
+fn build_bucket_anchor_candidates<'a>(
+    redaction: &RedactionOccurrence,
+    row_id: &str,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    location: DiagnosticLocation,
+    collect_diagnostics: bool,
+) -> (BucketAnchorCandidates<'a>, Vec<RedactionEvidenceDiagnostic>) {
+    let (left_candidates, mut diagnostics) = build_anchor_span_candidates(
+        redaction,
+        row_id,
+        line_bucket,
+        line_bucket_rank,
+        true,
+        location.clone(),
+        collect_diagnostics,
+    );
+    let (right_candidates, right_diagnostics) = build_anchor_span_candidates(
+        redaction,
+        row_id,
+        line_bucket,
+        line_bucket_rank,
+        false,
+        location,
+        collect_diagnostics,
+    );
+    diagnostics.extend(right_diagnostics);
+    (
+        BucketAnchorCandidates {
+            line_bucket,
+            line_bucket_rank,
+            left_candidates,
+            right_candidates,
+        },
+        diagnostics,
+    )
+}
+
+fn build_anchor_span_candidates<'a>(
+    redaction: &RedactionOccurrence,
+    row_id: &str,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    left_side: bool,
+    location: DiagnosticLocation,
+    collect_diagnostics: bool,
+) -> (
+    Vec<AnchorSpanCandidate<'a>>,
+    Vec<RedactionEvidenceDiagnostic>,
+) {
+    let run_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, left_side);
+    let mut candidates = Vec::<AnchorSpanCandidate<'a>>::new();
+    let mut diagnostics = Vec::<RedactionEvidenceDiagnostic>::new();
+
+    for (candidate_rank, run_candidate) in run_candidates.iter().enumerate() {
+        let span_candidate = build_anchor_span_candidate(
+            row_id,
+            line_bucket,
+            line_bucket_rank,
+            candidate_rank,
+            run_candidate,
+            left_side,
+        );
+        if collect_diagnostics {
+            diagnostics.push(build_diagnostic(
+                location.clone(),
+                "redaction_evidence",
+                "anchor_span_candidate_considered",
+                "considered anchor span candidate",
+                anchor_span_metrics(
+                    &span_candidate,
+                    run_candidates.len(),
+                    candidate_rank,
+                    redaction,
+                ),
+            ));
+        }
+        if !anchor_text_has_alnum(&span_candidate.anchor.text) {
+            if collect_diagnostics {
+                diagnostics.push(build_diagnostic(
+                    location.clone(),
+                    "redaction_evidence",
+                    "anchor_span_rejected_non_alnum",
+                    "anchor span text contains no unicode letters or digits",
+                    anchor_span_metrics(
+                        &span_candidate,
+                        run_candidates.len(),
+                        candidate_rank,
+                        redaction,
+                    ),
+                ));
+            }
+            continue;
+        }
+        candidates.push(span_candidate);
+    }
+
+    (candidates, diagnostics)
+}
+
+fn build_line_bucket_diagnostics(
+    location: DiagnosticLocation,
+    redaction: &RedactionOccurrence,
+    candidates: &[LineBucketCandidate<'_>],
+    selected_line_id: Option<&str>,
+) -> Vec<RedactionEvidenceDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for (candidate_rank, candidate) in candidates.iter().enumerate() {
+        diagnostics.push(build_diagnostic(
+            location.clone(),
+            "redaction_evidence",
+            "line_bucket_candidate_considered",
+            "considered same-line text bucket for redaction",
+            line_bucket_metrics(
+                candidate.line_bucket,
+                redaction,
+                candidates.len(),
+                candidate_rank,
+            ),
+        ));
+    }
+    if let Some(selected_line_id) = selected_line_id {
+        if let Some((selected_rank, selected)) = candidates
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.line_bucket.line_id == selected_line_id)
+        {
+            diagnostics.push(build_diagnostic(
+                location,
+                "redaction_evidence",
+                "line_bucket_selected",
+                "selected same-line text bucket for redaction",
+                line_bucket_metrics(
+                    selected.line_bucket,
+                    redaction,
+                    candidates.len(),
+                    selected_rank,
+                ),
+            ));
+        }
+    }
+    diagnostics
+}
+
+fn build_anchor_span_candidate<'a>(
+    row_id: &str,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    candidate_rank: usize,
+    run_candidate: &AnchorRunCandidate<'a>,
+    left_side: bool,
+) -> AnchorSpanCandidate<'a> {
+    let side = if left_side { "left" } else { "right" };
+    let anchor = build_anchor_side(row_id, run_candidate.run, &line_bucket.runs, left_side);
+    let width_pt = anchor.bbox.width().abs();
+    AnchorSpanCandidate {
+        candidate_id: format!(
+            "{}:{}:{candidate_rank:03}:{}",
+            line_bucket.line_id,
+            side,
+            anchor_run_sort_key(run_candidate.run)
+        ),
+        line_bucket,
+        line_bucket_rank,
+        run: run_candidate.run,
+        left_side,
+        anchor,
+        visibility_rank: run_candidate.visibility_rank,
+        gap_pt: run_candidate.gap_pt,
+        width_pt,
+    }
+}
+
+fn compare_pair_candidates(
+    left: &AnchorPairCandidate<'_>,
+    right: &AnchorPairCandidate<'_>,
+) -> std::cmp::Ordering {
+    (
+        left.line_bucket_rank,
+        ordered_f32(left.left.gap_pt + left.right.gap_pt),
+        ordered_f32(left.left.gap_pt.max(left.right.gap_pt)),
+        ordered_f32(left.left.gap_pt),
+        ordered_f32(left.right.gap_pt),
+        left.pair_id.as_str(),
+    )
+        .cmp(&(
+            right.line_bucket_rank,
+            ordered_f32(right.left.gap_pt + right.right.gap_pt),
+            ordered_f32(right.left.gap_pt.max(right.right.gap_pt)),
+            ordered_f32(right.left.gap_pt),
+            ordered_f32(right.right.gap_pt),
+            right.pair_id.as_str(),
+        ))
+}
+
+fn compare_side_candidates(
+    left: &AnchorSpanCandidate<'_>,
+    right: &AnchorSpanCandidate<'_>,
+) -> std::cmp::Ordering {
+    (
+        left.line_bucket_rank,
+        left.visibility_rank,
+        ordered_f32(left.gap_pt),
+        ordered_f32(left.width_pt),
+        left.candidate_id.as_str(),
+    )
+        .cmp(&(
+            right.line_bucket_rank,
+            right.visibility_rank,
+            ordered_f32(right.gap_pt),
+            ordered_f32(right.width_pt),
+            right.candidate_id.as_str(),
+        ))
+}
+
+fn pair_rejection_reason(
+    left: &AnchorSpanCandidate<'_>,
+    right: &AnchorSpanCandidate<'_>,
+) -> Option<(&'static str, &'static str)> {
+    if left.run.font_key != right.run.font_key {
+        return Some((
+            "anchor_pair_rejected_font_key_mismatch",
+            "anchor pair candidates use different font resources",
+        ));
+    }
+    if normalized_font_name(&left.run.font_name) != normalized_font_name(&right.run.font_name) {
+        return Some((
+            "anchor_pair_rejected_font_name_mismatch",
+            "anchor pair candidates use different normalized font names",
+        ));
+    }
+    if normalize_font_size_pt(left.run.font_size_pt)
+        != normalize_font_size_pt(right.run.font_size_pt)
+    {
+        return Some((
+            "anchor_pair_rejected_font_size_mismatch",
+            "anchor pair candidates use different normalized font sizes",
+        ));
+    }
+    if normalize_spacing_pt(left.run.width_metrics.char_spacing_pt)
+        != normalize_spacing_pt(right.run.width_metrics.char_spacing_pt)
+    {
+        return Some((
+            "anchor_pair_rejected_char_spacing_mismatch",
+            "anchor pair candidates use different normalized char spacing",
+        ));
+    }
+    if normalize_spacing_pt(left.run.width_metrics.word_spacing_pt)
+        != normalize_spacing_pt(right.run.width_metrics.word_spacing_pt)
+    {
+        return Some((
+            "anchor_pair_rejected_word_spacing_mismatch",
+            "anchor pair candidates use different normalized word spacing",
+        ));
+    }
+    if left.run.width_metrics.render_mode != right.run.width_metrics.render_mode {
+        return Some((
+            "anchor_pair_rejected_render_mode_mismatch",
+            "anchor pair candidates use different render modes",
+        ));
+    }
+    None
+}
+
+fn select_measurement_seed_side(
+    mode: AnchorMode,
+    left_gap_pt: Option<f32>,
+    right_gap_pt: Option<f32>,
+) -> Option<MeasurementSeedSide> {
+    match mode {
+        AnchorMode::TwoSided => match (left_gap_pt, right_gap_pt) {
+            (Some(left_gap_pt), Some(right_gap_pt)) if left_gap_pt <= right_gap_pt => {
+                Some(MeasurementSeedSide::Left)
+            }
+            (Some(_), Some(_)) => Some(MeasurementSeedSide::Right),
+            (Some(_), None) => Some(MeasurementSeedSide::Left),
+            (None, Some(_)) => Some(MeasurementSeedSide::Right),
+            (None, None) => None,
+        },
+        AnchorMode::LeftOnly => Some(MeasurementSeedSide::Left),
+        AnchorMode::RightOnly => Some(MeasurementSeedSide::Right),
+        AnchorMode::Unresolved => None,
+    }
+}
+
+fn measurement_seed_run<'a>(
+    resolution: &'a AnchorResolutionDecision<'a>,
+) -> Option<&'a PdfFontTextRun> {
+    match resolution.measurement_seed_side {
+        Some(MeasurementSeedSide::Left) => resolution.left.as_ref().map(|candidate| candidate.run),
+        Some(MeasurementSeedSide::Right) => {
+            resolution.right.as_ref().map(|candidate| candidate.run)
+        }
+        None => None,
+    }
+}
+
+fn build_anchor_resolution_final_diagnostic(
+    location: DiagnosticLocation,
+    line_id: &str,
+    mode: AnchorMode,
+    left: Option<&AnchorSpanCandidate<'_>>,
+    right: Option<&AnchorSpanCandidate<'_>>,
+    measurement_seed_side: Option<MeasurementSeedSide>,
+    selection_reason: &str,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = resolution_metrics(
+        line_id,
+        mode,
+        left,
+        right,
+        measurement_seed_side,
+        selection_reason,
+    );
+    metrics.insert(
+        "stable_candidate_id".to_owned(),
+        DiagnosticValue::Text(stable_resolution_candidate_id(left, right)),
+    );
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_resolution_final",
+        "resolved final anchor decision for row",
+        metrics,
+    )
+}
+
+fn build_measurement_seed_diagnostic(
+    location: DiagnosticLocation,
+    line_id: &str,
+    measurement_seed_side: Option<MeasurementSeedSide>,
+    left: Option<&AnchorSpanCandidate<'_>>,
+    right: Option<&AnchorSpanCandidate<'_>>,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = resolution_metrics(
+        line_id,
+        left.and(right)
+            .map(|_| AnchorMode::TwoSided)
+            .unwrap_or_else(|| {
+                if left.is_some() {
+                    AnchorMode::LeftOnly
+                } else if right.is_some() {
+                    AnchorMode::RightOnly
+                } else {
+                    AnchorMode::Unresolved
+                }
+            }),
+        left,
+        right,
+        measurement_seed_side,
+        "measurement_seed_selected",
+    );
+    metrics.insert(
+        "stable_candidate_id".to_owned(),
+        DiagnosticValue::Text(stable_resolution_candidate_id(left, right)),
+    );
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "measurement_seed_selected",
+        "selected measurement seed side for anchor resolution",
+        metrics,
+    )
+}
+
+fn resolution_metrics(
+    line_id: &str,
+    mode: AnchorMode,
+    left: Option<&AnchorSpanCandidate<'_>>,
+    right: Option<&AnchorSpanCandidate<'_>>,
+    measurement_seed_side: Option<MeasurementSeedSide>,
+    selection_reason: &str,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "line_id".to_owned(),
+        DiagnosticValue::Text(line_id.to_owned()),
+    );
+    metrics.insert(
+        "final_mode".to_owned(),
+        DiagnosticValue::Text(mode.as_str().to_owned()),
+    );
+    metrics.insert(
+        "selection_reason".to_owned(),
+        DiagnosticValue::Text(selection_reason.to_owned()),
+    );
+    if let Some(measurement_seed_side) = measurement_seed_side {
+        metrics.insert(
+            "measurement_seed_side".to_owned(),
+            DiagnosticValue::Text(measurement_seed_side.as_str().to_owned()),
+        );
+    }
+    if let Some(left) = left {
+        metrics.insert(
+            "selected_left_text".to_owned(),
+            DiagnosticValue::Text(left.anchor.text.clone()),
+        );
+        metrics.insert(
+            "selected_left_gap_pt".to_owned(),
+            DiagnosticValue::Float(left.gap_pt as f64),
+        );
+        metrics.insert(
+            "selected_left_candidate_id".to_owned(),
+            DiagnosticValue::Text(left.candidate_id.clone()),
+        );
+    }
+    if let Some(right) = right {
+        metrics.insert(
+            "selected_right_text".to_owned(),
+            DiagnosticValue::Text(right.anchor.text.clone()),
+        );
+        metrics.insert(
+            "selected_right_gap_pt".to_owned(),
+            DiagnosticValue::Float(right.gap_pt as f64),
+        );
+        metrics.insert(
+            "selected_right_candidate_id".to_owned(),
+            DiagnosticValue::Text(right.candidate_id.clone()),
+        );
+    }
+    metrics
+}
+
+fn side_selection_metrics(
+    decision: &AnchorResolutionDecision<'_>,
+    line_bucket_count: usize,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = resolution_metrics(
+        decision
+            .selected_line_bucket
+            .map(|line_bucket| line_bucket.line_id.as_str())
+            .unwrap_or_default(),
+        decision.mode,
+        decision.left.as_ref(),
+        decision.right.as_ref(),
+        decision.measurement_seed_side,
+        &decision.selection_reason,
+    );
+    metrics.insert(
+        "line_bucket_count".to_owned(),
+        DiagnosticValue::Integer(line_bucket_count as i64),
+    );
+    metrics
+}
+
+fn pair_candidate_metrics(
+    pair: &AnchorPairCandidate<'_>,
+    line_bucket_count: usize,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "stable_candidate_id".to_owned(),
+        DiagnosticValue::Text(pair.pair_id.clone()),
+    );
+    metrics.insert(
+        "line_bucket_count".to_owned(),
+        DiagnosticValue::Integer(line_bucket_count as i64),
+    );
+    metrics.insert(
+        "line_bucket_rank".to_owned(),
+        DiagnosticValue::Integer(pair.line_bucket_rank as i64),
+    );
+    metrics.insert(
+        "line_id".to_owned(),
+        DiagnosticValue::Text(pair.line_bucket.line_id.clone()),
+    );
+    metrics.insert(
+        "left_candidate_id".to_owned(),
+        DiagnosticValue::Text(pair.left.candidate_id.clone()),
+    );
+    metrics.insert(
+        "right_candidate_id".to_owned(),
+        DiagnosticValue::Text(pair.right.candidate_id.clone()),
+    );
+    metrics.insert(
+        "left_gap_pt".to_owned(),
+        DiagnosticValue::Float(pair.left.gap_pt as f64),
+    );
+    metrics.insert(
+        "right_gap_pt".to_owned(),
+        DiagnosticValue::Float(pair.right.gap_pt as f64),
+    );
+    metrics.insert(
+        "pair_gap_sum_pt".to_owned(),
+        DiagnosticValue::Float((pair.left.gap_pt + pair.right.gap_pt) as f64),
+    );
+    metrics.insert(
+        "pair_gap_max_pt".to_owned(),
+        DiagnosticValue::Float(pair.left.gap_pt.max(pair.right.gap_pt) as f64),
+    );
+    metrics.insert(
+        "left_text".to_owned(),
+        DiagnosticValue::Text(pair.left.anchor.text.clone()),
+    );
+    metrics.insert(
+        "right_text".to_owned(),
+        DiagnosticValue::Text(pair.right.anchor.text.clone()),
+    );
+    extend_metrics(&mut metrics, width_profile_metrics("left", pair.left.run));
+    extend_metrics(&mut metrics, width_profile_metrics("right", pair.right.run));
+    metrics
+}
+
+fn anchor_span_metrics(
+    candidate: &AnchorSpanCandidate<'_>,
+    candidate_count: usize,
+    candidate_rank: usize,
+    redaction: &RedactionOccurrence,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "stable_candidate_id".to_owned(),
+        DiagnosticValue::Text(candidate.candidate_id.clone()),
+    );
+    metrics.insert(
+        "anchor_side".to_owned(),
+        DiagnosticValue::Text(if candidate.left_side {
+            "left".to_owned()
+        } else {
+            "right".to_owned()
+        }),
+    );
+    metrics.insert(
+        "candidate_count".to_owned(),
+        DiagnosticValue::Integer(candidate_count as i64),
+    );
+    metrics.insert(
+        "candidate_rank".to_owned(),
+        DiagnosticValue::Integer(candidate_rank as i64),
+    );
+    metrics.insert(
+        "line_bucket_rank".to_owned(),
+        DiagnosticValue::Integer(candidate.line_bucket_rank as i64),
+    );
+    metrics.insert(
+        "line_id".to_owned(),
+        DiagnosticValue::Text(candidate.line_bucket.line_id.clone()),
+    );
+    metrics.insert(
+        "anchor_text".to_owned(),
+        DiagnosticValue::Text(candidate.anchor.text.clone()),
+    );
+    metrics.insert(
+        "gap_pt".to_owned(),
+        DiagnosticValue::Float(candidate.gap_pt as f64),
+    );
+    metrics.insert(
+        "visibility_rank".to_owned(),
+        DiagnosticValue::Integer(candidate.visibility_rank as i64),
+    );
+    metrics.insert(
+        "span_x0".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "span_x1".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.bbox.x1 as f64),
+    );
+    metrics.insert(
+        "span_y0".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.bbox.y0 as f64),
+    );
+    metrics.insert(
+        "span_y1".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.bbox.y1 as f64),
+    );
+    metrics.insert(
+        "span_width_pt".to_owned(),
+        DiagnosticValue::Float(candidate.width_pt as f64),
+    );
+    metrics.insert(
+        "text_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.text_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "redaction_left_x_pt".to_owned(),
+        DiagnosticValue::Float(redaction.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "redaction_right_x_pt".to_owned(),
+        DiagnosticValue::Float(redaction.bbox.x1 as f64),
+    );
+    metrics.insert(
+        "font_key".to_owned(),
+        DiagnosticValue::Text(candidate.run.font_key.clone()),
+    );
+    metrics.insert(
+        "font_name".to_owned(),
+        DiagnosticValue::Text(normalized_font_name(&candidate.run.font_name)),
+    );
+    extend_metrics(&mut metrics, width_profile_metrics("run", candidate.run));
+    metrics
+}
+
+fn anchor_text_has_alnum(text: &str) -> bool {
+    normalize_transport_text(text)
+        .chars()
+        .any(char::is_alphanumeric)
+}
+
+fn ordered_f32(value: f32) -> i32 {
+    ((value as f64) * 10_000.0_f64).round() as i32
+}
+
+fn stable_resolution_candidate_id(
+    left: Option<&AnchorSpanCandidate<'_>>,
+    right: Option<&AnchorSpanCandidate<'_>>,
+) -> String {
+    match (left, right) {
+        (Some(left), Some(right)) => format!("{}|{}", left.candidate_id, right.candidate_id),
+        (Some(left), None) => left.candidate_id.clone(),
+        (None, Some(right)) => right.candidate_id.clone(),
+        (None, None) => String::new(),
+    }
+}
+
+fn diagnostic_stable_candidate_id(diagnostic: &RedactionEvidenceDiagnostic) -> String {
+    diagnostic
+        .metrics
+        .get("stable_candidate_id")
+        .and_then(|value| match value {
+            DiagnosticValue::Text(text) => Some(text.clone()),
+            _ => None,
         })
-        .min_by(|left, right| {
-            let left_visibility = visibility_rank(left);
-            let right_visibility = visibility_rank(right);
-            let left_gap = if left_side {
-                (redaction.bbox.x0 - left.bbox.x1).abs()
-            } else {
-                (left.bbox.x0 - redaction.bbox.x1).abs()
-            };
-            let right_gap = if left_side {
-                (redaction.bbox.x0 - right.bbox.x1).abs()
-            } else {
-                (right.bbox.x0 - redaction.bbox.x1).abs()
-            };
-            left_visibility
-                .cmp(&right_visibility)
-                .then_with(|| {
-                    left_gap
-                        .partial_cmp(&right_gap)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    let left_width = (left.bbox.x1 - left.bbox.x0).abs();
-                    let right_width = (right.bbox.x1 - right.bbox.x0).abs();
-                    left_width
-                        .partial_cmp(&right_width)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    let left_id = format!("{:.4}:{:.4}:{}", left.bbox.x0, left.bbox.y0, left.text);
-                    let right_id =
-                        format!("{:.4}:{:.4}:{}", right.bbox.x0, right.bbox.y0, right.text);
-                    left_id.cmp(&right_id)
-                })
-        })
+        .unwrap_or_default()
+}
+
+fn line_bucket_metrics(
+    line_bucket: &LineBucket<'_>,
+    redaction: &RedactionOccurrence,
+    candidate_count: usize,
+    candidate_rank: usize,
+) -> BTreeMap<String, DiagnosticValue> {
+    let (bucket_left_x_pt, bucket_right_x_pt) = line_bucket_span(line_bucket);
+    let left_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, true);
+    let right_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, false);
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "candidate_count".to_owned(),
+        DiagnosticValue::Integer(candidate_count as i64),
+    );
+    metrics.insert(
+        "candidate_rank".to_owned(),
+        DiagnosticValue::Integer(candidate_rank as i64),
+    );
+    metrics.insert(
+        "line_id".to_owned(),
+        DiagnosticValue::Text(line_bucket.line_id.clone()),
+    );
+    metrics.insert(
+        "bucket_baseline_y1".to_owned(),
+        DiagnosticValue::Float(line_bucket.baseline_y1 as f64),
+    );
+    metrics.insert(
+        "bucket_y0".to_owned(),
+        DiagnosticValue::Float(line_bucket.y0 as f64),
+    );
+    metrics.insert(
+        "bucket_y1".to_owned(),
+        DiagnosticValue::Float(line_bucket.y1 as f64),
+    );
+    metrics.insert(
+        "bucket_left_x_pt".to_owned(),
+        DiagnosticValue::Float(bucket_left_x_pt as f64),
+    );
+    metrics.insert(
+        "bucket_right_x_pt".to_owned(),
+        DiagnosticValue::Float(bucket_right_x_pt as f64),
+    );
+    metrics.insert(
+        "bucket_vertical_overlap_pt".to_owned(),
+        DiagnosticValue::Float(vertical_overlap_pt(
+            line_bucket.y0,
+            line_bucket.y1,
+            redaction.bbox.y0,
+            redaction.bbox.y1,
+        ) as f64),
+    );
+    metrics.insert(
+        "bucket_baseline_delta_pt".to_owned(),
+        DiagnosticValue::Float((line_bucket.baseline_y1 - redaction.bbox.y1).abs() as f64),
+    );
+    metrics.insert(
+        "bucket_run_count".to_owned(),
+        DiagnosticValue::Integer(line_bucket.runs.len() as i64),
+    );
+    metrics.insert(
+        "bucket_text_preview".to_owned(),
+        DiagnosticValue::Text(line_bucket_text_preview(line_bucket)),
+    );
+    metrics.insert(
+        "bucket_left_candidate_count".to_owned(),
+        DiagnosticValue::Integer(left_candidates.len() as i64),
+    );
+    metrics.insert(
+        "bucket_right_candidate_count".to_owned(),
+        DiagnosticValue::Integer(right_candidates.len() as i64),
+    );
+    metrics
+}
+
+fn line_bucket_span(line_bucket: &LineBucket<'_>) -> (f32, f32) {
+    let left_x = line_bucket
+        .runs
+        .iter()
+        .map(|run| run.bbox.x0)
+        .fold(f32::INFINITY, f32::min);
+    let right_x = line_bucket
+        .runs
+        .iter()
+        .map(|run| run.bbox.x1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let left_x = if left_x.is_finite() { left_x } else { 0.0_f32 };
+    let right_x = if right_x.is_finite() {
+        right_x
+    } else {
+        0.0_f32
+    };
+    (left_x, right_x)
+}
+
+fn line_bucket_text_preview(line_bucket: &LineBucket<'_>) -> String {
+    line_bucket
+        .runs
+        .iter()
+        .map(|run| normalize_transport_text(&run.text))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn anchor_run_sort_key(run: &PdfFontTextRun) -> String {
+    format!("{:.4}:{:.4}:{}", run.bbox.x0, run.bbox.y0, run.text)
 }
 
 fn build_anchor_side(
@@ -549,7 +1537,7 @@ fn build_anchor_side(
     line_runs: &[&PdfFontTextRun],
     left_side: bool,
 ) -> AnchorSide {
-    let (text, x) = enrich_anchor_text_and_edge(run, line_runs, left_side);
+    let (text, text_edge_x_pt, bbox) = enrich_anchor_text_and_edge(run, line_runs, left_side);
     AnchorSide {
         anchor_id: if left_side {
             format!("{row_id}_left")
@@ -557,8 +1545,8 @@ fn build_anchor_side(
             format!("{row_id}_right")
         },
         text,
-        bbox: Rect::new(run.bbox.x0, run.bbox.y0, run.bbox.x1, run.bbox.y1),
-        text_edge_x_pt: x as f32,
+        bbox,
+        text_edge_x_pt,
     }
 }
 
@@ -566,14 +1554,15 @@ fn enrich_anchor_text_and_edge(
     run: &PdfFontTextRun,
     line_runs: &[&PdfFontTextRun],
     left_side: bool,
-) -> (String, f64) {
+) -> (String, f32, Rect) {
     let mut text = normalize_transport_text(&run.text);
-    let mut x = run.bbox.x0 as f64;
+    let mut text_edge_x_pt = run.bbox.x0;
+    let mut bbox = Rect::new(run.bbox.x0, run.bbox.y0, run.bbox.x1, run.bbox.y1);
     let Some(run_index) = line_runs
         .iter()
         .position(|candidate| std::ptr::eq(*candidate, run))
     else {
-        return (text, x);
+        return (text, text_edge_x_pt, bbox);
     };
     if left_side {
         let mut cursor = run_index;
@@ -588,10 +1577,16 @@ fn enrich_anchor_text_and_edge(
                 &text,
                 (current.bbox.x0 - previous.bbox.x1).max(0.0_f32) as f64,
             );
-            x = previous.bbox.x0 as f64;
+            text_edge_x_pt = previous.bbox.x0;
+            bbox = Rect::new(
+                previous.bbox.x0.min(bbox.x0),
+                previous.bbox.y0.min(bbox.y0),
+                bbox.x1.max(previous.bbox.x1),
+                previous.bbox.y1.max(bbox.y1),
+            );
             cursor -= 1;
         }
-        return (text, x);
+        return (text, text_edge_x_pt, bbox);
     }
     let mut cursor = run_index;
     while (cursor + 1) < line_runs.len() {
@@ -605,9 +1600,15 @@ fn enrich_anchor_text_and_edge(
             &next.text,
             (next.bbox.x0 - current.bbox.x1).max(0.0_f32) as f64,
         );
+        bbox = Rect::new(
+            bbox.x0.min(next.bbox.x0),
+            bbox.y0.min(next.bbox.y0),
+            bbox.x1.max(next.bbox.x1),
+            bbox.y1.max(next.bbox.y1),
+        );
         cursor += 1;
     }
-    (text, x)
+    (text, text_edge_x_pt, bbox)
 }
 
 fn runs_are_neighbors(left: &PdfFontTextRun, right: &PdfFontTextRun) -> bool {
@@ -621,36 +1622,10 @@ fn runs_are_neighbors(left: &PdfFontTextRun, right: &PdfFontTextRun) -> bool {
 }
 
 fn build_measurement_model(
-    left_run: Option<&PdfFontTextRun>,
-    right_run: Option<&PdfFontTextRun>,
+    seed_run: &PdfFontTextRun,
     font_truth: &PdfFontTruthCatalog,
-) -> Result<CandidateWidthModel, EvidenceBuildError> {
-    let seed_run = left_run.or(right_run).ok_or_else(|| {
-        build_error(
-            "same_line_anchor_missing",
-            "no anchor run available for measurement model",
-        )
-    })?;
-    let seed_profile = width_profile_from_run(seed_run);
-    if let Some(other) = right_run.or(left_run) {
-        if width_profile_from_run(other) != seed_profile {
-            let mut metrics = width_profile_metrics("left_or_seed", seed_run);
-            extend_metrics(&mut metrics, width_profile_metrics("right_or_other", other));
-            return Err(build_error_with_metrics(
-                "anchor_measurement_mismatch",
-                "anchor sides do not share the same measurement model",
-                metrics,
-            ));
-        }
-    }
+) -> CandidateWidthModel {
     let font_name = normalized_font_name(&seed_run.font_name);
-    if font_name.is_empty() {
-        return Err(build_error_with_metrics(
-            "character_model_unbuildable",
-            "anchor font name is empty",
-            width_profile_metrics("seed", seed_run),
-        ));
-    }
     let resource_key = crate::data::types::redaction_evidence_types::MeasurementFontKey {
         page_index: seed_run.page_index,
         font_key: seed_run.font_key.clone(),
@@ -661,7 +1636,7 @@ fn build_measurement_model(
             font_key: resource_key.font_key.clone(),
         },
     );
-    Ok(CandidateWidthModel {
+    CandidateWidthModel {
         resource_key,
         font_key: seed_run.font_key.clone(),
         font_name,
@@ -715,7 +1690,7 @@ fn build_measurement_model(
         code_to_width_units: backend
             .map(|entry| entry.code_to_width_units.clone())
             .unwrap_or_default(),
-    })
+    }
 }
 
 fn same_width_profile(run: &PdfFontTextRun, seed_run: &PdfFontTextRun) -> bool {
@@ -788,26 +1763,6 @@ fn visibility_rank(run: &PdfFontTextRun) -> i32 {
         1
     } else {
         0
-    }
-}
-
-fn build_error(reason_code: &'static str, message: &str) -> EvidenceBuildError {
-    EvidenceBuildError {
-        reason_code,
-        message: message.to_owned(),
-        metrics: BTreeMap::new(),
-    }
-}
-
-fn build_error_with_metrics(
-    reason_code: &'static str,
-    message: &str,
-    metrics: BTreeMap<String, DiagnosticValue>,
-) -> EvidenceBuildError {
-    EvidenceBuildError {
-        reason_code,
-        message: message.to_owned(),
-        metrics,
     }
 }
 
@@ -937,6 +1892,11 @@ fn build_diagnostic(
 }
 
 fn build_backend_diagnostics(row: &RedactionEvidenceRow) -> Vec<RedactionEvidenceDiagnostic> {
+    if row.anchor_set.mode == AnchorMode::Unresolved
+        || row.anchor_set.measurement_seed_side.is_none()
+    {
+        return Vec::new();
+    }
     let location = DiagnosticLocation {
         row_id: Some(row.row_id.clone()),
         redaction_id: Some(row.redaction.redaction_id.clone()),

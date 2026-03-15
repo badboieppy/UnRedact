@@ -48,6 +48,16 @@ pub struct AnchorSet {
     pub left: Option<AnchorSide>,
     #[serde(default)]
     pub right: Option<AnchorSide>,
+    #[serde(default)]
+    pub measurement_seed_side: Option<MeasurementSeedSide>,
+    #[serde(default)]
+    pub selected_line_id: Option<String>,
+    #[serde(default)]
+    pub selection_reason: Option<String>,
+    #[serde(default)]
+    pub selected_left_gap_pt: Option<f32>,
+    #[serde(default)]
+    pub selected_right_gap_pt: Option<f32>,
     pub geometry: GuessGeometry,
 }
 
@@ -57,6 +67,7 @@ pub enum AnchorMode {
     TwoSided,
     LeftOnly,
     RightOnly,
+    Unresolved,
 }
 
 impl AnchorMode {
@@ -66,6 +77,24 @@ impl AnchorMode {
             Self::TwoSided => "two_sided",
             Self::LeftOnly => "left_only",
             Self::RightOnly => "right_only",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementSeedSide {
+    Left,
+    Right,
+}
+
+impl MeasurementSeedSide {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
         }
     }
 }
