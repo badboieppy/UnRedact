@@ -7,7 +7,7 @@ use unredact::types::guess_types::GuessConfig;
 use unredact::types::redaction_types::{RedactionKind, RedactionReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
-mod common;
+pub mod common;
 use common::{load_guess_report, test_output_dir};
 
 fn load_redaction_report(path: &Path) -> RedactionReport {

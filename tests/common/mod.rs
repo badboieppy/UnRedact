@@ -18,7 +18,6 @@ pub fn test_output_dir(tag: &str) -> PathBuf {
     ))
 }
 
-#[allow(dead_code)]
 pub fn load_guess_report(path: &Path) -> GuessReport {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("failed to read guesses {}: {error}", path.display()));
@@ -26,7 +25,6 @@ pub fn load_guess_report(path: &Path) -> GuessReport {
         .unwrap_or_else(|error| panic!("failed to parse guesses {}: {error}", path.display()))
 }
 
-#[allow(dead_code)]
 pub fn load_redaction_report(path: &Path) -> RedactionReport {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("failed to read redactions {}: {error}", path.display()));
@@ -34,7 +32,6 @@ pub fn load_redaction_report(path: &Path) -> RedactionReport {
         .unwrap_or_else(|error| panic!("failed to parse redactions {}: {error}", path.display()))
 }
 
-#[allow(dead_code)]
 pub fn load_visual_anchor_metrics_report(path: &Path) -> VisualAnchorMetricsReport {
     let bytes = std::fs::read(path).unwrap_or_else(|error| {
         panic!("failed to read visual metrics {}: {error}", path.display())
@@ -44,7 +41,6 @@ pub fn load_visual_anchor_metrics_report(path: &Path) -> VisualAnchorMetricsRepo
     })
 }
 
-#[allow(dead_code)]
 pub fn load_diagnostic_report(path: &Path) -> DiagnosticReport {
     let bytes = std::fs::read(path)
         .unwrap_or_else(|error| panic!("failed to read diagnostics {}: {error}", path.display()));

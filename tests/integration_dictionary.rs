@@ -7,7 +7,7 @@ use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfi
 use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
-mod common;
+pub mod common;
 use common::{load_guess_report, test_output_dir};
 
 const ALT_FORMAT_DICTIONARY_LINES: [&str; 10] = [

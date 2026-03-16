@@ -8,7 +8,7 @@ use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfi
 use unredact::types::guess_types::{GuessConfig, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
-mod common;
+pub mod common;
 use common::{load_guess_report, load_redaction_report, test_output_dir};
 
 fn normalize_guess_text_for_exact_match(value: &str) -> String {

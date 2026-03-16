@@ -11,7 +11,7 @@ use unredact::service::visual_anchor_metrics_cli_entry::{
 use unredact::types::guess_types::GuessConfig;
 use unredact::types::visualizer_config::VisualizerConfig;
 
-mod common;
+pub mod common;
 use common::{load_visual_anchor_metrics_report, test_output_dir};
 
 fn cfg() -> UnredactServiceConfig {

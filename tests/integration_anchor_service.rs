@@ -10,7 +10,7 @@ use unredact::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use unredact::types::guess_types::{AnchorDecisionRecord, AnchorType};
 use unredact::types::visualizer_config::VisualizerConfig;
 
-mod common;
+pub mod common;
 use common::{load_diagnostic_report, load_guess_report, load_redaction_report, test_output_dir};
 
 fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorDecisionRecord> {
