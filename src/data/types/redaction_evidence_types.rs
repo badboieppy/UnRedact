@@ -105,6 +105,14 @@ pub struct AnchorSide {
     pub text: String,
     pub bbox: Rect,
     pub text_edge_x_pt: f32,
+    #[serde(default)]
+    pub inner_left_edge_x_pt: f32,
+    #[serde(default)]
+    pub inner_right_edge_x_pt: f32,
+    #[serde(default)]
+    pub leading_whitespace_width_pt: f32,
+    #[serde(default)]
+    pub trailing_whitespace_width_pt: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

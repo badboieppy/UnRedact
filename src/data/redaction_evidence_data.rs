@@ -90,6 +90,60 @@ struct AnchorResolutionDecision<'a> {
     selection_reason: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoundaryGapSource {
+    ExplicitTrailingWhitespace,
+    ExplicitLeadingWhitespace,
+    None,
+}
+
+impl BoundaryGapSource {
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitTrailingWhitespace => "explicit_trailing_whitespace",
+            Self::ExplicitLeadingWhitespace => "explicit_leading_whitespace",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BoundaryGapDecision {
+    gap_pt: f32,
+    explicit_gap_pt: f32,
+    inferred_gap_pt: f32,
+    source: BoundaryGapSource,
+}
+
+#[derive(Clone, Copy)]
+struct BoundaryRunGeometry {
+    inner_left_edge_x_pt: f32,
+    inner_right_edge_x_pt: f32,
+    leading_whitespace_width_pt: f32,
+    trailing_whitespace_width_pt: f32,
+}
+
+#[derive(Clone, Copy)]
+struct AnchorGeometryComputation {
+    usable_left_edge_x_pt: Option<f32>,
+    usable_right_edge_x_pt: Option<f32>,
+    target_width_pt: f32,
+    left_boundary_gap: Option<BoundaryGapDecision>,
+    right_boundary_gap: Option<BoundaryGapDecision>,
+}
+
+struct AnchorGeometryDiagnosticsInput<'a> {
+    left_anchor: Option<&'a AnchorSide>,
+    right_anchor: Option<&'a AnchorSide>,
+    left_boundary_gap: Option<BoundaryGapDecision>,
+    right_boundary_gap: Option<BoundaryGapDecision>,
+    usable_left_edge_x_pt: Option<f32>,
+    usable_right_edge_x_pt: Option<f32>,
+    target_width_pt: f32,
+    redaction_width_pt: f32,
+}
+
 #[derive(Clone)]
 struct DiagnosticLocation {
     row_id: Option<String>,
@@ -313,16 +367,6 @@ fn validate_redaction(redaction: &RedactionOccurrence, page_box: Rect) -> Result
     Ok(())
 }
 
-#[cfg(test)]
-fn select_line_bucket<'a>(
-    redaction: &RedactionOccurrence,
-    line_buckets: Option<&'a [LineBucket<'a>]>,
-) -> Option<&'a LineBucket<'a>> {
-    ranked_line_bucket_candidates(redaction, line_buckets)
-        .first()
-        .map(|candidate| candidate.line_bucket)
-}
-
 fn vertical_overlap_pt(y0_a: f32, y1_a: f32, y0_b: f32, y1_b: f32) -> f32 {
     (y1_a.min(y1_b) - y0_a.max(y0_b)).max(0.0_f32)
 }
@@ -445,10 +489,6 @@ fn build_row(
     let measurement_model = measurement_seed_run
         .map(|seed_run| build_measurement_model(seed_run, font_truth))
         .unwrap_or_default();
-    let boundary_space = resolution
-        .measurement_seed_side
-        .map(|_| boundary_space_width_pt(&measurement_model))
-        .unwrap_or(0.0_f32);
     let left_anchor = resolution
         .left
         .as_ref()
@@ -457,12 +497,6 @@ fn build_row(
         .right
         .as_ref()
         .map(|candidate| candidate.anchor.clone());
-    let left_anchor_width_pt = left_anchor
-        .as_ref()
-        .map(|anchor| measure_text(&measurement_model, &anchor.text))
-        .transpose()
-        .ok()
-        .flatten();
     let geometry_line_bucket = resolution.selected_line_bucket.or_else(|| {
         line_bucket_candidates
             .first()
@@ -473,17 +507,32 @@ fn build_row(
             estimate_row_geometry(line_bucket, measurement_seed_run, &measurement_model)
         })
         .unwrap_or((0.0_f32, ROW_EPSILON_MIN_PT as f32));
-    let usable_left_edge_x_pt = left_anchor.as_ref().and_then(|anchor| {
-        left_anchor_width_pt
-            .map(|anchor_width| anchor.text_edge_x_pt + anchor_width + boundary_space)
-    });
-    let usable_right_edge_x_pt = right_anchor
-        .as_ref()
-        .map(|anchor| anchor.text_edge_x_pt - boundary_space);
-    let target_width_pt = match (usable_left_edge_x_pt, usable_right_edge_x_pt) {
-        (Some(left_edge), Some(right_edge)) if right_edge > left_edge => right_edge - left_edge,
-        _ => redaction.bbox.width().abs(),
-    };
+    let geometry = compute_anchor_geometry(
+        redaction.bbox,
+        left_anchor.as_ref(),
+        right_anchor.as_ref(),
+        &measurement_model,
+        line_bias_pt,
+    );
+    let usable_left_edge_x_pt = geometry.usable_left_edge_x_pt;
+    let usable_right_edge_x_pt = geometry.usable_right_edge_x_pt;
+    let target_width_pt = geometry.target_width_pt;
+    let mut diagnostics = diagnostics;
+    if collect_diagnostics {
+        diagnostics.extend(build_anchor_geometry_diagnostics(
+            location.clone(),
+            AnchorGeometryDiagnosticsInput {
+                left_anchor: left_anchor.as_ref(),
+                right_anchor: right_anchor.as_ref(),
+                left_boundary_gap: geometry.left_boundary_gap,
+                right_boundary_gap: geometry.right_boundary_gap,
+                usable_left_edge_x_pt,
+                usable_right_edge_x_pt,
+                target_width_pt,
+                redaction_width_pt: redaction.bbox.width().abs(),
+            },
+        ));
+    }
 
     RowBuildOutput {
         row: RedactionEvidenceRow {
@@ -542,15 +591,250 @@ fn build_row(
     }
 }
 
-#[cfg(test)]
-fn select_anchor_run<'a>(
-    redaction: &RedactionOccurrence,
-    line_runs: &[&'a PdfFontTextRun],
+fn compute_anchor_geometry(
+    redaction_bbox: Rect,
+    left_anchor: Option<&AnchorSide>,
+    right_anchor: Option<&AnchorSide>,
+    measurement_model: &CandidateWidthModel,
+    line_bias_pt: f32,
+) -> AnchorGeometryComputation {
+    let left_boundary_gap = left_anchor.map(|anchor| {
+        select_boundary_gap(
+            anchor.trailing_whitespace_width_pt,
+            true,
+            measurement_model,
+            line_bias_pt,
+        )
+    });
+    let right_boundary_gap = right_anchor.map(|anchor| {
+        select_boundary_gap(
+            anchor.leading_whitespace_width_pt,
+            false,
+            measurement_model,
+            line_bias_pt,
+        )
+    });
+    let usable_left_edge_x_pt = left_anchor
+        .zip(left_boundary_gap)
+        .map(|(anchor, gap)| anchor.inner_right_edge_x_pt + gap.gap_pt);
+    let usable_right_edge_x_pt = right_anchor
+        .zip(right_boundary_gap)
+        .map(|(anchor, gap)| anchor.inner_left_edge_x_pt - gap.gap_pt);
+    let target_width_pt = match (usable_left_edge_x_pt, usable_right_edge_x_pt) {
+        (Some(left_edge), Some(right_edge)) if right_edge > left_edge => right_edge - left_edge,
+        _ => redaction_bbox.width().abs(),
+    };
+    AnchorGeometryComputation {
+        usable_left_edge_x_pt,
+        usable_right_edge_x_pt,
+        target_width_pt,
+        left_boundary_gap,
+        right_boundary_gap,
+    }
+}
+
+fn select_boundary_gap(
+    explicit_gap_pt: f32,
     left_side: bool,
-) -> Option<&'a PdfFontTextRun> {
-    ranked_anchor_run_candidates(redaction, line_runs, left_side)
-        .first()
-        .map(|candidate| candidate.run)
+    _measurement_model: &CandidateWidthModel,
+    _line_bias_pt: f32,
+) -> BoundaryGapDecision {
+    let explicit_gap_pt = explicit_gap_pt.max(0.0_f32);
+    if explicit_gap_pt > f32::EPSILON {
+        return BoundaryGapDecision {
+            gap_pt: explicit_gap_pt,
+            explicit_gap_pt,
+            inferred_gap_pt: 0.0_f32,
+            source: if left_side {
+                BoundaryGapSource::ExplicitTrailingWhitespace
+            } else {
+                BoundaryGapSource::ExplicitLeadingWhitespace
+            },
+        };
+    }
+    BoundaryGapDecision {
+        gap_pt: 0.0_f32,
+        explicit_gap_pt: 0.0_f32,
+        inferred_gap_pt: 0.0_f32,
+        source: BoundaryGapSource::None,
+    }
+}
+
+fn build_anchor_geometry_diagnostics(
+    location: DiagnosticLocation,
+    input: AnchorGeometryDiagnosticsInput<'_>,
+) -> Vec<RedactionEvidenceDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(anchor) = input.left_anchor {
+        diagnostics.push(build_anchor_inner_edge_diagnostic(
+            location.clone(),
+            anchor,
+            "left",
+        ));
+    }
+    if let Some(anchor) = input.right_anchor {
+        diagnostics.push(build_anchor_inner_edge_diagnostic(
+            location.clone(),
+            anchor,
+            "right",
+        ));
+    }
+    if let Some(gap) = input.left_boundary_gap {
+        diagnostics.push(build_anchor_boundary_gap_diagnostic(
+            location.clone(),
+            "left",
+            gap,
+            input.left_anchor.map(|anchor| anchor.inner_right_edge_x_pt),
+            input.usable_left_edge_x_pt,
+        ));
+    }
+    if let Some(gap) = input.right_boundary_gap {
+        diagnostics.push(build_anchor_boundary_gap_diagnostic(
+            location.clone(),
+            "right",
+            gap,
+            input.right_anchor.map(|anchor| anchor.inner_left_edge_x_pt),
+            input.usable_right_edge_x_pt,
+        ));
+    }
+    let mut metrics = BTreeMap::new();
+    if let Some(usable_left_edge_x_pt) = input.usable_left_edge_x_pt {
+        metrics.insert(
+            "usable_left_edge_x_pt".to_owned(),
+            DiagnosticValue::Float(usable_left_edge_x_pt as f64),
+        );
+    }
+    if let Some(usable_right_edge_x_pt) = input.usable_right_edge_x_pt {
+        metrics.insert(
+            "usable_right_edge_x_pt".to_owned(),
+            DiagnosticValue::Float(usable_right_edge_x_pt as f64),
+        );
+    }
+    metrics.insert(
+        "target_width_pt".to_owned(),
+        DiagnosticValue::Float(input.target_width_pt as f64),
+    );
+    metrics.insert(
+        "redaction_width_pt".to_owned(),
+        DiagnosticValue::Float(input.redaction_width_pt as f64),
+    );
+    diagnostics.push(
+        if matches!(
+            (input.usable_left_edge_x_pt, input.usable_right_edge_x_pt),
+            (Some(left), Some(right)) if right > left
+        ) {
+            build_diagnostic(
+                location,
+                "redaction_evidence",
+                "anchor_target_width_computed",
+                "computed target width from anchor inner edges",
+                metrics,
+            )
+        } else {
+            build_diagnostic(
+                location,
+                "redaction_evidence",
+                "anchor_target_width_invalid",
+                "anchor span was incomplete or non-positive; fell back to redaction box width",
+                metrics,
+            )
+        },
+    );
+    diagnostics
+}
+
+fn build_anchor_inner_edge_diagnostic(
+    location: DiagnosticLocation,
+    anchor: &AnchorSide,
+    side: &str,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = BTreeMap::new();
+    metrics.insert("side".to_owned(), DiagnosticValue::Text(side.to_owned()));
+    metrics.insert(
+        "anchor_text".to_owned(),
+        DiagnosticValue::Text(anchor.text.clone()),
+    );
+    metrics.insert(
+        "span_x0".to_owned(),
+        DiagnosticValue::Float(anchor.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "span_x1".to_owned(),
+        DiagnosticValue::Float(anchor.bbox.x1 as f64),
+    );
+    metrics.insert(
+        "text_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(anchor.text_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "inner_left_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(anchor.inner_left_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "inner_right_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(anchor.inner_right_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "leading_whitespace_width_pt".to_owned(),
+        DiagnosticValue::Float(anchor.leading_whitespace_width_pt as f64),
+    );
+    metrics.insert(
+        "trailing_whitespace_width_pt".to_owned(),
+        DiagnosticValue::Float(anchor.trailing_whitespace_width_pt as f64),
+    );
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_inner_edges_selected",
+        "computed inner anchor edges from boundary-adjacent run geometry",
+        metrics,
+    )
+}
+
+fn build_anchor_boundary_gap_diagnostic(
+    location: DiagnosticLocation,
+    side: &str,
+    gap: BoundaryGapDecision,
+    anchor_inner_edge_x_pt: Option<f32>,
+    usable_edge_x_pt: Option<f32>,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = BTreeMap::new();
+    metrics.insert("side".to_owned(), DiagnosticValue::Text(side.to_owned()));
+    metrics.insert(
+        "boundary_gap_pt".to_owned(),
+        DiagnosticValue::Float(gap.gap_pt as f64),
+    );
+    metrics.insert(
+        "explicit_boundary_gap_pt".to_owned(),
+        DiagnosticValue::Float(gap.explicit_gap_pt as f64),
+    );
+    metrics.insert(
+        "inferred_boundary_gap_pt".to_owned(),
+        DiagnosticValue::Float(gap.inferred_gap_pt as f64),
+    );
+    metrics.insert(
+        "boundary_gap_source".to_owned(),
+        DiagnosticValue::Text(gap.source.as_str().to_owned()),
+    );
+    if let Some(anchor_inner_edge_x_pt) = anchor_inner_edge_x_pt {
+        metrics.insert(
+            "anchor_inner_edge_x_pt".to_owned(),
+            DiagnosticValue::Float(anchor_inner_edge_x_pt as f64),
+        );
+    }
+    if let Some(usable_edge_x_pt) = usable_edge_x_pt {
+        metrics.insert(
+            "usable_edge_x_pt".to_owned(),
+            DiagnosticValue::Float(usable_edge_x_pt as f64),
+        );
+    }
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_boundary_gap_selected",
+        "selected boundary gap between anchor inner edge and hidden text span",
+        metrics,
+    )
 }
 
 fn resolve_anchor_set_for_redaction<'a>(
@@ -1371,6 +1655,22 @@ fn anchor_span_metrics(
         DiagnosticValue::Float(candidate.anchor.text_edge_x_pt as f64),
     );
     metrics.insert(
+        "inner_left_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.inner_left_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "inner_right_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.inner_right_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "leading_whitespace_width_pt".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.leading_whitespace_width_pt as f64),
+    );
+    metrics.insert(
+        "trailing_whitespace_width_pt".to_owned(),
+        DiagnosticValue::Float(candidate.anchor.trailing_whitespace_width_pt as f64),
+    );
+    metrics.insert(
         "redaction_left_x_pt".to_owned(),
         DiagnosticValue::Float(redaction.bbox.x0 as f64),
     );
@@ -1538,6 +1838,7 @@ fn build_anchor_side(
     left_side: bool,
 ) -> AnchorSide {
     let (text, text_edge_x_pt, bbox) = enrich_anchor_text_and_edge(run, line_runs, left_side);
+    let boundary_geometry = boundary_run_geometry(run);
     AnchorSide {
         anchor_id: if left_side {
             format!("{row_id}_left")
@@ -1547,6 +1848,10 @@ fn build_anchor_side(
         text,
         bbox,
         text_edge_x_pt,
+        inner_left_edge_x_pt: boundary_geometry.inner_left_edge_x_pt,
+        inner_right_edge_x_pt: boundary_geometry.inner_right_edge_x_pt,
+        leading_whitespace_width_pt: boundary_geometry.leading_whitespace_width_pt,
+        trailing_whitespace_width_pt: boundary_geometry.trailing_whitespace_width_pt,
     }
 }
 
@@ -1619,6 +1924,77 @@ fn runs_are_neighbors(left: &PdfFontTextRun, right: &PdfFontTextRun) -> bool {
         && (left.bbox.y1 - right.bbox.y1).abs() <= SAME_LINE_BASELINE_TOLERANCE_PT
         && (right.bbox.x0 - left.bbox.x1) >= -0.5_f32
         && (right.bbox.x0 - left.bbox.x1) <= 18.0_f32
+}
+
+fn boundary_run_geometry(run: &PdfFontTextRun) -> BoundaryRunGeometry {
+    let run_left_x_pt = run.bbox.x0.min(run.bbox.x1);
+    let run_right_x_pt = run.bbox.x0.max(run.bbox.x1);
+    let chars = run.text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return BoundaryRunGeometry {
+            inner_left_edge_x_pt: run_left_x_pt,
+            inner_right_edge_x_pt: run_right_x_pt,
+            leading_whitespace_width_pt: 0.0_f32,
+            trailing_whitespace_width_pt: 0.0_f32,
+        };
+    }
+    let advances =
+        normalized_run_char_advances_pt(run, chars.len(), run_right_x_pt - run_left_x_pt);
+    let leading_whitespace_width_pt = chars
+        .iter()
+        .zip(advances.iter())
+        .take_while(|(ch, _)| ch.is_whitespace())
+        .map(|(_, advance)| *advance)
+        .sum::<f32>()
+        .max(0.0_f32);
+    let trailing_whitespace_width_pt = chars
+        .iter()
+        .rev()
+        .zip(advances.iter().rev())
+        .take_while(|(ch, _)| ch.is_whitespace())
+        .map(|(_, advance)| *advance)
+        .sum::<f32>()
+        .max(0.0_f32);
+    let mut inner_left_edge_x_pt = run_left_x_pt + leading_whitespace_width_pt;
+    let mut inner_right_edge_x_pt = run_right_x_pt - trailing_whitespace_width_pt;
+    if inner_right_edge_x_pt < inner_left_edge_x_pt {
+        inner_left_edge_x_pt = run_left_x_pt;
+        inner_right_edge_x_pt = run_right_x_pt;
+    }
+    BoundaryRunGeometry {
+        inner_left_edge_x_pt,
+        inner_right_edge_x_pt,
+        leading_whitespace_width_pt,
+        trailing_whitespace_width_pt,
+    }
+}
+
+fn normalized_run_char_advances_pt(
+    run: &PdfFontTextRun,
+    char_count: usize,
+    width_pt: f32,
+) -> Vec<f32> {
+    if char_count == 0 {
+        return Vec::new();
+    }
+    let width_pt = width_pt.max(0.0_f32);
+    if run.char_advances_pt.len() != char_count
+        || run
+            .char_advances_pt
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0_f32)
+    {
+        return vec![width_pt / char_count as f32; char_count];
+    }
+    let sum = run.char_advances_pt.iter().sum::<f32>();
+    if !sum.is_finite() || sum <= 0.0_f32 || !width_pt.is_finite() {
+        return vec![width_pt / char_count as f32; char_count];
+    }
+    let factor = width_pt / sum;
+    run.char_advances_pt
+        .iter()
+        .map(|value| value * factor)
+        .collect::<Vec<_>>()
 }
 
 fn build_measurement_model(
@@ -2034,117 +2410,4 @@ fn build_backend_diagnostics(row: &RedactionEvidenceRow) -> Vec<RedactionEvidenc
     ));
 
     diagnostics
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{runs_are_neighbors, select_anchor_run, select_line_bucket, LineBucket};
-    use crate::dependency::pdf_font_run_types::{PdfFontTextRun, PdfWidthMetrics};
-    use crate::types::file_types::{FontTextRun, Rect};
-    use crate::types::redaction_types::{RedactionKind, RedactionOccurrence};
-    use std::collections::BTreeMap;
-
-    fn sample_run(y1: f32) -> PdfFontTextRun {
-        sample_run_with_metrics(y1, 0, 0.0_f32, 0.0_f32)
-    }
-
-    fn sample_run_with_metrics(
-        y1: f32,
-        render_mode: u8,
-        char_spacing_pt: f32,
-        word_spacing_pt: f32,
-    ) -> PdfFontTextRun {
-        PdfFontTextRun {
-            run: FontTextRun {
-                page_index: 0,
-                text: "anchor".to_owned(),
-                bbox: Rect::new(10.0, y1 - 10.0, 20.0, y1),
-                font_key: "F1".to_owned(),
-                font_name: "Times-Roman".to_owned(),
-                font_size_pt: 12.0,
-                h_scale_pct: 100.0,
-                measured_width_pt: None,
-                measured_width_px: None,
-                measured_dpi: None,
-                char_advances_pt: vec![2.0; 6],
-                char_advances_px: Vec::new(),
-            },
-            width_metrics: PdfWidthMetrics {
-                render_mode,
-                char_spacing_pt,
-                word_spacing_pt,
-                ..PdfWidthMetrics::default()
-            },
-        }
-    }
-
-    fn sample_redaction(y1: f32) -> RedactionOccurrence {
-        RedactionOccurrence {
-            page_index: 0,
-            bbox: crate::types::redaction_types::Rect::new(30.0, y1 - 10.0, 40.0, y1),
-            kind: RedactionKind::DrawnRect,
-            score: 1.0,
-            meta: BTreeMap::new(),
-            underlying_text: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn select_line_bucket_requires_overlap_or_baseline_proximity() {
-        let run = sample_run(100.0);
-        let lines = vec![LineBucket {
-            line_id: "page0_line000".to_owned(),
-            baseline_y1: 100.0,
-            y0: 90.0,
-            y1: 100.0,
-            runs: vec![&run],
-        }];
-        assert!(select_line_bucket(&sample_redaction(114.0), Some(lines.as_slice())).is_none());
-    }
-
-    #[test]
-    fn select_line_bucket_prefers_overlap_before_baseline_delta() {
-        let overlap_run = sample_run(108.0);
-        let baseline_run = sample_run(105.0);
-        let lines = vec![
-            LineBucket {
-                line_id: "page0_line000".to_owned(),
-                baseline_y1: baseline_run.bbox.y1,
-                y0: 105.0,
-                y1: 106.0,
-                runs: vec![&baseline_run],
-            },
-            LineBucket {
-                line_id: "page0_line001".to_owned(),
-                baseline_y1: overlap_run.bbox.y1,
-                y0: overlap_run.bbox.y0,
-                y1: overlap_run.bbox.y1,
-                runs: vec![&overlap_run],
-            },
-        ];
-        let selected = select_line_bucket(&sample_redaction(104.0), Some(lines.as_slice()))
-            .expect("expected admissible line");
-        assert_eq!(selected.line_id, "page0_line001");
-    }
-
-    #[test]
-    fn runs_are_neighbors_rejects_different_spacing_profiles() {
-        let left = sample_run_with_metrics(100.0, 0, 0.0_f32, 0.0_f32);
-        let mut right = sample_run_with_metrics(100.0, 0, 0.5_f32, 0.0_f32);
-        right.run.bbox = Rect::new(20.5, 90.0, 30.0, 100.0);
-        assert!(!runs_are_neighbors(&left, &right));
-    }
-
-    #[test]
-    fn select_anchor_run_prefers_visible_text_over_invisible_text() {
-        let redaction = sample_redaction(100.0);
-        let invisible = sample_run_with_metrics(100.0, 3, 0.0_f32, 0.0_f32);
-        let mut visible = sample_run_with_metrics(100.0, 0, 0.0_f32, 0.0_f32);
-        visible.run.bbox = Rect::new(9.0, 90.0, 19.0, 100.0);
-        let line_runs = vec![&invisible, &visible];
-
-        let selected =
-            select_anchor_run(&redaction, &line_runs, true).expect("expected a left-side anchor");
-        assert_eq!(selected.width_metrics.render_mode, 0);
-    }
 }

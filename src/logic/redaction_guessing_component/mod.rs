@@ -7,6 +7,9 @@ use crate::data::redactions_data::RedactionsData;
 use crate::logic::types::{
     BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
 };
+use crate::logic::visual_anchor_metrics_component::{
+    run_visual_anchor_metrics, RunVisualAnchorMetricsRequest,
+};
 use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessReport, StageTimingRecord};
@@ -111,7 +114,22 @@ pub fn run_redaction_guessing_component(
     );
 
     let visualization_stage =
-        build_visualization_payload_stage(pdf_bytes, &cfg, &font_runs_stage.font_runs)?;
+        build_visualization_payload_stage(&pdf_bytes, &cfg, &font_runs_stage.font_runs)?;
+
+    let visual_anchor_metrics_stage = if execution.collect_diagnostics {
+        let visual_metrics = run_visual_anchor_metrics(RunVisualAnchorMetricsRequest {
+            pdf_name: &input_name,
+            pdf_bytes: &pdf_bytes,
+            guesses: &guess_stage.guesses,
+            collect_diagnostics: execution.collect_diagnostics,
+        })?;
+        if let Some(items) = guess_stage.diagnostics.as_mut() {
+            items.extend(visual_metrics.diagnostics.clone());
+        }
+        Some(visual_metrics)
+    } else {
+        None
+    };
 
     push_stage_timing(
         &mut guess_stage.guesses,
@@ -119,12 +137,17 @@ pub fn run_redaction_guessing_component(
         "orchestrator_total",
         component_started.elapsed().as_millis(),
     );
+    sort_diagnostics(&mut guess_stage.diagnostics);
 
     Ok(BytesPipelineOutputs {
         redactions: redaction_stage.redactions,
         fonts: font_stage.fonts,
         guesses: guess_stage.guesses,
         diagnostics: guess_stage.diagnostics,
+        visual_anchor_metrics: visual_anchor_metrics_stage
+            .as_ref()
+            .map(|value| value.report.clone()),
+        visual_anchor_crops: visual_anchor_metrics_stage.map(|value| value.crops),
         visualization_payload: visualization_stage.payload,
         visualized_pdf_bytes: None,
     })
@@ -206,7 +229,7 @@ fn run_guess_stage(inputs: RunGuessStageInputs<'_>) -> Result<GuessStageOutput, 
 }
 
 fn build_visualization_payload_stage(
-    pdf_bytes: Vec<u8>,
+    pdf_bytes: &[u8],
     cfg: &PipelineConfig,
     font_runs: &FontRunReport,
 ) -> Result<VisualizationPayloadStageOutput, String> {
@@ -215,7 +238,7 @@ fn build_visualization_payload_stage(
     }
     Ok(VisualizationPayloadStageOutput {
         payload: Some(VisualizationPayload {
-            pdf_bytes,
+            pdf_bytes: pdf_bytes.to_vec(),
             font_runs: font_runs.clone(),
         }),
     })
@@ -245,5 +268,18 @@ fn push_stage_timing(
         .push(stage_timing_record(stage, elapsed_ms));
     if let Some(items) = diagnostics.as_mut() {
         items.push(stage_timing_diagnostic(stage, elapsed_ms));
+    }
+}
+
+fn sort_diagnostics(diagnostics: &mut Option<Vec<DiagnosticRecord>>) {
+    if let Some(items) = diagnostics.as_mut() {
+        items.sort_by(|left, right| {
+            left.page_index
+                .cmp(&right.page_index)
+                .then_with(|| left.row_id.cmp(&right.row_id))
+                .then_with(|| left.stage.cmp(&right.stage))
+                .then_with(|| left.code.cmp(&right.code))
+                .then_with(|| left.layer.cmp(&right.layer))
+        });
     }
 }

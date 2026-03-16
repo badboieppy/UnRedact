@@ -270,6 +270,7 @@ fn build_placeholder_guess(redaction: &RedactionOccurrence) -> RedactionGuess {
 fn build_anchor_record_from_row(row: &GuessCandidateRow) -> AnchorDecisionRecord {
     build_anchor_record(AnchorRecordInput {
         anchor_row_id: &row.row_id,
+        redaction_id: Some(row.redaction.redaction_id.as_str()),
         page_index: row.page_index,
         bbox: row.redaction.bbox,
         anchor_mode: &row.anchor_set.mode,
@@ -302,6 +303,7 @@ fn build_anchor_record_from_row(row: &GuessCandidateRow) -> AnchorDecisionRecord
 fn build_anchor_record_from_evidence(row: &RedactionEvidenceRow) -> AnchorDecisionRecord {
     build_anchor_record(AnchorRecordInput {
         anchor_row_id: &row.row_id,
+        redaction_id: Some(row.redaction.redaction_id.as_str()),
         page_index: row.page_index,
         bbox: row.redaction.bbox,
         anchor_mode: &row.anchor_set.mode,
@@ -332,6 +334,7 @@ fn build_anchor_record_from_evidence(row: &RedactionEvidenceRow) -> AnchorDecisi
 
 struct AnchorRecordInput<'a> {
     anchor_row_id: &'a str,
+    redaction_id: Option<&'a str>,
     page_index: u32,
     bbox: crate::types::redaction_types::Rect,
     anchor_mode: &'a EvidenceAnchorMode,
@@ -359,6 +362,7 @@ struct AnchorRecordInput<'a> {
 fn build_anchor_record(input: AnchorRecordInput<'_>) -> AnchorDecisionRecord {
     AnchorDecisionRecord {
         anchor_row_id: input.anchor_row_id.to_owned(),
+        redaction_id: input.redaction_id.map(str::to_owned),
         page_index: input.page_index,
         bbox: input.bbox,
         anchor_mode: input.anchor_mode.as_str().to_owned(),
@@ -404,6 +408,7 @@ fn build_placeholder_anchor_record(
 ) -> AnchorDecisionRecord {
     AnchorDecisionRecord {
         anchor_row_id: format!("page{}_row{index}", redaction.page_index),
+        redaction_id: Some(format!("page{}_redaction{index:03}", redaction.page_index)),
         page_index: redaction.page_index,
         bbox: redaction.bbox,
         anchor_mode: "unresolved".to_owned(),

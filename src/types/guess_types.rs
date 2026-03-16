@@ -114,6 +114,8 @@ pub struct AnchorSideDecision {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnchorDecisionRecord {
     pub anchor_row_id: String,
+    #[serde(default)]
+    pub redaction_id: Option<String>,
     pub page_index: u32,
     pub bbox: Rect,
     pub anchor_mode: String,

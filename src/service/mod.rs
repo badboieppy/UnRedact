@@ -4,3 +4,5 @@ pub mod tooling_entry;
 pub mod unredact_cli_entry;
 #[cfg(feature = "web-entry")]
 pub mod unredact_web_entry;
+#[cfg(feature = "cli-entry")]
+pub mod visual_anchor_metrics_cli_entry;

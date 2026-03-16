@@ -3,12 +3,15 @@
 use std::path::Path;
 
 use unredact::service::tooling_entry::{run_anchor_from_redactions, ToolingAnchorRequest};
-use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
+use unredact::service::unredact_cli_entry::{
+    run_from_paths, run_from_paths_with_diagnostics, UnredactServiceConfig,
+};
+use unredact::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use unredact::types::guess_types::{AnchorDecisionRecord, AnchorType};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 mod common;
-use common::{load_guess_report, load_redaction_report, test_output_dir};
+use common::{load_diagnostic_report, load_guess_report, load_redaction_report, test_output_dir};
 
 fn selected_candidate(decision: &AnchorDecisionRecord) -> Option<&AnchorDecisionRecord> {
     if decision.left.is_some() || decision.right.is_some() {
@@ -63,6 +66,36 @@ fn assert_anchor_contract(
         expected_right_text,
         "unexpected right anchor text for {row_id}"
     );
+}
+
+fn diagnostic_float(record: &DiagnosticRecord, key: &str) -> f64 {
+    match record.metrics.get(key) {
+        Some(DiagnosticValue::Float(value)) => *value,
+        other => panic!("expected float metric `{key}`, got {other:?}"),
+    }
+}
+
+fn diagnostic_text<'a>(record: &'a DiagnosticRecord, key: &str) -> &'a str {
+    match record.metrics.get(key) {
+        Some(DiagnosticValue::Text(value)) => value.as_str(),
+        other => panic!("expected text metric `{key}`, got {other:?}"),
+    }
+}
+
+fn diagnostic_by_row_code_side<'a>(
+    items: &'a [DiagnosticRecord],
+    row_id: &str,
+    code: &str,
+    side: &str,
+) -> &'a DiagnosticRecord {
+    items
+        .iter()
+        .find(|item| {
+            item.row_id.as_deref() == Some(row_id)
+                && item.code == code
+                && item.metrics.get("side") == Some(&DiagnosticValue::Text(side.to_owned()))
+        })
+        .unwrap_or_else(|| panic!("missing diagnostic code={code} row_id={row_id} side={side}"))
 }
 
 #[test]
@@ -244,4 +277,129 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
         "two_sided",
         "wrote:",
     );
+}
+
+#[test]
+fn geometry_diagnostics_record_inner_edges_and_explicit_boundary_whitespace() {
+    let input = Path::new("test_data/EFTA00101126.pdf");
+    let output_dir = test_output_dir("integration_anchor_geometry_diagnostics");
+    std::fs::create_dir_all(&output_dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+    let outputs = run_from_paths_with_diagnostics(
+        input,
+        &output_dir,
+        None,
+        UnredactServiceConfig {
+            include_details: false,
+            enable_image_analysis: true,
+            guess: unredact::types::guess_types::GuessConfig::default(),
+            visualize: false,
+            visualizer: VisualizerConfig::default(),
+        },
+        true,
+    )
+    .expect("diagnostics-enabled run should succeed");
+    let diagnostics = load_diagnostic_report(
+        outputs
+            .diagnostics_path
+            .as_ref()
+            .expect("diagnostics path should be present"),
+    );
+    let inner_edges = diagnostic_by_row_code_side(
+        diagnostics.items.as_slice(),
+        "page7_row1",
+        "anchor_inner_edges_selected",
+        "left",
+    );
+    let trailing_whitespace_width_pt =
+        diagnostic_float(inner_edges, "trailing_whitespace_width_pt");
+    let span_x1 = diagnostic_float(inner_edges, "span_x1");
+    let inner_right_edge_x_pt = diagnostic_float(inner_edges, "inner_right_edge_x_pt");
+    assert!(
+        trailing_whitespace_width_pt > 0.0_f64,
+        "expected explicit trailing whitespace on the left anchor"
+    );
+    assert!(
+        inner_right_edge_x_pt < span_x1,
+        "expected inner right edge to exclude trailing whitespace"
+    );
+
+    let boundary_gap = diagnostic_by_row_code_side(
+        diagnostics.items.as_slice(),
+        "page7_row1",
+        "anchor_boundary_gap_selected",
+        "left",
+    );
+    assert_eq!(
+        diagnostic_text(boundary_gap, "boundary_gap_source"),
+        "explicit_trailing_whitespace"
+    );
+    assert_eq!(
+        diagnostic_float(boundary_gap, "inferred_boundary_gap_pt"),
+        0.0_f64
+    );
+    assert!(
+        (diagnostic_float(boundary_gap, "explicit_boundary_gap_pt") - trailing_whitespace_width_pt)
+            .abs()
+            <= 0.001_f64,
+        "expected the selected boundary gap to match the explicit trailing whitespace width"
+    );
+
+    let target_width = diagnostics
+        .items
+        .iter()
+        .find(|item| {
+            item.row_id.as_deref() == Some("page7_row1")
+                && item.code == "anchor_target_width_computed"
+        })
+        .expect("missing target width diagnostic for page7_row1");
+    let usable_left = diagnostic_float(target_width, "usable_left_edge_x_pt");
+    let usable_right = diagnostic_float(target_width, "usable_right_edge_x_pt");
+    let target_width_pt = diagnostic_float(target_width, "target_width_pt");
+    assert!(
+        (target_width_pt - (usable_right - usable_left)).abs() <= 0.001_f64,
+        "expected target width to be derived directly from usable inner edges"
+    );
+}
+
+#[test]
+fn one_sided_rows_keep_redaction_width_as_public_fallback() {
+    let input = Path::new("test_data/EFTA00038617.pdf");
+    let output_dir = test_output_dir("integration_anchor_one_sided_width_fallback");
+    std::fs::create_dir_all(&output_dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+    let outputs = run_from_paths(
+        input,
+        &output_dir,
+        None,
+        UnredactServiceConfig {
+            include_details: false,
+            enable_image_analysis: true,
+            guess: unredact::types::guess_types::GuessConfig::default(),
+            visualize: false,
+            visualizer: VisualizerConfig::default(),
+        },
+    )
+    .expect("pipeline run should succeed");
+    let report = load_guess_report(&outputs.guesses_path);
+    let one_sided = report
+        .anchors
+        .iter()
+        .filter(|decision| decision.anchor_mode != "two_sided")
+        .collect::<Vec<_>>();
+    assert!(
+        !one_sided.is_empty(),
+        "expected one-sided rows in EFTA00038617"
+    );
+    for decision in one_sided {
+        assert!(
+            decision.usable_left_edge_x_pt.is_none() || decision.usable_right_edge_x_pt.is_none(),
+            "one-sided rows should not publish both usable edges"
+        );
+        assert!(
+            (decision.target_width_pt - decision.bbox.width().abs()).abs() <= 0.001_f32,
+            "expected one-sided target width to fall back to the redaction width for {}",
+            decision.anchor_row_id
+        );
+    }
 }

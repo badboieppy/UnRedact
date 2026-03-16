@@ -7,6 +7,7 @@ use crate::types::redaction_types::RedactionReport;
 use crate::types::runtime_defaults::{
     DEFAULT_ENABLE_IMAGE_ANALYSIS, DEFAULT_INCLUDE_DETAILS, DEFAULT_VISUALIZE_OUTPUT,
 };
+use crate::types::visual_anchor_metric_types::VisualAnchorMetricsReport;
 use crate::types::visualizer_config::VisualizerConfig;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,11 +54,19 @@ pub struct VisualizationPayload {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct NamedBinaryArtifact {
+    pub file_name: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BytesPipelineOutputs {
     pub redactions: RedactionReport,
     pub fonts: FontDetectionReport,
     pub guesses: GuessReport,
     pub diagnostics: Option<Vec<DiagnosticRecord>>,
+    pub visual_anchor_metrics: Option<VisualAnchorMetricsReport>,
+    pub visual_anchor_crops: Option<Vec<NamedBinaryArtifact>>,
     pub visualization_payload: Option<VisualizationPayload>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
@@ -69,6 +78,8 @@ pub struct EncodedPipelineOutputs {
     pub guesses_json: Vec<u8>,
     pub anchors_json: Vec<u8>,
     pub diagnostics_json: Option<Vec<u8>>,
+    pub visual_anchor_metrics_json: Option<Vec<u8>>,
+    pub visual_anchor_crops: Option<Vec<NamedBinaryArtifact>>,
     pub visualized_pdf_bytes: Option<Vec<u8>>,
 }
 
@@ -103,12 +114,22 @@ pub fn encode_outputs(outputs: &BytesPipelineOutputs) -> Result<EncodedPipelineO
             .map_err(|error| format!("failed to encode diagnostics json: {error}"))
         })
         .transpose()?;
+    let visual_anchor_metrics_json = outputs
+        .visual_anchor_metrics
+        .as_ref()
+        .map(|report| {
+            serde_json::to_vec_pretty(report)
+                .map_err(|error| format!("failed to encode visual anchor metrics json: {error}"))
+        })
+        .transpose()?;
     Ok(EncodedPipelineOutputs {
         redactions_json,
         fonts_json,
         guesses_json,
         anchors_json,
         diagnostics_json,
+        visual_anchor_metrics_json,
+        visual_anchor_crops: outputs.visual_anchor_crops.clone(),
         visualized_pdf_bytes: outputs.visualized_pdf_bytes.clone(),
     })
 }

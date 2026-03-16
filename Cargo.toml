@@ -96,3 +96,8 @@ required-features = ["cli-entry"]
 name = "pdf_metric_extractor"
 path = "src/bin/pdf_metric_extractor.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "visual_anchor_metric_extractor"
+path = "src/bin/visual_anchor_metric_extractor.rs"
+required-features = ["cli-entry"]

@@ -1692,6 +1692,7 @@ mod tests {
             }],
             anchors: vec![AnchorDecisionRecord {
                 anchor_row_id: "page0_row0".to_owned(),
+                redaction_id: Some("page0_redaction000".to_owned()),
                 page_index: 0_u32,
                 bbox,
                 anchor_mode: "two_sided".to_owned(),
@@ -1765,6 +1766,7 @@ mod tests {
 
         let second_anchor = AnchorDecisionRecord {
             anchor_row_id: "page0_row1".to_owned(),
+            redaction_id: Some("page0_redaction001".to_owned()),
             page_index: 0_u32,
             bbox: second.bbox,
             anchor_mode: "two_sided".to_owned(),

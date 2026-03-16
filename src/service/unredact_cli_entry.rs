@@ -29,6 +29,8 @@ pub struct UnredactServiceOutputs {
     pub guesses_path: PathBuf,
     pub anchors_path: PathBuf,
     pub diagnostics_path: Option<PathBuf>,
+    pub visual_anchor_metrics_path: Option<PathBuf>,
+    pub visual_anchor_crops_dir: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -56,6 +58,8 @@ pub struct UnredactBatchFileResult {
     pub guesses_path: Option<PathBuf>,
     pub anchors_path: Option<PathBuf>,
     pub diagnostics_path: Option<PathBuf>,
+    pub visual_anchor_metrics_path: Option<PathBuf>,
+    pub visual_anchor_crops_dir: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
     pub error: Option<String>,
     pub elapsed_ms: u128,
@@ -164,6 +168,8 @@ pub fn run(req: UnredactServiceRequest) -> Result<UnredactServiceOutputs, String
         guesses_path: output_paths.guesses_path,
         anchors_path: output_paths.anchors_path,
         diagnostics_path: output_paths.diagnostics_path,
+        visual_anchor_metrics_path: output_paths.visual_anchor_metrics_path,
+        visual_anchor_crops_dir: output_paths.visual_anchor_crops_dir,
         visualized_pdf_path: output_paths.visualized_pdf_path,
     })
 }
@@ -259,6 +265,8 @@ fn run_batch_item(
                 guesses_path: None,
                 anchors_path: None,
                 diagnostics_path: None,
+                visual_anchor_metrics_path: None,
+                visual_anchor_crops_dir: None,
                 visualized_pdf_path: None,
                 error: Some(error),
                 elapsed_ms: started.elapsed().as_millis(),
@@ -282,6 +290,8 @@ fn run_batch_item(
             guesses_path: Some(outputs.guesses_path),
             anchors_path: Some(outputs.anchors_path),
             diagnostics_path: outputs.diagnostics_path,
+            visual_anchor_metrics_path: outputs.visual_anchor_metrics_path,
+            visual_anchor_crops_dir: outputs.visual_anchor_crops_dir,
             visualized_pdf_path: outputs.visualized_pdf_path,
             error: None,
             elapsed_ms: started.elapsed().as_millis(),
@@ -294,6 +304,8 @@ fn run_batch_item(
             guesses_path: None,
             anchors_path: None,
             diagnostics_path: None,
+            visual_anchor_metrics_path: None,
+            visual_anchor_crops_dir: None,
             visualized_pdf_path: None,
             error: Some(format!("{}: {error}", input.display())),
             elapsed_ms: started.elapsed().as_millis(),
@@ -323,6 +335,14 @@ fn append_visualize_timing(
             crate::types::diagnostic_types::DiagnosticValue::Integer(visualize_ms as i64),
         );
         diagnostics.push(record);
+        diagnostics.sort_by(|left, right| {
+            left.page_index
+                .cmp(&right.page_index)
+                .then_with(|| left.row_id.cmp(&right.row_id))
+                .then_with(|| left.stage.cmp(&right.stage))
+                .then_with(|| left.code.cmp(&right.code))
+                .then_with(|| left.layer.cmp(&right.layer))
+        });
     }
 }
 
@@ -447,6 +467,10 @@ mod tests {
             outputs.diagnostics_path.is_none(),
             "default service run should not write diagnostics"
         );
+        assert!(
+            outputs.visual_anchor_metrics_path.is_none(),
+            "default service run should not write visual metrics"
+        );
     }
 
     #[test]
@@ -470,10 +494,28 @@ mod tests {
             .diagnostics_path
             .as_ref()
             .expect("diagnostics path should be present when explicitly enabled");
+        let visual_anchor_metrics_path = outputs
+            .visual_anchor_metrics_path
+            .as_ref()
+            .expect("visual metrics path should be present when diagnostics are enabled");
+        let visual_anchor_crops_dir = outputs
+            .visual_anchor_crops_dir
+            .as_ref()
+            .expect("visual crop dir should be present when diagnostics are enabled");
         assert!(
             diagnostics_path.exists(),
             "expected diagnostics file {}",
             diagnostics_path.display()
+        );
+        assert!(
+            visual_anchor_metrics_path.exists(),
+            "expected visual metrics file {}",
+            visual_anchor_metrics_path.display()
+        );
+        assert!(
+            visual_anchor_crops_dir.exists(),
+            "expected visual crop dir {}",
+            visual_anchor_crops_dir.display()
         );
         let bytes = std::fs::read(diagnostics_path).unwrap_or_else(|error| {
             panic!(
@@ -495,5 +537,14 @@ mod tests {
             report.items.iter().any(|item| item.code == "timing_ms"),
             "expected diagnostics to include timing records"
         );
+        let crop_count = std::fs::read_dir(visual_anchor_crops_dir)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to read {}: {error}",
+                    visual_anchor_crops_dir.display()
+                )
+            })
+            .count();
+        assert!(crop_count > 0, "expected visual crop files");
     }
 }

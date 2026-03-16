@@ -6,4 +6,5 @@ pub mod runtime_defaults;
 pub mod text_overlay;
 pub mod time;
 pub mod typography_shaping;
+pub mod visual_anchor_metric_types;
 pub mod visualizer_config;
