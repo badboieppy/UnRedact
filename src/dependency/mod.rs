@@ -8,4 +8,5 @@ pub(crate) mod pdf_font_run_accessor;
 pub(crate) mod pdf_font_run_types;
 pub(crate) mod pdf_font_truth_accessor;
 pub(crate) mod pdf_redaction;
+#[cfg(feature = "cli-entry")]
 pub(crate) mod visual_anchor_metrics_accessor;

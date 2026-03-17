@@ -4,7 +4,9 @@ pub(crate) mod redaction_guessing_component;
 #[cfg(feature = "cli-entry")]
 pub(crate) mod tooling_component;
 pub(crate) mod types;
+#[cfg(feature = "cli-entry")]
 pub(crate) mod visual_anchor_metrics_component;
+#[cfg(feature = "cli-entry")]
 pub(crate) mod visual_anchor_research_component;
 pub(crate) mod visualization_component;
 

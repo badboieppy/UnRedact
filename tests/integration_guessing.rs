@@ -619,7 +619,7 @@ fn efta00101126_last_two_redactions_do_not_use_cross_line_to_anchor() {
             .as_ref()
             .map(|side| side.text.trim())
             .unwrap_or_default(),
-        "identity"
+        "and"
     );
     assert_eq!(
         last_anchor
@@ -681,7 +681,7 @@ fn efta00101126_visualization_does_not_render_cross_line_to_anchor_context() {
             .as_ref()
             .map(|side| side.text.trim())
             .unwrap_or_default(),
-        "identity"
+        "and"
     );
     assert_eq!(
         last_anchor

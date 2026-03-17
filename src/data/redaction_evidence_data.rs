@@ -24,14 +24,7 @@ const MAX_PAGE_COVERAGE_RATIO: f32 = 0.90_f32;
 const SAME_LINE_BASELINE_TOLERANCE_PT: f32 = 3.0_f32;
 const ROW_EPSILON_MIN_PT: f64 = 3.5_f64;
 const ROW_EPSILON_MAX_PT: f64 = 8.0_f64;
-const ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT: f32 = 1.0_f32;
 const ANCHOR_BOUNDARY_SMALL_OVERLAP_PT: f32 = 5.0_f32;
-const ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT: f32 = 10.0_f32;
-const ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT: usize = 2;
-const ANCHOR_PAIR_BOX_SUSPECT_ABS_DELTA_PT: f32 = 10.0_f32;
-const ANCHOR_PAIR_BOX_SUSPECT_RATIO: f32 = 0.15_f32;
-const ANCHOR_PAIR_BOX_OVERRIDE_MIN_IMPROVEMENT_PT: f32 = 8.0_f32;
-const ANCHOR_PAIR_BOX_OVERRIDE_RATIO: f32 = 0.50_f32;
 
 #[derive(Clone)]
 struct LineBucket<'a> {
@@ -179,11 +172,8 @@ struct AnchorSpanBuildRequest<'a, 'b> {
 struct BucketCandidateSummary {
     left_run_candidate_count: usize,
     right_run_candidate_count: usize,
-    left_run_candidate_count_expanded: usize,
-    right_run_candidate_count_expanded: usize,
     left_span_candidate_count: usize,
     right_span_candidate_count: usize,
-    starvation_expansion_applied: bool,
 }
 
 struct AnchorRunMetricsInput<'a> {
@@ -200,7 +190,6 @@ struct AnchorRunMetricsInput<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum AnchorRunRelation {
     FullyOutside,
-    TouchingBoundary,
     SmallOverlap,
     DeepOverlap,
     OppositeSide,
@@ -211,7 +200,6 @@ impl AnchorRunRelation {
     fn as_str(self) -> &'static str {
         match self {
             Self::FullyOutside => "fully_outside",
-            Self::TouchingBoundary => "touching_boundary",
             Self::SmallOverlap => "small_overlap",
             Self::DeepOverlap => "deep_overlap",
             Self::OppositeSide => "opposite_side",
@@ -222,19 +210,15 @@ impl AnchorRunRelation {
     fn sort_rank(self) -> i32 {
         match self {
             Self::FullyOutside => 0,
-            Self::TouchingBoundary => 1,
-            Self::SmallOverlap => 2,
-            Self::DeepOverlap => 3,
-            Self::OppositeSide => 4,
+            Self::SmallOverlap => 1,
+            Self::DeepOverlap => 2,
+            Self::OppositeSide => 3,
         }
     }
 
     #[inline]
     fn is_allowed(self) -> bool {
-        matches!(
-            self,
-            Self::FullyOutside | Self::TouchingBoundary | Self::SmallOverlap
-        )
+        matches!(self, Self::FullyOutside | Self::SmallOverlap)
     }
 }
 
@@ -575,15 +559,9 @@ fn assess_anchor_run_boundary(
         let boundary_distance_pt = (boundary_edge_x_pt - redaction_edge_x_pt).abs();
         let overlap_depth_pt = (boundary_edge_x_pt - redaction_edge_x_pt).max(0.0_f32);
         let relation = if boundary_edge_x_pt <= redaction_edge_x_pt {
-            if (redaction_edge_x_pt - boundary_edge_x_pt) <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
-                AnchorRunRelation::TouchingBoundary
-            } else {
-                AnchorRunRelation::FullyOutside
-            }
+            AnchorRunRelation::FullyOutside
         } else if far_edge_x_pt < redaction_edge_x_pt {
-            if overlap_depth_pt <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
-                AnchorRunRelation::TouchingBoundary
-            } else if overlap_depth_pt <= overlap_tolerance_pt {
+            if overlap_depth_pt <= overlap_tolerance_pt {
                 AnchorRunRelation::SmallOverlap
             } else {
                 AnchorRunRelation::DeepOverlap
@@ -607,15 +585,9 @@ fn assess_anchor_run_boundary(
     let boundary_distance_pt = (boundary_edge_x_pt - redaction_edge_x_pt).abs();
     let overlap_depth_pt = (redaction_edge_x_pt - boundary_edge_x_pt).max(0.0_f32);
     let relation = if boundary_edge_x_pt >= redaction_edge_x_pt {
-        if (boundary_edge_x_pt - redaction_edge_x_pt) <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
-            AnchorRunRelation::TouchingBoundary
-        } else {
-            AnchorRunRelation::FullyOutside
-        }
+        AnchorRunRelation::FullyOutside
     } else if far_edge_x_pt > redaction_edge_x_pt {
-        if overlap_depth_pt <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
-            AnchorRunRelation::TouchingBoundary
-        } else if overlap_depth_pt <= overlap_tolerance_pt {
+        if overlap_depth_pt <= overlap_tolerance_pt {
             AnchorRunRelation::SmallOverlap
         } else {
             AnchorRunRelation::DeepOverlap
@@ -1066,20 +1038,6 @@ fn resolve_anchor_set_for_redaction<'a>(
                         pair_candidate_metrics(&pair_candidate, line_bucket_candidates.len()),
                     ));
                 }
-                if let Some((reason_code, message)) =
-                    pair_rejection_reason(&pair_candidate.left, &pair_candidate.right)
-                {
-                    if collect_diagnostics {
-                        diagnostics.push(build_diagnostic(
-                            location.clone(),
-                            "redaction_evidence",
-                            reason_code,
-                            message,
-                            pair_candidate_metrics(&pair_candidate, line_bucket_candidates.len()),
-                        ));
-                    }
-                    continue;
-                }
                 if collect_diagnostics {
                     diagnostics.push(build_diagnostic(
                         location.clone(),
@@ -1329,78 +1287,12 @@ fn build_bucket_anchor_candidates<'a>(
             overlap_tolerance_pt: ANCHOR_BOUNDARY_SMALL_OVERLAP_PT,
         });
     diagnostics.extend(right_diagnostics);
-    let mut left_candidates = left_candidates;
-    let mut right_candidates = right_candidates;
-    let mut summary = BucketCandidateSummary {
+    let summary = BucketCandidateSummary {
         left_run_candidate_count,
         right_run_candidate_count,
-        left_run_candidate_count_expanded: left_run_candidate_count,
-        right_run_candidate_count_expanded: right_run_candidate_count,
         left_span_candidate_count: left_candidates.len(),
         right_span_candidate_count: right_candidates.len(),
-        starvation_expansion_applied: false,
     };
-    if left_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT
-        || right_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT
-    {
-        summary.starvation_expansion_applied = true;
-        if collect_diagnostics {
-            diagnostics.push(build_anchor_bucket_starved_diagnostic(
-                location.clone(),
-                redaction,
-                line_bucket,
-                line_bucket_rank,
-                &summary,
-            ));
-        }
-        if left_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT {
-            let (expanded_candidates, expanded_run_candidate_count, expanded_diagnostics) =
-                build_anchor_span_candidates(AnchorSpanBuildRequest {
-                    redaction,
-                    row_id,
-                    line_bucket,
-                    line_bucket_rank,
-                    left_side: true,
-                    location: location.clone(),
-                    collect_diagnostics,
-                    overlap_tolerance_pt: ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT,
-                });
-            diagnostics.extend(expanded_diagnostics);
-            summary.left_run_candidate_count_expanded = expanded_run_candidate_count;
-            if expanded_candidates.len() > left_candidates.len() {
-                left_candidates = expanded_candidates;
-            }
-            summary.left_span_candidate_count = left_candidates.len();
-        }
-        if right_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT {
-            let (expanded_candidates, expanded_run_candidate_count, expanded_diagnostics) =
-                build_anchor_span_candidates(AnchorSpanBuildRequest {
-                    redaction,
-                    row_id,
-                    line_bucket,
-                    line_bucket_rank,
-                    left_side: false,
-                    location: location.clone(),
-                    collect_diagnostics,
-                    overlap_tolerance_pt: ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT,
-                });
-            diagnostics.extend(expanded_diagnostics);
-            summary.right_run_candidate_count_expanded = expanded_run_candidate_count;
-            if expanded_candidates.len() > right_candidates.len() {
-                right_candidates = expanded_candidates;
-            }
-            summary.right_span_candidate_count = right_candidates.len();
-        }
-        if collect_diagnostics {
-            diagnostics.push(build_anchor_bucket_starvation_expansion_diagnostic(
-                location.clone(),
-                redaction,
-                line_bucket,
-                line_bucket_rank,
-                &summary,
-            ));
-        }
-    }
     if collect_diagnostics {
         diagnostics.extend(build_bucket_candidate_diagnostics(
             location.clone(),
@@ -1624,24 +1516,12 @@ fn build_bucket_candidate_diagnostics(
         DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
     );
     metrics.insert(
-        "left_run_candidate_count_expanded".to_owned(),
-        DiagnosticValue::Integer(summary.left_run_candidate_count_expanded as i64),
-    );
-    metrics.insert(
-        "right_run_candidate_count_expanded".to_owned(),
-        DiagnosticValue::Integer(summary.right_run_candidate_count_expanded as i64),
-    );
-    metrics.insert(
         "left_span_candidate_count".to_owned(),
         DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
     );
     metrics.insert(
         "right_span_candidate_count".to_owned(),
         DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
-    );
-    metrics.insert(
-        "starvation_expansion_applied".to_owned(),
-        DiagnosticValue::Bool(summary.starvation_expansion_applied),
     );
     diagnostics.push(build_diagnostic(
         DiagnosticLocation {
@@ -1679,88 +1559,6 @@ fn build_bucket_candidate_diagnostics(
         ));
     }
     diagnostics
-}
-
-fn build_anchor_bucket_starved_diagnostic(
-    location: DiagnosticLocation,
-    redaction: &RedactionOccurrence,
-    line_bucket: &LineBucket<'_>,
-    line_bucket_rank: usize,
-    summary: &BucketCandidateSummary,
-) -> RedactionEvidenceDiagnostic {
-    let mut metrics = line_bucket_metrics(line_bucket, redaction, 0, line_bucket_rank as i64);
-    metrics.insert(
-        "left_run_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.left_run_candidate_count as i64),
-    );
-    metrics.insert(
-        "right_run_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
-    );
-    metrics.insert(
-        "left_span_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
-    );
-    metrics.insert(
-        "right_span_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
-    );
-    build_diagnostic(
-        location,
-        "redaction_evidence",
-        "anchor_bucket_starved",
-        "line bucket produced too few side candidates and triggered starvation handling",
-        metrics,
-    )
-}
-
-fn build_anchor_bucket_starvation_expansion_diagnostic(
-    location: DiagnosticLocation,
-    redaction: &RedactionOccurrence,
-    line_bucket: &LineBucket<'_>,
-    line_bucket_rank: usize,
-    summary: &BucketCandidateSummary,
-) -> RedactionEvidenceDiagnostic {
-    let mut metrics = line_bucket_metrics(line_bucket, redaction, 0, line_bucket_rank as i64);
-    metrics.insert(
-        "base_overlap_tolerance_pt".to_owned(),
-        DiagnosticValue::Float(ANCHOR_BOUNDARY_SMALL_OVERLAP_PT as f64),
-    );
-    metrics.insert(
-        "expanded_overlap_tolerance_pt".to_owned(),
-        DiagnosticValue::Float(ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT as f64),
-    );
-    metrics.insert(
-        "left_run_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.left_run_candidate_count as i64),
-    );
-    metrics.insert(
-        "right_run_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
-    );
-    metrics.insert(
-        "left_run_candidate_count_expanded".to_owned(),
-        DiagnosticValue::Integer(summary.left_run_candidate_count_expanded as i64),
-    );
-    metrics.insert(
-        "right_run_candidate_count_expanded".to_owned(),
-        DiagnosticValue::Integer(summary.right_run_candidate_count_expanded as i64),
-    );
-    metrics.insert(
-        "left_span_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
-    );
-    metrics.insert(
-        "right_span_candidate_count".to_owned(),
-        DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
-    );
-    build_diagnostic(
-        location,
-        "redaction_evidence",
-        "anchor_bucket_starvation_expansion_applied",
-        "expanded small-overlap admission inside a starved line bucket",
-        metrics,
-    )
 }
 
 fn build_line_bucket_diagnostics(
@@ -1923,55 +1721,6 @@ fn compare_side_candidates(
         ))
 }
 
-fn pair_rejection_reason(
-    left: &AnchorSpanCandidate<'_>,
-    right: &AnchorSpanCandidate<'_>,
-) -> Option<(&'static str, &'static str)> {
-    if left.run.font_key != right.run.font_key {
-        return Some((
-            "anchor_pair_rejected_font_key_mismatch",
-            "anchor pair candidates use different font resources",
-        ));
-    }
-    if normalized_font_name(&left.run.font_name) != normalized_font_name(&right.run.font_name) {
-        return Some((
-            "anchor_pair_rejected_font_name_mismatch",
-            "anchor pair candidates use different normalized font names",
-        ));
-    }
-    if normalize_font_size_pt(left.run.font_size_pt)
-        != normalize_font_size_pt(right.run.font_size_pt)
-    {
-        return Some((
-            "anchor_pair_rejected_font_size_mismatch",
-            "anchor pair candidates use different normalized font sizes",
-        ));
-    }
-    if normalize_spacing_pt(left.run.width_metrics.char_spacing_pt)
-        != normalize_spacing_pt(right.run.width_metrics.char_spacing_pt)
-    {
-        return Some((
-            "anchor_pair_rejected_char_spacing_mismatch",
-            "anchor pair candidates use different normalized char spacing",
-        ));
-    }
-    if normalize_spacing_pt(left.run.width_metrics.word_spacing_pt)
-        != normalize_spacing_pt(right.run.width_metrics.word_spacing_pt)
-    {
-        return Some((
-            "anchor_pair_rejected_word_spacing_mismatch",
-            "anchor pair candidates use different normalized word spacing",
-        ));
-    }
-    if left.run.width_metrics.render_mode != right.run.width_metrics.render_mode {
-        return Some((
-            "anchor_pair_rejected_render_mode_mismatch",
-            "anchor pair candidates use different render modes",
-        ));
-    }
-    None
-}
-
 fn pair_target_width_pt(pair: &AnchorPairCandidate<'_>) -> Option<f32> {
     let left_gap_pt = pair.left.anchor.trailing_whitespace_width_pt.max(0.0_f32);
     let right_gap_pt = pair.right.anchor.leading_whitespace_width_pt.max(0.0_f32);
@@ -1979,15 +1728,6 @@ fn pair_target_width_pt(pair: &AnchorPairCandidate<'_>) -> Option<f32> {
     let usable_right_edge_x_pt = pair.right.anchor.inner_left_edge_x_pt - right_gap_pt;
     (usable_right_edge_x_pt > usable_left_edge_x_pt)
         .then_some(usable_right_edge_x_pt - usable_left_edge_x_pt)
-}
-
-fn pair_box_delta_threshold_pt(redaction_width_pt: f32) -> f32 {
-    ANCHOR_PAIR_BOX_SUSPECT_ABS_DELTA_PT.max(redaction_width_pt * ANCHOR_PAIR_BOX_SUSPECT_RATIO)
-}
-
-fn pair_box_override_improvement_threshold_pt(selected_delta_pt: f32) -> f32 {
-    ANCHOR_PAIR_BOX_OVERRIDE_MIN_IMPROVEMENT_PT
-        .max(selected_delta_pt.max(0.0_f32) * ANCHOR_PAIR_BOX_OVERRIDE_RATIO)
 }
 
 fn pair_box_metrics(
@@ -2010,10 +1750,6 @@ fn pair_box_metrics(
     metrics.insert(
         "redaction_width_pt".to_owned(),
         DiagnosticValue::Float(redaction_width_pt as f64),
-    );
-    metrics.insert(
-        "pair_box_delta_threshold_pt".to_owned(),
-        DiagnosticValue::Float(pair_box_delta_threshold_pt(redaction_width_pt) as f64),
     );
     metrics
 }
@@ -2041,7 +1777,6 @@ fn select_box_sane_pair<'a>(
     };
     let redaction_width_pt = redaction.bbox.width().abs();
     let initial_delta_pt = (initial_target_width_pt - redaction_width_pt).abs();
-    let suspect_threshold_pt = pair_box_delta_threshold_pt(redaction_width_pt);
     if collect_diagnostics {
         diagnostics.push(build_diagnostic(
             location.clone(),
@@ -2051,7 +1786,7 @@ fn select_box_sane_pair<'a>(
             pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
         ));
     }
-    if initial_target_width_pt <= redaction_width_pt || initial_delta_pt < suspect_threshold_pt {
+    if initial_target_width_pt <= redaction_width_pt {
         if collect_diagnostics {
             diagnostics.push(build_diagnostic(
                 location,
@@ -2072,17 +1807,16 @@ fn select_box_sane_pair<'a>(
             pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
         ));
     }
-    let override_improvement_threshold_pt =
-        pair_box_override_improvement_threshold_pt(initial_delta_pt);
     let replacement = valid_pairs
         .iter()
         .filter_map(|candidate| {
             let candidate_target_width_pt = pair_target_width_pt(candidate)?;
             let candidate_delta_pt = (candidate_target_width_pt - redaction_width_pt).abs();
-            let improvement_pt = initial_delta_pt - candidate_delta_pt;
-            (candidate_delta_pt < initial_delta_pt
-                && improvement_pt >= override_improvement_threshold_pt)
-                .then_some((candidate.clone(), candidate_delta_pt, improvement_pt))
+            (candidate_delta_pt < initial_delta_pt).then_some((
+                candidate.clone(),
+                candidate_delta_pt,
+                initial_delta_pt - candidate_delta_pt,
+            ))
         })
         .min_by(|left, right| {
             (
@@ -2112,10 +1846,6 @@ fn select_box_sane_pair<'a>(
                 DiagnosticValue::Float(improvement_pt as f64),
             );
             metrics.insert(
-                "override_improvement_threshold_pt".to_owned(),
-                DiagnosticValue::Float(override_improvement_threshold_pt as f64),
-            );
-            metrics.insert(
                 "replacement_pair_box_delta_pt".to_owned(),
                 DiagnosticValue::Float(replacement_delta_pt as f64),
             );
@@ -2130,17 +1860,12 @@ fn select_box_sane_pair<'a>(
         return (replacement_pair, true);
     }
     if collect_diagnostics {
-        let mut metrics = pair_box_metrics(initial_selected_pair, redaction, line_bucket_count);
-        metrics.insert(
-            "override_improvement_threshold_pt".to_owned(),
-            DiagnosticValue::Float(override_improvement_threshold_pt as f64),
-        );
         diagnostics.push(build_diagnostic(
             location,
             "redaction_evidence",
             "anchor_pair_selected_without_box_override",
             "selected anchor pair without box-sanity override because no replacement improved the box delta enough",
-            metrics,
+            pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
         ));
     }
     (initial_selected_pair.clone(), false)

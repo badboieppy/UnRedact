@@ -52,6 +52,7 @@ pub struct VisualizationPayload {
     pub font_runs: FontRunReport,
 }
 
+#[cfg(feature = "local-file-workflow")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedBinaryArtifact {
     pub file_name: String,

@@ -13,5 +13,6 @@ pub(crate) mod redactions_data;
 #[cfg(feature = "local-file-workflow")]
 pub(crate) mod result_data_publisher;
 pub(crate) mod types;
+#[cfg(feature = "cli-entry")]
 pub(crate) mod visual_anchor_metrics_data;
 pub(crate) mod visualization_data;

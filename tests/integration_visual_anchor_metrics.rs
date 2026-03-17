@@ -41,7 +41,7 @@ fn row_by_id<'a>(
 }
 
 #[test]
-fn efta00101126_rows_show_invisible_current_anchors_and_tighter_visual_neighbors() {
+fn efta00101126_rows_show_visible_current_anchors_and_aligned_visual_spans() {
     let input = Path::new("test_data/EFTA00101126.pdf");
     let output_dir = test_output_dir("visual_anchor_metrics_efta00101126");
     std::fs::create_dir_all(&output_dir)
@@ -82,17 +82,6 @@ fn efta00101126_rows_show_invisible_current_anchors_and_tighter_visual_neighbors
             row.nearest_left.is_some() && row.nearest_right.is_some(),
             "expected nearest visual neighbors on both sides for {row_id}"
         );
-        let current_left_gap = row
-            .current_left
-            .as_ref()
-            .and_then(|side| side.gap_pt)
-            .expect("current left gap should exist");
-        assert!(
-            row.nearest_left
-                .as_ref()
-                .is_some_and(|span| span.gap_pt < current_left_gap),
-            "expected visual left neighbor to be closer than current left anchor for {row_id}"
-        );
         let nearest_visual_span_width = row
             .width_comparison
             .nearest_visual_span_width_pt
@@ -103,8 +92,8 @@ fn efta00101126_rows_show_invisible_current_anchors_and_tighter_visual_neighbors
         );
         let current_anchor_target_width = row.width_comparison.current_anchor_target_width_pt;
         assert!(
-            current_anchor_target_width - nearest_visual_span_width >= 35.0_f32,
-            "expected current anchor target width to be materially wider than the visual span for {row_id}: current={current_anchor_target_width} nearest={nearest_visual_span_width}"
+            (current_anchor_target_width - nearest_visual_span_width).abs() <= 3.0_f32,
+            "expected current anchor target width to stay close to the visual span for {row_id}: current={current_anchor_target_width} nearest={nearest_visual_span_width}"
         );
     }
 }
@@ -283,13 +272,13 @@ fn anchor_span_visual_benchmark_writes_summary_rows_experiments_and_crops() {
         .iter()
         .find(|row| row["row_key"] == "EFTA00101126:page7_row0")
         .expect("missing EFTA00101126:page7_row0");
-    assert_eq!(page7_row0["current_alignment"], "inflated");
+    assert_eq!(page7_row0["current_alignment"], "aligned");
     assert!(
         page7_row0["current_span_width_pt"]
             .as_f64()
             .zip(page7_row0["visual_reference_width_pt"].as_f64())
-            .is_some_and(|(current, visual)| current - visual >= 40.0_f64),
-        "expected EFTA00101126:page7_row0 to remain materially inflated"
+            .is_some_and(|(current, visual)| (current - visual).abs() <= 3.0_f64),
+        "expected EFTA00101126:page7_row0 to stay close to the visual span"
     );
     for experiment in [
         "current_vs_visual_delta",
@@ -308,16 +297,16 @@ fn anchor_span_visual_benchmark_writes_summary_rows_experiments_and_crops() {
     let rescore_rows = rescore_json["rows"]
         .as_array()
         .expect("visual_aligned_rescore rows should be an array");
-    let row0 = rescore_rows
+    let improved_row = rescore_rows
         .iter()
-        .find(|row| row["row_key"] == "EFTA00101126:page7_row0")
-        .expect("missing visual_aligned_rescore row for page7_row0");
+        .find(|row| row["row_key"] == "EFTA00038617:page1_row5")
+        .expect("missing visual_aligned_rescore row for EFTA00038617:page1_row5");
     assert!(
-        row0["metrics"]["target_rank_before"]
+        improved_row["metrics"]["target_rank_before"]
             .as_u64()
-            .zip(row0["metrics"]["target_rank_after"].as_u64())
+            .zip(improved_row["metrics"]["target_rank_after"].as_u64())
             .is_some_and(|(before, after)| after < before),
-        "expected visual-aligned rescore to improve EFTA00101126:page7_row0"
+        "expected visual-aligned rescore to improve EFTA00038617:page1_row5"
     );
     let tie_path = outputs
         .experiments_dir
