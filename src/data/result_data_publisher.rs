@@ -9,15 +9,7 @@ pub struct ResultPublishPaths<'a> {
     pub guesses_path: &'a Path,
     pub anchors_path: &'a Path,
     pub diagnostics_path: Option<&'a Path>,
-    pub visual_anchor_metrics_path: Option<&'a Path>,
-    pub visual_anchor_crops_dir: Option<&'a Path>,
     pub visualized_pdf_path: Option<&'a Path>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedPublishBytes<'a> {
-    pub file_name: &'a str,
-    pub bytes: &'a [u8],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,8 +19,6 @@ pub struct ResultPublishPayload<'a> {
     pub guesses_json: &'a [u8],
     pub anchors_json: &'a [u8],
     pub diagnostics_json: Option<&'a [u8]>,
-    pub visual_anchor_metrics_json: Option<&'a [u8]>,
-    pub visual_anchor_crops: Option<&'a [NamedPublishBytes<'a>]>,
     pub visualized_pdf_bytes: Option<&'a [u8]>,
 }
 
@@ -65,21 +55,6 @@ impl ResultDataPublisher {
             (req.paths.diagnostics_path, req.payload.diagnostics_json)
         {
             self.file_store.write_exact(path, bytes)?;
-        }
-        if let (Some(path), Some(bytes)) = (
-            req.paths.visual_anchor_metrics_path,
-            req.payload.visual_anchor_metrics_json,
-        ) {
-            self.file_store.write_exact(path, bytes)?;
-        }
-        if let (Some(dir), Some(items)) = (
-            req.paths.visual_anchor_crops_dir,
-            req.payload.visual_anchor_crops,
-        ) {
-            for item in items {
-                let path = dir.join(item.file_name);
-                self.file_store.write_exact(path.as_path(), item.bytes)?;
-            }
         }
         if let (Some(path), Some(bytes)) = (
             req.paths.visualized_pdf_path,

@@ -1,4 +1,6 @@
 #[cfg(feature = "cli-entry")]
+pub mod anchor_span_visual_benchmark_cli_entry;
+#[cfg(feature = "cli-entry")]
 pub mod tooling_entry;
 #[cfg(feature = "cli-entry")]
 pub mod unredact_cli_entry;

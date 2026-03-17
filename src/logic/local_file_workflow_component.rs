@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::data::local_file_workflow_data::LocalFileWorkflowData;
 use crate::data::result_data_publisher::{
-    NamedPublishBytes, ResultDataPublisher, ResultPublishPaths, ResultPublishPayload,
-    ResultPublishRequest,
+    ResultDataPublisher, ResultPublishPaths, ResultPublishPayload, ResultPublishRequest,
 };
 
 use super::types::EncodedPipelineOutputs;
@@ -23,8 +22,6 @@ pub struct OutputFilePaths {
     pub guesses_path: PathBuf,
     pub anchors_path: PathBuf,
     pub diagnostics_path: Option<PathBuf>,
-    pub visual_anchor_metrics_path: Option<PathBuf>,
-    pub visual_anchor_crops_dir: Option<PathBuf>,
     pub visualized_pdf_path: Option<PathBuf>,
 }
 
@@ -66,9 +63,6 @@ pub fn build_output_file_paths(
         anchors_path: output_dir.join(format!("{stem}.anchors.json")),
         diagnostics_path: include_diagnostics
             .then(|| output_dir.join(format!("{stem}.diagnostics.json"))),
-        visual_anchor_metrics_path: include_diagnostics
-            .then(|| output_dir.join(format!("{stem}.visual_metrics.json"))),
-        visual_anchor_crops_dir: include_diagnostics.then(|| output_dir.join("visual_crops")),
         visualized_pdf_path: Some(output_dir.join(format!("{stem}.visualized.pdf"))),
     })
 }
@@ -79,15 +73,6 @@ pub fn write_encoded_outputs(
     encoded: &EncodedPipelineOutputs,
 ) -> Result<(), String> {
     let publisher = ResultDataPublisher::new();
-    let visual_anchor_crops = encoded.visual_anchor_crops.as_ref().map(|items| {
-        items
-            .iter()
-            .map(|item| NamedPublishBytes {
-                file_name: item.file_name.as_str(),
-                bytes: item.bytes.as_slice(),
-            })
-            .collect::<Vec<_>>()
-    });
     publisher.publish(ResultPublishRequest {
         paths: ResultPublishPaths {
             redactions_path: output_paths.redactions_path.as_path(),
@@ -95,8 +80,6 @@ pub fn write_encoded_outputs(
             guesses_path: output_paths.guesses_path.as_path(),
             anchors_path: output_paths.anchors_path.as_path(),
             diagnostics_path: output_paths.diagnostics_path.as_deref(),
-            visual_anchor_metrics_path: output_paths.visual_anchor_metrics_path.as_deref(),
-            visual_anchor_crops_dir: output_paths.visual_anchor_crops_dir.as_deref(),
             visualized_pdf_path: output_paths.visualized_pdf_path.as_deref(),
         },
         payload: ResultPublishPayload {
@@ -105,8 +88,6 @@ pub fn write_encoded_outputs(
             guesses_json: encoded.guesses_json.as_slice(),
             anchors_json: encoded.anchors_json.as_slice(),
             diagnostics_json: encoded.diagnostics_json.as_deref(),
-            visual_anchor_metrics_json: encoded.visual_anchor_metrics_json.as_deref(),
-            visual_anchor_crops: visual_anchor_crops.as_deref(),
             visualized_pdf_bytes: encoded.visualized_pdf_bytes.as_deref(),
         },
     })
@@ -211,6 +192,12 @@ pub fn write_batch_manifest(output_dir: &Path, payload: &[u8]) -> Result<PathBuf
 }
 
 #[inline]
+pub fn write_output_bytes(path: &Path, payload: &[u8]) -> Result<(), String> {
+    let publisher = ResultDataPublisher::new();
+    publisher.publish_bytes(path, payload)
+}
+
+#[inline]
 pub fn write_visual_metric_outputs(
     output_paths: &VisualMetricFilePaths,
     report_json: &[u8],
@@ -254,14 +241,6 @@ mod tests {
         assert_eq!(
             out.diagnostics_path,
             Some(output_dir.join("report.diagnostics.json"))
-        );
-        assert_eq!(
-            out.visual_anchor_metrics_path,
-            Some(output_dir.join("report.visual_metrics.json"))
-        );
-        assert_eq!(
-            out.visual_anchor_crops_dir,
-            Some(output_dir.join("visual_crops"))
         );
         assert_eq!(
             out.visualized_pdf_path,

@@ -24,6 +24,14 @@ const MAX_PAGE_COVERAGE_RATIO: f32 = 0.90_f32;
 const SAME_LINE_BASELINE_TOLERANCE_PT: f32 = 3.0_f32;
 const ROW_EPSILON_MIN_PT: f64 = 3.5_f64;
 const ROW_EPSILON_MAX_PT: f64 = 8.0_f64;
+const ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT: f32 = 1.0_f32;
+const ANCHOR_BOUNDARY_SMALL_OVERLAP_PT: f32 = 5.0_f32;
+const ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT: f32 = 10.0_f32;
+const ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT: usize = 2;
+const ANCHOR_PAIR_BOX_SUSPECT_ABS_DELTA_PT: f32 = 10.0_f32;
+const ANCHOR_PAIR_BOX_SUSPECT_RATIO: f32 = 0.15_f32;
+const ANCHOR_PAIR_BOX_OVERRIDE_MIN_IMPROVEMENT_PT: f32 = 8.0_f32;
+const ANCHOR_PAIR_BOX_OVERRIDE_RATIO: f32 = 0.50_f32;
 
 #[derive(Clone)]
 struct LineBucket<'a> {
@@ -40,10 +48,13 @@ struct LineBucketCandidate<'a> {
     baseline_delta_pt: f32,
 }
 
+#[derive(Clone, Copy)]
 struct AnchorRunCandidate<'a> {
     run: &'a PdfFontTextRun,
+    relation: AnchorRunRelation,
     visibility_rank: i32,
     gap_pt: f32,
+    overlap_depth_pt: f32,
     width_pt: f32,
 }
 
@@ -55,8 +66,10 @@ struct AnchorSpanCandidate<'a> {
     run: &'a PdfFontTextRun,
     left_side: bool,
     anchor: AnchorSide,
+    relation: AnchorRunRelation,
     visibility_rank: i32,
     gap_pt: f32,
+    overlap_depth_pt: f32,
     width_pt: f32,
 }
 
@@ -150,6 +163,88 @@ struct DiagnosticLocation {
     redaction_id: Option<String>,
     page_index: u32,
     bbox: Rect,
+}
+
+struct AnchorSpanBuildRequest<'a, 'b> {
+    redaction: &'b RedactionOccurrence,
+    row_id: &'b str,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    left_side: bool,
+    location: DiagnosticLocation,
+    collect_diagnostics: bool,
+    overlap_tolerance_pt: f32,
+}
+
+struct BucketCandidateSummary {
+    left_run_candidate_count: usize,
+    right_run_candidate_count: usize,
+    left_run_candidate_count_expanded: usize,
+    right_run_candidate_count_expanded: usize,
+    left_span_candidate_count: usize,
+    right_span_candidate_count: usize,
+    starvation_expansion_applied: bool,
+}
+
+struct AnchorRunMetricsInput<'a> {
+    run: &'a PdfFontTextRun,
+    left_side: bool,
+    line_bucket: &'a LineBucket<'a>,
+    line_bucket_rank: usize,
+    redaction: &'a RedactionOccurrence,
+    candidate_count: usize,
+    candidate_rank: Option<usize>,
+    assessment: AnchorRunBoundaryAssessment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AnchorRunRelation {
+    FullyOutside,
+    TouchingBoundary,
+    SmallOverlap,
+    DeepOverlap,
+    OppositeSide,
+}
+
+impl AnchorRunRelation {
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FullyOutside => "fully_outside",
+            Self::TouchingBoundary => "touching_boundary",
+            Self::SmallOverlap => "small_overlap",
+            Self::DeepOverlap => "deep_overlap",
+            Self::OppositeSide => "opposite_side",
+        }
+    }
+
+    #[inline]
+    fn sort_rank(self) -> i32 {
+        match self {
+            Self::FullyOutside => 0,
+            Self::TouchingBoundary => 1,
+            Self::SmallOverlap => 2,
+            Self::DeepOverlap => 3,
+            Self::OppositeSide => 4,
+        }
+    }
+
+    #[inline]
+    fn is_allowed(self) -> bool {
+        matches!(
+            self,
+            Self::FullyOutside | Self::TouchingBoundary | Self::SmallOverlap
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnchorRunBoundaryAssessment {
+    relation: AnchorRunRelation,
+    boundary_distance_pt: f32,
+    overlap_depth_pt: f32,
+    overlap_tolerance_pt: f32,
+    boundary_geometry: BoundaryRunGeometry,
 }
 
 pub fn collect_redaction_evidence(
@@ -415,6 +510,7 @@ fn ranked_anchor_run_candidates<'a>(
     redaction: &RedactionOccurrence,
     line_runs: &[&'a PdfFontTextRun],
     left_side: bool,
+    overlap_tolerance_pt: f32,
 ) -> Vec<AnchorRunCandidate<'a>> {
     let mut candidates = line_runs
         .iter()
@@ -424,33 +520,34 @@ fn ranked_anchor_run_candidates<'a>(
             if trimmed.is_empty() {
                 return None;
             }
-            let allowed = if left_side {
-                run.bbox.x1 <= redaction.bbox.x0
-            } else {
-                run.bbox.x0 >= redaction.bbox.x1
-            };
-            if !allowed {
+            let assessment =
+                assess_anchor_run_boundary(redaction, run, left_side, overlap_tolerance_pt);
+            if !assessment.relation.is_allowed() {
                 return None;
             }
-            let gap_pt = if left_side {
-                (redaction.bbox.x0 - run.bbox.x1).abs()
-            } else {
-                (run.bbox.x0 - redaction.bbox.x1).abs()
-            };
             Some(AnchorRunCandidate {
                 run,
+                relation: assessment.relation,
                 visibility_rank: visibility_rank(run),
-                gap_pt,
+                gap_pt: assessment.boundary_distance_pt,
+                overlap_depth_pt: assessment.overlap_depth_pt,
                 width_pt: (run.bbox.x1 - run.bbox.x0).abs(),
             })
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        left.visibility_rank
-            .cmp(&right.visibility_rank)
+        left.relation
+            .sort_rank()
+            .cmp(&right.relation.sort_rank())
             .then_with(|| {
                 left.gap_pt
                     .partial_cmp(&right.gap_pt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.visibility_rank.cmp(&right.visibility_rank))
+            .then_with(|| {
+                left.overlap_depth_pt
+                    .partial_cmp(&right.overlap_depth_pt)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| {
@@ -461,6 +558,80 @@ fn ranked_anchor_run_candidates<'a>(
             .then_with(|| anchor_run_sort_key(left.run).cmp(&anchor_run_sort_key(right.run)))
     });
     candidates
+}
+
+fn assess_anchor_run_boundary(
+    redaction: &RedactionOccurrence,
+    run: &PdfFontTextRun,
+    left_side: bool,
+    overlap_tolerance_pt: f32,
+) -> AnchorRunBoundaryAssessment {
+    let overlap_tolerance_pt = overlap_tolerance_pt.max(0.0_f32);
+    let boundary_geometry = boundary_run_geometry(run);
+    if left_side {
+        let boundary_edge_x_pt = boundary_geometry.inner_right_edge_x_pt;
+        let far_edge_x_pt = boundary_geometry.inner_left_edge_x_pt;
+        let redaction_edge_x_pt = redaction.bbox.x0;
+        let boundary_distance_pt = (boundary_edge_x_pt - redaction_edge_x_pt).abs();
+        let overlap_depth_pt = (boundary_edge_x_pt - redaction_edge_x_pt).max(0.0_f32);
+        let relation = if boundary_edge_x_pt <= redaction_edge_x_pt {
+            if (redaction_edge_x_pt - boundary_edge_x_pt) <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
+                AnchorRunRelation::TouchingBoundary
+            } else {
+                AnchorRunRelation::FullyOutside
+            }
+        } else if far_edge_x_pt < redaction_edge_x_pt {
+            if overlap_depth_pt <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
+                AnchorRunRelation::TouchingBoundary
+            } else if overlap_depth_pt <= overlap_tolerance_pt {
+                AnchorRunRelation::SmallOverlap
+            } else {
+                AnchorRunRelation::DeepOverlap
+            }
+        } else if far_edge_x_pt < redaction.bbox.x1 {
+            AnchorRunRelation::DeepOverlap
+        } else {
+            AnchorRunRelation::OppositeSide
+        };
+        return AnchorRunBoundaryAssessment {
+            relation,
+            boundary_distance_pt,
+            overlap_depth_pt,
+            overlap_tolerance_pt,
+            boundary_geometry,
+        };
+    }
+    let boundary_edge_x_pt = boundary_geometry.inner_left_edge_x_pt;
+    let far_edge_x_pt = boundary_geometry.inner_right_edge_x_pt;
+    let redaction_edge_x_pt = redaction.bbox.x1;
+    let boundary_distance_pt = (boundary_edge_x_pt - redaction_edge_x_pt).abs();
+    let overlap_depth_pt = (redaction_edge_x_pt - boundary_edge_x_pt).max(0.0_f32);
+    let relation = if boundary_edge_x_pt >= redaction_edge_x_pt {
+        if (boundary_edge_x_pt - redaction_edge_x_pt) <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
+            AnchorRunRelation::TouchingBoundary
+        } else {
+            AnchorRunRelation::FullyOutside
+        }
+    } else if far_edge_x_pt > redaction_edge_x_pt {
+        if overlap_depth_pt <= ANCHOR_BOUNDARY_TOUCH_TOLERANCE_PT {
+            AnchorRunRelation::TouchingBoundary
+        } else if overlap_depth_pt <= overlap_tolerance_pt {
+            AnchorRunRelation::SmallOverlap
+        } else {
+            AnchorRunRelation::DeepOverlap
+        }
+    } else if far_edge_x_pt > redaction.bbox.x0 {
+        AnchorRunRelation::DeepOverlap
+    } else {
+        AnchorRunRelation::OppositeSide
+    };
+    AnchorRunBoundaryAssessment {
+        relation,
+        boundary_distance_pt,
+        overlap_depth_pt,
+        overlap_tolerance_pt,
+        boundary_geometry,
+    }
 }
 
 fn build_row(
@@ -519,6 +690,15 @@ fn build_row(
     let target_width_pt = geometry.target_width_pt;
     let mut diagnostics = diagnostics;
     if collect_diagnostics {
+        diagnostics.extend(build_line_bucket_diagnostics(
+            location.clone(),
+            redaction,
+            line_buckets,
+            &line_bucket_candidates,
+            resolution
+                .selected_line_bucket
+                .map(|line_bucket| line_bucket.line_id.as_str()),
+        ));
         diagnostics.extend(build_anchor_geometry_diagnostics(
             location.clone(),
             AnchorGeometryDiagnosticsInput {
@@ -849,6 +1029,7 @@ fn resolve_anchor_set_for_redaction<'a>(
 ) {
     let mut diagnostics = Vec::new();
     let mut bucket_candidates = Vec::<BucketAnchorCandidates<'a>>::new();
+    let mut pair_candidate_count = 0_usize;
 
     for (line_bucket_rank, candidate) in line_bucket_candidates.iter().enumerate() {
         let bucket = build_bucket_anchor_candidates(
@@ -868,6 +1049,7 @@ fn resolve_anchor_set_for_redaction<'a>(
     for bucket in &bucket_candidates {
         for left in &bucket.left_candidates {
             for right in &bucket.right_candidates {
+                pair_candidate_count += 1;
                 let pair_candidate = AnchorPairCandidate {
                     pair_id: format!("{}|{}", left.candidate_id, right.candidate_id),
                     line_bucket: bucket.line_bucket,
@@ -898,20 +1080,54 @@ fn resolve_anchor_set_for_redaction<'a>(
                     }
                     continue;
                 }
+                if collect_diagnostics {
+                    diagnostics.push(build_diagnostic(
+                        location.clone(),
+                        "redaction_evidence",
+                        "anchor_pair_candidate_valid",
+                        "anchor pair candidate passed pair validity checks",
+                        pair_candidate_metrics(&pair_candidate, line_bucket_candidates.len()),
+                    ));
+                }
                 valid_pairs.push(pair_candidate);
             }
         }
     }
 
-    valid_pairs.sort_by(compare_pair_candidates);
-    if let Some(selected_pair) = valid_pairs.first().cloned() {
-        if collect_diagnostics {
-            diagnostics.extend(build_line_bucket_diagnostics(
+    if collect_diagnostics {
+        diagnostics.push(build_anchor_pair_pool_summary_diagnostic(
+            location.clone(),
+            line_bucket_candidates.len(),
+            pair_candidate_count,
+            valid_pairs.len(),
+        ));
+        if pair_candidate_count == 0 || valid_pairs.is_empty() {
+            diagnostics.push(build_diagnostic(
                 location.clone(),
-                redaction,
-                line_bucket_candidates,
-                Some(selected_pair.line_bucket.line_id.as_str()),
+                "redaction_evidence",
+                "anchor_pair_pool_empty",
+                "no valid two-sided anchor pair was available for the row",
+                anchor_pair_pool_metrics(
+                    line_bucket_candidates.len(),
+                    pair_candidate_count,
+                    valid_pairs.len(),
+                ),
             ));
+        }
+    }
+
+    valid_pairs.sort_by(compare_pair_candidates);
+    if let Some(initial_selected_pair) = valid_pairs.first().cloned() {
+        let (selected_pair, box_override_applied) = select_box_sane_pair(
+            redaction,
+            &valid_pairs,
+            &initial_selected_pair,
+            location.clone(),
+            line_bucket_candidates.len(),
+            collect_diagnostics,
+            &mut diagnostics,
+        );
+        if collect_diagnostics {
             diagnostics.push(build_diagnostic(
                 location.clone(),
                 "redaction_evidence",
@@ -933,7 +1149,11 @@ fn resolve_anchor_set_for_redaction<'a>(
                 Some(&selected_pair.left),
                 Some(&selected_pair.right),
                 measurement_seed_side,
-                "pair_candidate_selected",
+                if box_override_applied {
+                    "pair_candidate_selected_box_sanity_override"
+                } else {
+                    "pair_candidate_selected"
+                },
             ));
             diagnostics.push(build_measurement_seed_diagnostic(
                 location.clone(),
@@ -950,7 +1170,11 @@ fn resolve_anchor_set_for_redaction<'a>(
                 left: Some(selected_pair.left),
                 right: Some(selected_pair.right),
                 measurement_seed_side,
-                selection_reason: "pair_candidate_selected".to_owned(),
+                selection_reason: if box_override_applied {
+                    "pair_candidate_selected_box_sanity_override".to_owned()
+                } else {
+                    "pair_candidate_selected".to_owned()
+                },
             },
             diagnostics,
         );
@@ -1038,12 +1262,6 @@ fn resolve_anchor_set_for_redaction<'a>(
         selected_line_id = Some(line_bucket.line_id.clone());
     }
     if collect_diagnostics {
-        diagnostics.extend(build_line_bucket_diagnostics(
-            location.clone(),
-            redaction,
-            line_bucket_candidates,
-            selected_line_id.as_deref(),
-        ));
         match decision.mode {
             AnchorMode::LeftOnly | AnchorMode::RightOnly => {
                 diagnostics.push(build_diagnostic(
@@ -1088,25 +1306,110 @@ fn build_bucket_anchor_candidates<'a>(
     location: DiagnosticLocation,
     collect_diagnostics: bool,
 ) -> (BucketAnchorCandidates<'a>, Vec<RedactionEvidenceDiagnostic>) {
-    let (left_candidates, mut diagnostics) = build_anchor_span_candidates(
-        redaction,
-        row_id,
-        line_bucket,
-        line_bucket_rank,
-        true,
-        location.clone(),
-        collect_diagnostics,
-    );
-    let (right_candidates, right_diagnostics) = build_anchor_span_candidates(
-        redaction,
-        row_id,
-        line_bucket,
-        line_bucket_rank,
-        false,
-        location,
-        collect_diagnostics,
-    );
+    let (left_candidates, left_run_candidate_count, mut diagnostics) =
+        build_anchor_span_candidates(AnchorSpanBuildRequest {
+            redaction,
+            row_id,
+            line_bucket,
+            line_bucket_rank,
+            left_side: true,
+            location: location.clone(),
+            collect_diagnostics,
+            overlap_tolerance_pt: ANCHOR_BOUNDARY_SMALL_OVERLAP_PT,
+        });
+    let (right_candidates, right_run_candidate_count, right_diagnostics) =
+        build_anchor_span_candidates(AnchorSpanBuildRequest {
+            redaction,
+            row_id,
+            line_bucket,
+            line_bucket_rank,
+            left_side: false,
+            location: location.clone(),
+            collect_diagnostics,
+            overlap_tolerance_pt: ANCHOR_BOUNDARY_SMALL_OVERLAP_PT,
+        });
     diagnostics.extend(right_diagnostics);
+    let mut left_candidates = left_candidates;
+    let mut right_candidates = right_candidates;
+    let mut summary = BucketCandidateSummary {
+        left_run_candidate_count,
+        right_run_candidate_count,
+        left_run_candidate_count_expanded: left_run_candidate_count,
+        right_run_candidate_count_expanded: right_run_candidate_count,
+        left_span_candidate_count: left_candidates.len(),
+        right_span_candidate_count: right_candidates.len(),
+        starvation_expansion_applied: false,
+    };
+    if left_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT
+        || right_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT
+    {
+        summary.starvation_expansion_applied = true;
+        if collect_diagnostics {
+            diagnostics.push(build_anchor_bucket_starved_diagnostic(
+                location.clone(),
+                redaction,
+                line_bucket,
+                line_bucket_rank,
+                &summary,
+            ));
+        }
+        if left_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT {
+            let (expanded_candidates, expanded_run_candidate_count, expanded_diagnostics) =
+                build_anchor_span_candidates(AnchorSpanBuildRequest {
+                    redaction,
+                    row_id,
+                    line_bucket,
+                    line_bucket_rank,
+                    left_side: true,
+                    location: location.clone(),
+                    collect_diagnostics,
+                    overlap_tolerance_pt: ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT,
+                });
+            diagnostics.extend(expanded_diagnostics);
+            summary.left_run_candidate_count_expanded = expanded_run_candidate_count;
+            if expanded_candidates.len() > left_candidates.len() {
+                left_candidates = expanded_candidates;
+            }
+            summary.left_span_candidate_count = left_candidates.len();
+        }
+        if right_candidates.len() < ANCHOR_BUCKET_TARGET_SIDE_CANDIDATE_COUNT {
+            let (expanded_candidates, expanded_run_candidate_count, expanded_diagnostics) =
+                build_anchor_span_candidates(AnchorSpanBuildRequest {
+                    redaction,
+                    row_id,
+                    line_bucket,
+                    line_bucket_rank,
+                    left_side: false,
+                    location: location.clone(),
+                    collect_diagnostics,
+                    overlap_tolerance_pt: ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT,
+                });
+            diagnostics.extend(expanded_diagnostics);
+            summary.right_run_candidate_count_expanded = expanded_run_candidate_count;
+            if expanded_candidates.len() > right_candidates.len() {
+                right_candidates = expanded_candidates;
+            }
+            summary.right_span_candidate_count = right_candidates.len();
+        }
+        if collect_diagnostics {
+            diagnostics.push(build_anchor_bucket_starvation_expansion_diagnostic(
+                location.clone(),
+                redaction,
+                line_bucket,
+                line_bucket_rank,
+                &summary,
+            ));
+        }
+    }
+    if collect_diagnostics {
+        diagnostics.extend(build_bucket_candidate_diagnostics(
+            location.clone(),
+            redaction,
+            line_bucket,
+            line_bucket_rank,
+            &summary,
+        ));
+    }
     (
         BucketAnchorCandidates {
             line_bucket,
@@ -1118,34 +1421,34 @@ fn build_bucket_anchor_candidates<'a>(
     )
 }
 
-fn build_anchor_span_candidates<'a>(
-    redaction: &RedactionOccurrence,
-    row_id: &str,
-    line_bucket: &'a LineBucket<'a>,
-    line_bucket_rank: usize,
-    left_side: bool,
-    location: DiagnosticLocation,
-    collect_diagnostics: bool,
+fn build_anchor_span_candidates<'a, 'b>(
+    req: AnchorSpanBuildRequest<'a, 'b>,
 ) -> (
     Vec<AnchorSpanCandidate<'a>>,
+    usize,
     Vec<RedactionEvidenceDiagnostic>,
 ) {
-    let run_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, left_side);
+    let run_candidates = ranked_anchor_run_candidates(
+        req.redaction,
+        &req.line_bucket.runs,
+        req.left_side,
+        req.overlap_tolerance_pt,
+    );
     let mut candidates = Vec::<AnchorSpanCandidate<'a>>::new();
-    let mut diagnostics = Vec::<RedactionEvidenceDiagnostic>::new();
+    let mut diagnostics = build_anchor_run_diagnostics(&req, &run_candidates);
 
     for (candidate_rank, run_candidate) in run_candidates.iter().enumerate() {
         let span_candidate = build_anchor_span_candidate(
-            row_id,
-            line_bucket,
-            line_bucket_rank,
+            req.row_id,
+            req.line_bucket,
+            req.line_bucket_rank,
             candidate_rank,
             run_candidate,
-            left_side,
+            req.left_side,
         );
-        if collect_diagnostics {
+        if req.collect_diagnostics {
             diagnostics.push(build_diagnostic(
-                location.clone(),
+                req.location.clone(),
                 "redaction_evidence",
                 "anchor_span_candidate_considered",
                 "considered anchor span candidate",
@@ -1153,14 +1456,14 @@ fn build_anchor_span_candidates<'a>(
                     &span_candidate,
                     run_candidates.len(),
                     candidate_rank,
-                    redaction,
+                    req.redaction,
                 ),
             ));
         }
         if !anchor_text_has_alnum(&span_candidate.anchor.text) {
-            if collect_diagnostics {
+            if req.collect_diagnostics {
                 diagnostics.push(build_diagnostic(
-                    location.clone(),
+                    req.location.clone(),
                     "redaction_evidence",
                     "anchor_span_rejected_non_alnum",
                     "anchor span text contains no unicode letters or digits",
@@ -1168,7 +1471,7 @@ fn build_anchor_span_candidates<'a>(
                         &span_candidate,
                         run_candidates.len(),
                         candidate_rank,
-                        redaction,
+                        req.redaction,
                     ),
                 ));
             }
@@ -1177,28 +1480,347 @@ fn build_anchor_span_candidates<'a>(
         candidates.push(span_candidate);
     }
 
-    (candidates, diagnostics)
+    (candidates, run_candidates.len(), diagnostics)
+}
+
+fn build_anchor_run_diagnostics(
+    req: &AnchorSpanBuildRequest<'_, '_>,
+    run_candidates: &[AnchorRunCandidate<'_>],
+) -> Vec<RedactionEvidenceDiagnostic> {
+    if !req.collect_diagnostics {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+    for run in &req.line_bucket.runs {
+        let trimmed = run.text.trim();
+        let assessment =
+            assess_anchor_run_boundary(req.redaction, run, req.left_side, req.overlap_tolerance_pt);
+        if trimmed.is_empty() {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_run_rejected_empty_text",
+                "anchor run was rejected because trimmed text is empty",
+                anchor_run_metrics(AnchorRunMetricsInput {
+                    run,
+                    left_side: req.left_side,
+                    line_bucket: req.line_bucket,
+                    line_bucket_rank: req.line_bucket_rank,
+                    redaction: req.redaction,
+                    candidate_count: run_candidates.len(),
+                    candidate_rank: None,
+                    assessment,
+                }),
+            ));
+            continue;
+        }
+        if matches!(assessment.relation, AnchorRunRelation::DeepOverlap) {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_run_rejected_deep_overlap",
+                "anchor run was rejected because it overlaps too deeply into the redaction",
+                anchor_run_metrics(AnchorRunMetricsInput {
+                    run,
+                    left_side: req.left_side,
+                    line_bucket: req.line_bucket,
+                    line_bucket_rank: req.line_bucket_rank,
+                    redaction: req.redaction,
+                    candidate_count: run_candidates.len(),
+                    candidate_rank: None,
+                    assessment,
+                }),
+            ));
+        }
+        if matches!(assessment.relation, AnchorRunRelation::OppositeSide) {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_run_rejected_opposite_side",
+                "anchor run was rejected because its inner boundary edge is on the opposite side of the redaction",
+                anchor_run_metrics(AnchorRunMetricsInput {
+                    run,
+                    left_side: req.left_side,
+                    line_bucket: req.line_bucket,
+                    line_bucket_rank: req.line_bucket_rank,
+                    redaction: req.redaction,
+                    candidate_count: run_candidates.len(),
+                    candidate_rank: None,
+                    assessment,
+                }),
+            ));
+        }
+        if !assessment.relation.is_allowed() {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_run_rejected_wrong_side_of_redaction",
+                "anchor run was rejected because it was not admissible for the requested side",
+                anchor_run_metrics(AnchorRunMetricsInput {
+                    run,
+                    left_side: req.left_side,
+                    line_bucket: req.line_bucket,
+                    line_bucket_rank: req.line_bucket_rank,
+                    redaction: req.redaction,
+                    candidate_count: run_candidates.len(),
+                    candidate_rank: None,
+                    assessment,
+                }),
+            ));
+        }
+    }
+    for (candidate_rank, candidate) in run_candidates.iter().enumerate() {
+        let metrics = anchor_run_metrics(AnchorRunMetricsInput {
+            run: candidate.run,
+            left_side: req.left_side,
+            line_bucket: req.line_bucket,
+            line_bucket_rank: req.line_bucket_rank,
+            redaction: req.redaction,
+            candidate_count: run_candidates.len(),
+            candidate_rank: Some(candidate_rank),
+            assessment: assess_anchor_run_boundary(
+                req.redaction,
+                candidate.run,
+                req.left_side,
+                req.overlap_tolerance_pt,
+            ),
+        });
+        diagnostics.push(build_diagnostic(
+            req.location.clone(),
+            "redaction_evidence",
+            "anchor_run_candidate_considered",
+            "considered boundary-adjacent text run for anchor construction",
+            metrics.clone(),
+        ));
+        if candidate.relation == AnchorRunRelation::SmallOverlap {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_run_selected_small_overlap",
+                "selected a boundary-local run that slightly overlaps the redaction",
+                metrics,
+            ));
+        }
+    }
+    diagnostics
+}
+
+fn build_bucket_candidate_diagnostics(
+    location: DiagnosticLocation,
+    redaction: &RedactionOccurrence,
+    line_bucket: &LineBucket<'_>,
+    line_bucket_rank: usize,
+    summary: &BucketCandidateSummary,
+) -> Vec<RedactionEvidenceDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut metrics = line_bucket_metrics(line_bucket, redaction, 0, line_bucket_rank as i64);
+    metrics.insert(
+        "left_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "left_run_candidate_count_expanded".to_owned(),
+        DiagnosticValue::Integer(summary.left_run_candidate_count_expanded as i64),
+    );
+    metrics.insert(
+        "right_run_candidate_count_expanded".to_owned(),
+        DiagnosticValue::Integer(summary.right_run_candidate_count_expanded as i64),
+    );
+    metrics.insert(
+        "left_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
+    );
+    metrics.insert(
+        "starvation_expansion_applied".to_owned(),
+        DiagnosticValue::Bool(summary.starvation_expansion_applied),
+    );
+    diagnostics.push(build_diagnostic(
+        DiagnosticLocation {
+            row_id: location.row_id.clone(),
+            redaction_id: location.redaction_id.clone(),
+            page_index: location.page_index,
+            bbox: location.bbox,
+        },
+        "redaction_evidence",
+        "anchor_bucket_candidate_summary",
+        "summarized anchor candidates available in this line bucket",
+        metrics.clone(),
+    ));
+    if summary.left_span_candidate_count == 0 {
+        diagnostics.push(build_diagnostic(
+            DiagnosticLocation {
+                row_id: location.row_id.clone(),
+                redaction_id: location.redaction_id.clone(),
+                page_index: location.page_index,
+                bbox: location.bbox,
+            },
+            "redaction_evidence",
+            "anchor_bucket_missing_left_candidates",
+            "line bucket produced no valid left-side anchor span candidates",
+            metrics.clone(),
+        ));
+    }
+    if summary.right_span_candidate_count == 0 {
+        diagnostics.push(build_diagnostic(
+            location,
+            "redaction_evidence",
+            "anchor_bucket_missing_right_candidates",
+            "line bucket produced no valid right-side anchor span candidates",
+            metrics,
+        ));
+    }
+    diagnostics
+}
+
+fn build_anchor_bucket_starved_diagnostic(
+    location: DiagnosticLocation,
+    redaction: &RedactionOccurrence,
+    line_bucket: &LineBucket<'_>,
+    line_bucket_rank: usize,
+    summary: &BucketCandidateSummary,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = line_bucket_metrics(line_bucket, redaction, 0, line_bucket_rank as i64);
+    metrics.insert(
+        "left_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "left_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
+    );
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_bucket_starved",
+        "line bucket produced too few side candidates and triggered starvation handling",
+        metrics,
+    )
+}
+
+fn build_anchor_bucket_starvation_expansion_diagnostic(
+    location: DiagnosticLocation,
+    redaction: &RedactionOccurrence,
+    line_bucket: &LineBucket<'_>,
+    line_bucket_rank: usize,
+    summary: &BucketCandidateSummary,
+) -> RedactionEvidenceDiagnostic {
+    let mut metrics = line_bucket_metrics(line_bucket, redaction, 0, line_bucket_rank as i64);
+    metrics.insert(
+        "base_overlap_tolerance_pt".to_owned(),
+        DiagnosticValue::Float(ANCHOR_BOUNDARY_SMALL_OVERLAP_PT as f64),
+    );
+    metrics.insert(
+        "expanded_overlap_tolerance_pt".to_owned(),
+        DiagnosticValue::Float(ANCHOR_BOUNDARY_EXPANDED_OVERLAP_PT as f64),
+    );
+    metrics.insert(
+        "left_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_run_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_run_candidate_count as i64),
+    );
+    metrics.insert(
+        "left_run_candidate_count_expanded".to_owned(),
+        DiagnosticValue::Integer(summary.left_run_candidate_count_expanded as i64),
+    );
+    metrics.insert(
+        "right_run_candidate_count_expanded".to_owned(),
+        DiagnosticValue::Integer(summary.right_run_candidate_count_expanded as i64),
+    );
+    metrics.insert(
+        "left_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.left_span_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_span_candidate_count".to_owned(),
+        DiagnosticValue::Integer(summary.right_span_candidate_count as i64),
+    );
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_bucket_starvation_expansion_applied",
+        "expanded small-overlap admission inside a starved line bucket",
+        metrics,
+    )
 }
 
 fn build_line_bucket_diagnostics(
     location: DiagnosticLocation,
     redaction: &RedactionOccurrence,
+    line_buckets: Option<&[LineBucket<'_>]>,
     candidates: &[LineBucketCandidate<'_>],
     selected_line_id: Option<&str>,
 ) -> Vec<RedactionEvidenceDiagnostic> {
-    let mut diagnostics = Vec::new();
-    for (candidate_rank, candidate) in candidates.iter().enumerate() {
-        diagnostics.push(build_diagnostic(
-            location.clone(),
+    let Some(line_buckets) = line_buckets else {
+        return vec![build_diagnostic(
+            location,
             "redaction_evidence",
-            "line_bucket_candidate_considered",
-            "considered same-line text bucket for redaction",
-            line_bucket_metrics(
-                candidate.line_bucket,
-                redaction,
-                candidates.len(),
-                candidate_rank,
-            ),
+            "line_bucket_pool_empty",
+            "page had no non-empty text buckets available for anchor resolution",
+            BTreeMap::new(),
+        )];
+    };
+    let mut diagnostics = Vec::new();
+    let eligible_ranks = candidates
+        .iter()
+        .enumerate()
+        .map(|(candidate_rank, candidate)| (candidate.line_bucket.line_id.as_str(), candidate_rank))
+        .collect::<BTreeMap<_, _>>();
+    for line_bucket in line_buckets {
+        if let Some(candidate_rank) = eligible_ranks.get(line_bucket.line_id.as_str()).copied() {
+            diagnostics.push(build_diagnostic(
+                location.clone(),
+                "redaction_evidence",
+                "line_bucket_candidate_considered",
+                "considered same-line text bucket for redaction",
+                line_bucket_metrics(
+                    line_bucket,
+                    redaction,
+                    candidates.len() as i64,
+                    candidate_rank as i64,
+                ),
+            ));
+        } else {
+            diagnostics.push(build_diagnostic(
+                location.clone(),
+                "redaction_evidence",
+                "line_bucket_rejected_not_same_line",
+                "line bucket was rejected because it was neither overlapping nor baseline-close",
+                line_bucket_metrics(line_bucket, redaction, candidates.len() as i64, -1),
+            ));
+        }
+    }
+    if candidates.is_empty() {
+        diagnostics.push(build_diagnostic(
+            DiagnosticLocation {
+                row_id: location.row_id.clone(),
+                redaction_id: location.redaction_id.clone(),
+                page_index: location.page_index,
+                bbox: location.bbox,
+            },
+            "redaction_evidence",
+            "line_bucket_pool_no_eligible_candidates",
+            "no line bucket satisfied the anchor-resolution same-line eligibility rule",
+            BTreeMap::new(),
         ));
     }
     if let Some(selected_line_id) = selected_line_id {
@@ -1215,8 +1837,8 @@ fn build_line_bucket_diagnostics(
                 line_bucket_metrics(
                     selected.line_bucket,
                     redaction,
-                    candidates.len(),
-                    selected_rank,
+                    candidates.len() as i64,
+                    selected_rank as i64,
                 ),
             ));
         }
@@ -1247,8 +1869,10 @@ fn build_anchor_span_candidate<'a>(
         run: run_candidate.run,
         left_side,
         anchor,
+        relation: run_candidate.relation,
         visibility_rank: run_candidate.visibility_rank,
         gap_pt: run_candidate.gap_pt,
+        overlap_depth_pt: run_candidate.overlap_depth_pt,
         width_pt,
     }
 }
@@ -1281,15 +1905,19 @@ fn compare_side_candidates(
 ) -> std::cmp::Ordering {
     (
         left.line_bucket_rank,
-        left.visibility_rank,
+        left.relation.sort_rank(),
         ordered_f32(left.gap_pt),
+        left.visibility_rank,
+        ordered_f32(left.overlap_depth_pt),
         ordered_f32(left.width_pt),
         left.candidate_id.as_str(),
     )
         .cmp(&(
             right.line_bucket_rank,
-            right.visibility_rank,
+            right.relation.sort_rank(),
             ordered_f32(right.gap_pt),
+            right.visibility_rank,
+            ordered_f32(right.overlap_depth_pt),
             ordered_f32(right.width_pt),
             right.candidate_id.as_str(),
         ))
@@ -1342,6 +1970,180 @@ fn pair_rejection_reason(
         ));
     }
     None
+}
+
+fn pair_target_width_pt(pair: &AnchorPairCandidate<'_>) -> Option<f32> {
+    let left_gap_pt = pair.left.anchor.trailing_whitespace_width_pt.max(0.0_f32);
+    let right_gap_pt = pair.right.anchor.leading_whitespace_width_pt.max(0.0_f32);
+    let usable_left_edge_x_pt = pair.left.anchor.inner_right_edge_x_pt + left_gap_pt;
+    let usable_right_edge_x_pt = pair.right.anchor.inner_left_edge_x_pt - right_gap_pt;
+    (usable_right_edge_x_pt > usable_left_edge_x_pt)
+        .then_some(usable_right_edge_x_pt - usable_left_edge_x_pt)
+}
+
+fn pair_box_delta_threshold_pt(redaction_width_pt: f32) -> f32 {
+    ANCHOR_PAIR_BOX_SUSPECT_ABS_DELTA_PT.max(redaction_width_pt * ANCHOR_PAIR_BOX_SUSPECT_RATIO)
+}
+
+fn pair_box_override_improvement_threshold_pt(selected_delta_pt: f32) -> f32 {
+    ANCHOR_PAIR_BOX_OVERRIDE_MIN_IMPROVEMENT_PT
+        .max(selected_delta_pt.max(0.0_f32) * ANCHOR_PAIR_BOX_OVERRIDE_RATIO)
+}
+
+fn pair_box_metrics(
+    pair: &AnchorPairCandidate<'_>,
+    redaction: &RedactionOccurrence,
+    line_bucket_count: usize,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = pair_candidate_metrics(pair, line_bucket_count);
+    let redaction_width_pt = redaction.bbox.width().abs();
+    if let Some(pair_target_width_pt) = pair_target_width_pt(pair) {
+        metrics.insert(
+            "pair_target_width_pt".to_owned(),
+            DiagnosticValue::Float(pair_target_width_pt as f64),
+        );
+        metrics.insert(
+            "pair_box_delta_pt".to_owned(),
+            DiagnosticValue::Float((pair_target_width_pt - redaction_width_pt).abs() as f64),
+        );
+    }
+    metrics.insert(
+        "redaction_width_pt".to_owned(),
+        DiagnosticValue::Float(redaction_width_pt as f64),
+    );
+    metrics.insert(
+        "pair_box_delta_threshold_pt".to_owned(),
+        DiagnosticValue::Float(pair_box_delta_threshold_pt(redaction_width_pt) as f64),
+    );
+    metrics
+}
+
+fn select_box_sane_pair<'a>(
+    redaction: &RedactionOccurrence,
+    valid_pairs: &[AnchorPairCandidate<'a>],
+    initial_selected_pair: &AnchorPairCandidate<'a>,
+    location: DiagnosticLocation,
+    line_bucket_count: usize,
+    collect_diagnostics: bool,
+    diagnostics: &mut Vec<RedactionEvidenceDiagnostic>,
+) -> (AnchorPairCandidate<'a>, bool) {
+    let Some(initial_target_width_pt) = pair_target_width_pt(initial_selected_pair) else {
+        if collect_diagnostics {
+            diagnostics.push(build_diagnostic(
+                location,
+                "redaction_evidence",
+                "anchor_pair_selected_without_box_override",
+                "selected anchor pair without box-sanity override because pair target width was unavailable",
+                pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
+            ));
+        }
+        return (initial_selected_pair.clone(), false);
+    };
+    let redaction_width_pt = redaction.bbox.width().abs();
+    let initial_delta_pt = (initial_target_width_pt - redaction_width_pt).abs();
+    let suspect_threshold_pt = pair_box_delta_threshold_pt(redaction_width_pt);
+    if collect_diagnostics {
+        diagnostics.push(build_diagnostic(
+            location.clone(),
+            "redaction_evidence",
+            "anchor_pair_span_box_delta_computed",
+            "computed selected pair delta against the redaction box width",
+            pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
+        ));
+    }
+    if initial_target_width_pt <= redaction_width_pt || initial_delta_pt < suspect_threshold_pt {
+        if collect_diagnostics {
+            diagnostics.push(build_diagnostic(
+                location,
+                "redaction_evidence",
+                "anchor_pair_selected_without_box_override",
+                "selected anchor pair without box-sanity override because the span was not suspiciously wide",
+                pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
+            ));
+        }
+        return (initial_selected_pair.clone(), false);
+    }
+    if collect_diagnostics {
+        diagnostics.push(build_diagnostic(
+            location.clone(),
+            "redaction_evidence",
+            "anchor_pair_span_box_delta_suspect",
+            "selected anchor pair span was suspiciously wider than the redaction box",
+            pair_box_metrics(initial_selected_pair, redaction, line_bucket_count),
+        ));
+    }
+    let override_improvement_threshold_pt =
+        pair_box_override_improvement_threshold_pt(initial_delta_pt);
+    let replacement = valid_pairs
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_target_width_pt = pair_target_width_pt(candidate)?;
+            let candidate_delta_pt = (candidate_target_width_pt - redaction_width_pt).abs();
+            let improvement_pt = initial_delta_pt - candidate_delta_pt;
+            (candidate_delta_pt < initial_delta_pt
+                && improvement_pt >= override_improvement_threshold_pt)
+                .then_some((candidate.clone(), candidate_delta_pt, improvement_pt))
+        })
+        .min_by(|left, right| {
+            (
+                ordered_f32(left.1),
+                left.0.line_bucket_rank,
+                left.0.pair_id.as_str(),
+            )
+                .cmp(&(
+                    ordered_f32(right.1),
+                    right.0.line_bucket_rank,
+                    right.0.pair_id.as_str(),
+                ))
+        });
+    if let Some((replacement_pair, replacement_delta_pt, improvement_pt)) = replacement {
+        if collect_diagnostics {
+            let mut metrics = pair_box_metrics(&replacement_pair, redaction, line_bucket_count);
+            metrics.insert(
+                "replaced_pair_id".to_owned(),
+                DiagnosticValue::Text(initial_selected_pair.pair_id.clone()),
+            );
+            metrics.insert(
+                "replaced_pair_box_delta_pt".to_owned(),
+                DiagnosticValue::Float(initial_delta_pt as f64),
+            );
+            metrics.insert(
+                "replacement_improvement_pt".to_owned(),
+                DiagnosticValue::Float(improvement_pt as f64),
+            );
+            metrics.insert(
+                "override_improvement_threshold_pt".to_owned(),
+                DiagnosticValue::Float(override_improvement_threshold_pt as f64),
+            );
+            metrics.insert(
+                "replacement_pair_box_delta_pt".to_owned(),
+                DiagnosticValue::Float(replacement_delta_pt as f64),
+            );
+            diagnostics.push(build_diagnostic(
+                location,
+                "redaction_evidence",
+                "anchor_pair_selected_box_sanity_override",
+                "selected a different valid pair because the original pair was suspiciously wider than the redaction box",
+                metrics,
+            ));
+        }
+        return (replacement_pair, true);
+    }
+    if collect_diagnostics {
+        let mut metrics = pair_box_metrics(initial_selected_pair, redaction, line_bucket_count);
+        metrics.insert(
+            "override_improvement_threshold_pt".to_owned(),
+            DiagnosticValue::Float(override_improvement_threshold_pt as f64),
+        );
+        diagnostics.push(build_diagnostic(
+            location,
+            "redaction_evidence",
+            "anchor_pair_selected_without_box_override",
+            "selected anchor pair without box-sanity override because no replacement improved the box delta enough",
+            metrics,
+        ));
+    }
+    (initial_selected_pair.clone(), false)
 }
 
 fn select_measurement_seed_side(
@@ -1525,6 +2327,42 @@ fn side_selection_metrics(
     metrics
 }
 
+fn anchor_pair_pool_metrics(
+    line_bucket_count: usize,
+    pair_candidate_count: usize,
+    valid_pair_count: usize,
+) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "line_bucket_count".to_owned(),
+        DiagnosticValue::Integer(line_bucket_count as i64),
+    );
+    metrics.insert(
+        "pair_candidate_count".to_owned(),
+        DiagnosticValue::Integer(pair_candidate_count as i64),
+    );
+    metrics.insert(
+        "valid_pair_count".to_owned(),
+        DiagnosticValue::Integer(valid_pair_count as i64),
+    );
+    metrics
+}
+
+fn build_anchor_pair_pool_summary_diagnostic(
+    location: DiagnosticLocation,
+    line_bucket_count: usize,
+    pair_candidate_count: usize,
+    valid_pair_count: usize,
+) -> RedactionEvidenceDiagnostic {
+    build_diagnostic(
+        location,
+        "redaction_evidence",
+        "anchor_pair_pool_summary",
+        "summarized pair-candidate availability for the row",
+        anchor_pair_pool_metrics(line_bucket_count, pair_candidate_count, valid_pair_count),
+    )
+}
+
 fn pair_candidate_metrics(
     pair: &AnchorPairCandidate<'_>,
     line_bucket_count: usize,
@@ -1627,8 +2465,20 @@ fn anchor_span_metrics(
         DiagnosticValue::Float(candidate.gap_pt as f64),
     );
     metrics.insert(
+        "relation".to_owned(),
+        DiagnosticValue::Text(candidate.relation.as_str().to_owned()),
+    );
+    metrics.insert(
+        "relation_rank".to_owned(),
+        DiagnosticValue::Integer(candidate.relation.sort_rank() as i64),
+    );
+    metrics.insert(
         "visibility_rank".to_owned(),
         DiagnosticValue::Integer(candidate.visibility_rank as i64),
+    );
+    metrics.insert(
+        "overlap_depth_pt".to_owned(),
+        DiagnosticValue::Float(candidate.overlap_depth_pt as f64),
     );
     metrics.insert(
         "span_x0".to_owned(),
@@ -1649,6 +2499,18 @@ fn anchor_span_metrics(
     metrics.insert(
         "span_width_pt".to_owned(),
         DiagnosticValue::Float(candidate.width_pt as f64),
+    );
+    metrics.insert(
+        "boundary_run_x0".to_owned(),
+        DiagnosticValue::Float(candidate.run.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "boundary_run_x1".to_owned(),
+        DiagnosticValue::Float(candidate.run.bbox.x1 as f64),
+    );
+    metrics.insert(
+        "boundary_run_width_pt".to_owned(),
+        DiagnosticValue::Float((candidate.run.bbox.x1 - candidate.run.bbox.x0).abs() as f64),
     );
     metrics.insert(
         "text_edge_x_pt".to_owned(),
@@ -1726,20 +2588,30 @@ fn diagnostic_stable_candidate_id(diagnostic: &RedactionEvidenceDiagnostic) -> S
 fn line_bucket_metrics(
     line_bucket: &LineBucket<'_>,
     redaction: &RedactionOccurrence,
-    candidate_count: usize,
-    candidate_rank: usize,
+    candidate_count: i64,
+    candidate_rank: i64,
 ) -> BTreeMap<String, DiagnosticValue> {
     let (bucket_left_x_pt, bucket_right_x_pt) = line_bucket_span(line_bucket);
-    let left_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, true);
-    let right_candidates = ranked_anchor_run_candidates(redaction, &line_bucket.runs, false);
+    let left_candidates = ranked_anchor_run_candidates(
+        redaction,
+        &line_bucket.runs,
+        true,
+        ANCHOR_BOUNDARY_SMALL_OVERLAP_PT,
+    );
+    let right_candidates = ranked_anchor_run_candidates(
+        redaction,
+        &line_bucket.runs,
+        false,
+        ANCHOR_BOUNDARY_SMALL_OVERLAP_PT,
+    );
     let mut metrics = BTreeMap::new();
     metrics.insert(
         "candidate_count".to_owned(),
-        DiagnosticValue::Integer(candidate_count as i64),
+        DiagnosticValue::Integer(candidate_count),
     );
     metrics.insert(
         "candidate_rank".to_owned(),
-        DiagnosticValue::Integer(candidate_rank as i64),
+        DiagnosticValue::Integer(candidate_rank),
     );
     metrics.insert(
         "line_id".to_owned(),
@@ -1794,6 +2666,116 @@ fn line_bucket_metrics(
         "bucket_right_candidate_count".to_owned(),
         DiagnosticValue::Integer(right_candidates.len() as i64),
     );
+    metrics
+}
+
+fn anchor_run_metrics(input: AnchorRunMetricsInput<'_>) -> BTreeMap<String, DiagnosticValue> {
+    let mut metrics = BTreeMap::new();
+    let side = if input.left_side { "left" } else { "right" };
+    metrics.insert(
+        "stable_candidate_id".to_owned(),
+        DiagnosticValue::Text(format!(
+            "{}:{}:{}",
+            input.line_bucket.line_id,
+            side,
+            anchor_run_sort_key(input.run)
+        )),
+    );
+    metrics.insert(
+        "anchor_side".to_owned(),
+        DiagnosticValue::Text(side.to_owned()),
+    );
+    metrics.insert(
+        "line_id".to_owned(),
+        DiagnosticValue::Text(input.line_bucket.line_id.clone()),
+    );
+    metrics.insert(
+        "line_bucket_rank".to_owned(),
+        DiagnosticValue::Integer(input.line_bucket_rank as i64),
+    );
+    metrics.insert(
+        "candidate_count".to_owned(),
+        DiagnosticValue::Integer(input.candidate_count as i64),
+    );
+    if let Some(candidate_rank) = input.candidate_rank {
+        metrics.insert(
+            "candidate_rank".to_owned(),
+            DiagnosticValue::Integer(candidate_rank as i64),
+        );
+    }
+    metrics.insert(
+        "run_text".to_owned(),
+        DiagnosticValue::Text(input.run.text.clone()),
+    );
+    metrics.insert(
+        "run_text_trimmed".to_owned(),
+        DiagnosticValue::Text(input.run.text.trim().to_owned()),
+    );
+    metrics.insert(
+        "run_allowed_for_side".to_owned(),
+        DiagnosticValue::Bool(input.assessment.relation.is_allowed()),
+    );
+    metrics.insert(
+        "run_gap_pt".to_owned(),
+        DiagnosticValue::Float(input.assessment.boundary_distance_pt as f64),
+    );
+    metrics.insert(
+        "run_relation".to_owned(),
+        DiagnosticValue::Text(input.assessment.relation.as_str().to_owned()),
+    );
+    metrics.insert(
+        "run_relation_rank".to_owned(),
+        DiagnosticValue::Integer(input.assessment.relation.sort_rank() as i64),
+    );
+    metrics.insert(
+        "run_overlap_depth_pt".to_owned(),
+        DiagnosticValue::Float(input.assessment.overlap_depth_pt as f64),
+    );
+    metrics.insert(
+        "run_overlap_tolerance_pt".to_owned(),
+        DiagnosticValue::Float(input.assessment.overlap_tolerance_pt as f64),
+    );
+    metrics.insert(
+        "run_boundary_inner_left_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(input.assessment.boundary_geometry.inner_left_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "run_boundary_inner_right_edge_x_pt".to_owned(),
+        DiagnosticValue::Float(input.assessment.boundary_geometry.inner_right_edge_x_pt as f64),
+    );
+    metrics.insert(
+        "run_visibility_rank".to_owned(),
+        DiagnosticValue::Integer(visibility_rank(input.run) as i64),
+    );
+    metrics.insert(
+        "run_x0".to_owned(),
+        DiagnosticValue::Float(input.run.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "run_x1".to_owned(),
+        DiagnosticValue::Float(input.run.bbox.x1 as f64),
+    );
+    metrics.insert(
+        "run_y0".to_owned(),
+        DiagnosticValue::Float(input.run.bbox.y0 as f64),
+    );
+    metrics.insert(
+        "run_y1".to_owned(),
+        DiagnosticValue::Float(input.run.bbox.y1 as f64),
+    );
+    metrics.insert(
+        "run_width_pt".to_owned(),
+        DiagnosticValue::Float((input.run.bbox.x1 - input.run.bbox.x0).abs() as f64),
+    );
+    metrics.insert(
+        "redaction_left_x_pt".to_owned(),
+        DiagnosticValue::Float(input.redaction.bbox.x0 as f64),
+    );
+    metrics.insert(
+        "redaction_right_x_pt".to_owned(),
+        DiagnosticValue::Float(input.redaction.bbox.x1 as f64),
+    );
+    extend_metrics(&mut metrics, width_profile_metrics("run", input.run));
     metrics
 }
 

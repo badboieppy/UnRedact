@@ -101,3 +101,8 @@ required-features = ["cli-entry"]
 name = "visual_anchor_metric_extractor"
 path = "src/bin/visual_anchor_metric_extractor.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "anchor_span_visual_benchmark"
+path = "src/bin/anchor_span_visual_benchmark.rs"
+required-features = ["cli-entry"]

@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use crate::logic::visual_anchor_research_component::{
+    run_visual_anchor_research, RunVisualAnchorResearchRequest,
+};
 use crate::logic::{
     build_visual_metric_file_paths, discover_pdf_inputs, ensure_batch_output_dir_for_input,
-    read_input_pdf_bytes, run_redaction_guessing_component, validate_batch_input_directory,
-    write_visual_metric_outputs, BytesPipelineRequest, PipelineConfig, PipelineExecutionOptions,
+    read_input_pdf_bytes, validate_batch_input_directory, write_visual_metric_outputs,
+    PipelineConfig,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,31 +67,27 @@ fn run_batch(
 }
 
 fn run_single(input: &Path, output_dir: &Path, compact: bool) -> Result<PathBuf, String> {
-    let outputs = run_redaction_guessing_component(BytesPipelineRequest {
-        input_name: input.to_string_lossy().to_string(),
-        pdf_bytes: read_input_pdf_bytes(input)?,
+    let pdf_bytes = read_input_pdf_bytes(input)?;
+    let input_name = input.to_string_lossy().to_string();
+    let outputs = run_visual_anchor_research(RunVisualAnchorResearchRequest {
+        input_name: &input_name,
+        pdf_bytes: &pdf_bytes,
         dictionary_bytes: None,
-        cfg: visual_metrics_config(),
-        execution: PipelineExecutionOptions {
-            collect_diagnostics: true,
-        },
+        cfg: &visual_metrics_config(),
+        collect_diagnostics: true,
     })?;
-    let report = outputs
-        .visual_anchor_metrics
-        .as_ref()
-        .ok_or_else(|| "visual anchor metrics report missing".to_owned())?;
-    let crops = outputs
-        .visual_anchor_crops
-        .as_ref()
-        .ok_or_else(|| "visual anchor crops missing".to_owned())?;
     let report_json = if compact {
-        serde_json::to_vec(report)
+        serde_json::to_vec(&outputs.visual_report)
     } else {
-        serde_json::to_vec_pretty(report)
+        serde_json::to_vec_pretty(&outputs.visual_report)
     }
     .map_err(|error| format!("failed to encode visual metrics json: {error}"))?;
     let paths = build_visual_metric_file_paths(input, output_dir)?;
-    write_visual_metric_outputs(&paths, report_json.as_slice(), crops.as_slice())?;
+    write_visual_metric_outputs(
+        &paths,
+        report_json.as_slice(),
+        outputs.visual_crops.as_slice(),
+    )?;
     Ok(paths.report_path)
 }
 

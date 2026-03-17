@@ -7,9 +7,6 @@ use crate::data::redactions_data::RedactionsData;
 use crate::logic::types::{
     BytesPipelineOutputs, BytesPipelineRequest, PipelineConfig, VisualizationPayload,
 };
-use crate::logic::visual_anchor_metrics_component::{
-    run_visual_anchor_metrics, RunVisualAnchorMetricsRequest,
-};
 use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use crate::types::file_types::{FontDetectionReport, FontRunReport};
 use crate::types::guess_types::{GuessReport, StageTimingRecord};
@@ -116,21 +113,6 @@ pub fn run_redaction_guessing_component(
     let visualization_stage =
         build_visualization_payload_stage(&pdf_bytes, &cfg, &font_runs_stage.font_runs)?;
 
-    let visual_anchor_metrics_stage = if execution.collect_diagnostics {
-        let visual_metrics = run_visual_anchor_metrics(RunVisualAnchorMetricsRequest {
-            pdf_name: &input_name,
-            pdf_bytes: &pdf_bytes,
-            guesses: &guess_stage.guesses,
-            collect_diagnostics: execution.collect_diagnostics,
-        })?;
-        if let Some(items) = guess_stage.diagnostics.as_mut() {
-            items.extend(visual_metrics.diagnostics.clone());
-        }
-        Some(visual_metrics)
-    } else {
-        None
-    };
-
     push_stage_timing(
         &mut guess_stage.guesses,
         &mut guess_stage.diagnostics,
@@ -144,10 +126,6 @@ pub fn run_redaction_guessing_component(
         fonts: font_stage.fonts,
         guesses: guess_stage.guesses,
         diagnostics: guess_stage.diagnostics,
-        visual_anchor_metrics: visual_anchor_metrics_stage
-            .as_ref()
-            .map(|value| value.report.clone()),
-        visual_anchor_crops: visual_anchor_metrics_stage.map(|value| value.crops),
         visualization_payload: visualization_stage.payload,
         visualized_pdf_bytes: None,
     })

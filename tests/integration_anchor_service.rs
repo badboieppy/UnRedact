@@ -68,6 +68,16 @@ fn assert_anchor_contract(
     );
 }
 
+fn anchor_decision<'a>(
+    decisions: &'a [AnchorDecisionRecord],
+    row_id: &str,
+) -> &'a AnchorDecisionRecord {
+    decisions
+        .iter()
+        .find(|decision| decision.anchor_row_id == row_id)
+        .unwrap_or_else(|| panic!("missing anchor decision for row_id={row_id}"))
+}
+
 fn diagnostic_float(record: &DiagnosticRecord, key: &str) -> f64 {
     match record.metrics.get(key) {
         Some(DiagnosticValue::Float(value)) => *value,
@@ -96,6 +106,12 @@ fn diagnostic_by_row_code_side<'a>(
                 && item.metrics.get("side") == Some(&DiagnosticValue::Text(side.to_owned()))
         })
         .unwrap_or_else(|| panic!("missing diagnostic code={code} row_id={row_id} side={side}"))
+}
+
+fn has_diagnostic_code(items: &[DiagnosticRecord], row_id: &str, code: &str) -> bool {
+    items
+        .iter()
+        .any(|item| item.row_id.as_deref() == Some(row_id) && item.code == code)
 }
 
 #[test]
@@ -190,11 +206,23 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
         run_from_paths(efta00101126_input, &efta00101126_output, None, cfg())
             .expect("pipeline run should succeed for EFTA00101126");
     let efta00101126_report = load_guess_report(&efta00101126_outputs.guesses_path);
-    assert_anchor_contract(
-        efta00101126_report.anchors.as_slice(),
-        "page7_row0",
-        "two_sided",
-        "identity",
+    let page7_row0 = anchor_decision(efta00101126_report.anchors.as_slice(), "page7_row0");
+    assert_eq!(page7_row0.anchor_mode, "two_sided");
+    assert_eq!(
+        page7_row0
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "and"
+    );
+    assert_eq!(
+        page7_row0.selection_reason.as_deref(),
+        Some("pair_candidate_selected_box_sanity_override")
+    );
+    assert!(
+        (page7_row0.target_width_pt - 92.94_f32).abs() <= 1.0_f32,
+        "expected page7_row0 target width to align with the visual span after box sanity override"
     );
     assert_anchor_contract(
         efta00101126_report.anchors.as_slice(),
@@ -240,24 +268,22 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
         run_from_paths(efta01083121_input, &efta01083121_output, None, cfg())
             .expect("pipeline run should succeed for EFTA01083121");
     let efta01083121_report = load_guess_report(&efta01083121_outputs.guesses_path);
-    assert_anchor_contract(
-        efta01083121_report.anchors.as_slice(),
-        "page0_row4",
-        "two_sided",
-        "Registry",
-    );
-    assert_anchor_contract(
-        efta01083121_report.anchors.as_slice(),
-        "page0_row6",
-        "two_sided",
-        "number",
-    );
-    assert_anchor_contract(
-        efta01083121_report.anchors.as_slice(),
-        "page0_row7",
-        "two_sided",
-        "Islands",
-    );
+    for (row_id, expected_target_width_pt) in [
+        ("page0_row4", 26.03_f32),
+        ("page0_row6", 106.58_f32),
+        ("page0_row7", 67.69_f32),
+    ] {
+        let decision = anchor_decision(efta01083121_report.anchors.as_slice(), row_id);
+        assert_eq!(decision.anchor_mode, "two_sided");
+        assert_eq!(
+            decision.selection_reason.as_deref(),
+            Some("pair_candidate_selected_box_sanity_override")
+        );
+        assert!(
+            (decision.target_width_pt - expected_target_width_pt).abs() <= 1.5_f32,
+            "expected {row_id} target width to reflect the narrower box-sanity-selected pair"
+        );
+    }
 
     let efta02238592_input = Path::new("test_data/EFTA02238592.pdf");
     let efta02238592_output = test_output_dir("integration_anchor_contract_efta02238592");
@@ -359,6 +385,75 @@ fn geometry_diagnostics_record_inner_edges_and_explicit_boundary_whitespace() {
     assert!(
         (target_width_pt - (usable_right - usable_left)).abs() <= 0.001_f64,
         "expected target width to be derived directly from usable inner edges"
+    );
+}
+
+#[test]
+fn anchor_diagnostics_expose_rejected_buckets_runs_and_pair_pool_state() {
+    let input = Path::new("test_data/EFTA00101126.pdf");
+    let output_dir = test_output_dir("integration_anchor_diagnostic_branch_coverage");
+    std::fs::create_dir_all(&output_dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", output_dir.display()));
+    let outputs = run_from_paths_with_diagnostics(
+        input,
+        &output_dir,
+        None,
+        UnredactServiceConfig {
+            include_details: false,
+            enable_image_analysis: true,
+            guess: unredact::types::guess_types::GuessConfig::default(),
+            visualize: false,
+            visualizer: VisualizerConfig::default(),
+        },
+        true,
+    )
+    .expect("diagnostics-enabled run should succeed");
+    let diagnostics = load_diagnostic_report(
+        outputs
+            .diagnostics_path
+            .as_ref()
+            .expect("diagnostics path should be present"),
+    );
+
+    assert!(
+        has_diagnostic_code(
+            diagnostics.items.as_slice(),
+            "page7_row1",
+            "line_bucket_rejected_not_same_line",
+        ),
+        "expected rejected line bucket diagnostics for page7_row1"
+    );
+    assert!(
+        has_diagnostic_code(
+            diagnostics.items.as_slice(),
+            "page7_row1",
+            "anchor_run_rejected_wrong_side_of_redaction",
+        ),
+        "expected rejected anchor run diagnostics for page7_row1"
+    );
+    assert!(
+        has_diagnostic_code(
+            diagnostics.items.as_slice(),
+            "page7_row1",
+            "anchor_bucket_candidate_summary",
+        ),
+        "expected bucket summary diagnostics for page7_row1"
+    );
+    assert!(
+        has_diagnostic_code(
+            diagnostics.items.as_slice(),
+            "page7_row1",
+            "anchor_pair_pool_summary",
+        ),
+        "expected pair pool summary diagnostics for page7_row1"
+    );
+    assert!(
+        has_diagnostic_code(
+            diagnostics.items.as_slice(),
+            "page7_row1",
+            "anchor_pair_candidate_valid",
+        ),
+        "expected valid pair diagnostics for page7_row1"
     );
 }
 
