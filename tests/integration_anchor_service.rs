@@ -216,13 +216,9 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
             .unwrap_or_default(),
         "and"
     );
-    assert_eq!(
-        page7_row0.selection_reason.as_deref(),
-        Some("pair_candidate_selected_box_sanity_override")
-    );
     assert!(
         (page7_row0.target_width_pt - 92.94_f32).abs() <= 1.0_f32,
-        "expected page7_row0 target width to align with the visual span after box sanity override"
+        "expected page7_row0 target width to align with the visual span"
     );
     assert_anchor_contract(
         efta00101126_report.anchors.as_slice(),
@@ -243,11 +239,15 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
         run_from_paths(efta00038617_input, &efta00038617_output, None, cfg())
             .expect("pipeline run should succeed for EFTA00038617");
     let efta00038617_report = load_guess_report(&efta00038617_outputs.guesses_path);
-    assert_anchor_contract(
-        efta00038617_report.anchors.as_slice(),
-        "page1_row3",
-        "two_sided",
-        "Maxwell,",
+    let page1_row3 = anchor_decision(efta00038617_report.anchors.as_slice(), "page1_row3");
+    assert_eq!(page1_row3.anchor_mode, "left_only");
+    assert!(
+        page1_row3.right.is_none(),
+        "expected page1_row3 to fall back to one-sided after rejecting the nonlocal overlap bucket"
+    );
+    assert!(
+        (page1_row3.target_width_pt - 60.0_f32).abs() <= 0.1_f32,
+        "expected page1_row3 to use the redaction box width after one-sided fallback"
     );
     assert_anchor_contract(
         efta00038617_report.anchors.as_slice(),
@@ -275,15 +275,33 @@ fn deterministic_anchor_resolver_matches_expected_real_pdf_pairs() {
     ] {
         let decision = anchor_decision(efta01083121_report.anchors.as_slice(), row_id);
         assert_eq!(decision.anchor_mode, "two_sided");
-        assert_eq!(
-            decision.selection_reason.as_deref(),
-            Some("pair_candidate_selected_box_sanity_override")
-        );
         assert!(
             (decision.target_width_pt - expected_target_width_pt).abs() <= 1.5_f32,
-            "expected {row_id} target width to reflect the narrower box-sanity-selected pair"
+            "expected {row_id} target width to stay aligned to the narrowed visual span"
         );
     }
+    let page4_row22 = anchor_decision(efta01083121_report.anchors.as_slice(), "page4_row22");
+    assert_eq!(page4_row22.anchor_mode, "two_sided");
+    assert_eq!(
+        page4_row22
+            .left
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        ":"
+    );
+    assert_eq!(
+        page4_row22
+            .right
+            .as_ref()
+            .map(|side| side.text.trim())
+            .unwrap_or_default(),
+        "m"
+    );
+    assert!(
+        (page4_row22.target_width_pt - 96.52_f32).abs() <= 1.0_f32,
+        "expected page4_row22 to use the recovered punctuation boundary token"
+    );
 
     let efta02238592_input = Path::new("test_data/EFTA02238592.pdf");
     let efta02238592_output = test_output_dir("integration_anchor_contract_efta02238592");

@@ -24,7 +24,13 @@ const MAX_PAGE_COVERAGE_RATIO: f32 = 0.90_f32;
 const SAME_LINE_BASELINE_TOLERANCE_PT: f32 = 3.0_f32;
 const ROW_EPSILON_MIN_PT: f64 = 3.5_f64;
 const ROW_EPSILON_MAX_PT: f64 = 8.0_f64;
-const ANCHOR_BOUNDARY_SMALL_OVERLAP_PT: f32 = 5.0_f32;
+const LINE_BUCKET_HORIZONTAL_GAP_MAX_PT: f32 = 250.0_f32;
+const ANCHOR_BOUNDARY_SMALL_OVERLAP_PT: f32 = 3.0_f32;
+const ANCHOR_BOUNDARY_PUNCTUATION_GAP_MAX_PT: f32 = 0.25_f32;
+const ANCHOR_NONLOCAL_PAIR_BOX_DELTA_PT: f32 = 10.0_f32;
+const ANCHOR_NONLOCAL_PAIR_BOX_DELTA_RATIO: f32 = 0.15_f32;
+const ANCHOR_NONLOCAL_PAIR_MAX_GAP_PT: f32 = 20.0_f32;
+const ANCHOR_NONLOCAL_PAIR_GAP_DIFF_PT: f32 = 10.0_f32;
 
 #[derive(Clone)]
 struct LineBucket<'a> {
@@ -32,6 +38,8 @@ struct LineBucket<'a> {
     baseline_y1: f32,
     y0: f32,
     y1: f32,
+    rightmost_x1: f32,
+    split_from_previous_horizontal_gap_pt: Option<f32>,
     runs: Vec<&'a PdfFontTextRun>,
 }
 
@@ -39,6 +47,8 @@ struct LineBucketCandidate<'a> {
     line_bucket: &'a LineBucket<'a>,
     vertical_overlap_pt: f32,
     baseline_delta_pt: f32,
+    baseline_eligible: bool,
+    overlap_eligible: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -71,6 +81,10 @@ struct AnchorPairCandidate<'a> {
     pair_id: String,
     line_bucket: &'a LineBucket<'a>,
     line_bucket_rank: usize,
+    baseline_eligible: bool,
+    overlap_eligible: bool,
+    left_candidate_count: usize,
+    right_candidate_count: usize,
     left: AnchorSpanCandidate<'a>,
     right: AnchorSpanCandidate<'a>,
 }
@@ -78,6 +92,8 @@ struct AnchorPairCandidate<'a> {
 struct BucketAnchorCandidates<'a> {
     line_bucket: &'a LineBucket<'a>,
     line_bucket_rank: usize,
+    baseline_eligible: bool,
+    overlap_eligible: bool,
     left_candidates: Vec<AnchorSpanCandidate<'a>>,
     right_candidates: Vec<AnchorSpanCandidate<'a>>,
 }
@@ -369,11 +385,27 @@ fn build_line_buckets_by_page<'a>(
             if run.text.trim().is_empty() {
                 continue;
             }
-            if let Some(existing) = lines.iter_mut().find(|line| {
-                (run.bbox.y1 - line.baseline_y1).abs() <= SAME_LINE_BASELINE_TOLERANCE_PT
-            }) {
+            let mut target_index = None::<usize>;
+            let mut split_gap_pt = None::<f32>;
+            for index in (0..lines.len()).rev() {
+                let line = &lines[index];
+                if (run.bbox.y1 - line.baseline_y1).abs() > SAME_LINE_BASELINE_TOLERANCE_PT {
+                    continue;
+                }
+                let horizontal_gap_pt = (run.bbox.x0 - line.rightmost_x1).max(0.0_f32);
+                if horizontal_gap_pt <= LINE_BUCKET_HORIZONTAL_GAP_MAX_PT {
+                    target_index = Some(index);
+                    break;
+                }
+                if split_gap_pt.is_none() {
+                    split_gap_pt = Some(horizontal_gap_pt);
+                }
+            }
+            if let Some(target_index) = target_index {
+                let existing = &mut lines[target_index];
                 existing.y0 = existing.y0.min(run.bbox.y0);
                 existing.y1 = existing.y1.max(run.bbox.y1);
+                existing.rightmost_x1 = existing.rightmost_x1.max(run.bbox.x1.max(run.bbox.x0));
                 existing.runs.push(*run);
             } else {
                 let line_id = format!("page{page_index}_line{:03}", lines.len());
@@ -382,6 +414,8 @@ fn build_line_buckets_by_page<'a>(
                     baseline_y1: run.bbox.y1,
                     y0: run.bbox.y0,
                     y1: run.bbox.y1,
+                    rightmost_x1: run.bbox.x1.max(run.bbox.x0),
+                    split_from_previous_horizontal_gap_pt: split_gap_pt,
                     runs: vec![*run],
                 });
             }
@@ -467,12 +501,15 @@ fn ranked_line_bucket_candidates<'a>(
                 redaction.bbox.y1,
             );
             let baseline_delta = (line_bucket.baseline_y1 - redaction.bbox.y1).abs();
-            ((vertical_overlap > 0.0_f32) || (baseline_delta <= SAME_LINE_BASELINE_TOLERANCE_PT))
-                .then_some(LineBucketCandidate {
-                    line_bucket,
-                    vertical_overlap_pt: vertical_overlap,
-                    baseline_delta_pt: baseline_delta,
-                })
+            let overlap_eligible = vertical_overlap > 0.0_f32;
+            let baseline_eligible = baseline_delta <= SAME_LINE_BASELINE_TOLERANCE_PT;
+            (overlap_eligible || baseline_eligible).then_some(LineBucketCandidate {
+                line_bucket,
+                vertical_overlap_pt: vertical_overlap,
+                baseline_delta_pt: baseline_delta,
+                baseline_eligible,
+                overlap_eligible,
+            })
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
@@ -1007,7 +1044,7 @@ fn resolve_anchor_set_for_redaction<'a>(
         let bucket = build_bucket_anchor_candidates(
             redaction,
             row_id,
-            candidate.line_bucket,
+            candidate,
             line_bucket_rank,
             location.clone(),
             collect_diagnostics,
@@ -1026,6 +1063,10 @@ fn resolve_anchor_set_for_redaction<'a>(
                     pair_id: format!("{}|{}", left.candidate_id, right.candidate_id),
                     line_bucket: bucket.line_bucket,
                     line_bucket_rank: bucket.line_bucket_rank,
+                    baseline_eligible: bucket.baseline_eligible,
+                    overlap_eligible: bucket.overlap_eligible,
+                    left_candidate_count: bucket.left_candidates.len(),
+                    right_candidate_count: bucket.right_candidates.len(),
                     left: left.clone(),
                     right: right.clone(),
                 };
@@ -1050,6 +1091,46 @@ fn resolve_anchor_set_for_redaction<'a>(
                 valid_pairs.push(pair_candidate);
             }
         }
+    }
+
+    if !valid_pairs.is_empty() {
+        let mut filtered_pairs = Vec::<AnchorPairCandidate<'a>>::new();
+        let mut rejected_nonlocal_pair_count = 0_usize;
+        for pair_candidate in valid_pairs {
+            if pair_is_nonlocal_overlap_only_bucket(&pair_candidate, redaction) {
+                rejected_nonlocal_pair_count += 1;
+                if collect_diagnostics {
+                    diagnostics.push(build_diagnostic(
+                        location.clone(),
+                        "redaction_evidence",
+                        "anchor_pair_rejected_overlap_only_nonlocal_bucket",
+                        "rejected two-sided pair because it came from an overlap-only bucket with a nonlocal gap profile",
+                        pair_box_metrics(&pair_candidate, redaction, line_bucket_candidates.len()),
+                    ));
+                }
+                continue;
+            }
+            filtered_pairs.push(pair_candidate);
+        }
+        if collect_diagnostics && rejected_nonlocal_pair_count > 0 {
+            let mut metrics = anchor_pair_pool_metrics(
+                line_bucket_candidates.len(),
+                pair_candidate_count,
+                filtered_pairs.len(),
+            );
+            metrics.insert(
+                "rejected_nonlocal_pair_count".to_owned(),
+                DiagnosticValue::Integer(rejected_nonlocal_pair_count as i64),
+            );
+            diagnostics.push(build_diagnostic(
+                location.clone(),
+                "redaction_evidence",
+                "anchor_pair_pool_post_nonlocal_filter_summary",
+                "summarized pair-candidate availability after nonlocal overlap-bucket rejection",
+                metrics,
+            ));
+        }
+        valid_pairs = filtered_pairs;
     }
 
     if collect_diagnostics {
@@ -1259,11 +1340,12 @@ fn resolve_anchor_set_for_redaction<'a>(
 fn build_bucket_anchor_candidates<'a>(
     redaction: &RedactionOccurrence,
     row_id: &str,
-    line_bucket: &'a LineBucket<'a>,
+    line_bucket_candidate: &'a LineBucketCandidate<'a>,
     line_bucket_rank: usize,
     location: DiagnosticLocation,
     collect_diagnostics: bool,
 ) -> (BucketAnchorCandidates<'a>, Vec<RedactionEvidenceDiagnostic>) {
+    let line_bucket = line_bucket_candidate.line_bucket;
     let (left_candidates, left_run_candidate_count, mut diagnostics) =
         build_anchor_span_candidates(AnchorSpanBuildRequest {
             redaction,
@@ -1306,6 +1388,8 @@ fn build_bucket_anchor_candidates<'a>(
         BucketAnchorCandidates {
             line_bucket,
             line_bucket_rank,
+            baseline_eligible: line_bucket_candidate.baseline_eligible,
+            overlap_eligible: line_bucket_candidate.overlap_eligible,
             left_candidates,
             right_candidates,
         },
@@ -1352,7 +1436,12 @@ fn build_anchor_span_candidates<'a, 'b>(
                 ),
             ));
         }
-        if !anchor_text_has_alnum(&span_candidate.anchor.text) {
+        let allow_boundary_punctuation =
+            anchor_text_is_boundary_punctuation(&span_candidate.anchor.text)
+                && candidate_rank == 0
+                && span_candidate.relation == AnchorRunRelation::FullyOutside
+                && span_candidate.gap_pt <= ANCHOR_BOUNDARY_PUNCTUATION_GAP_MAX_PT;
+        if !anchor_text_has_alnum(&span_candidate.anchor.text) && !allow_boundary_punctuation {
             if req.collect_diagnostics {
                 diagnostics.push(build_diagnostic(
                     req.location.clone(),
@@ -1368,6 +1457,20 @@ fn build_anchor_span_candidates<'a, 'b>(
                 ));
             }
             continue;
+        }
+        if allow_boundary_punctuation && req.collect_diagnostics {
+            diagnostics.push(build_diagnostic(
+                req.location.clone(),
+                "redaction_evidence",
+                "anchor_span_allowed_boundary_punctuation",
+                "allowed a punctuation-only boundary token because it was the nearest fully-outside candidate and almost flush with the redaction edge",
+                anchor_span_metrics(
+                    &span_candidate,
+                    run_candidates.len(),
+                    candidate_rank,
+                    req.redaction,
+                ),
+            ));
         }
         candidates.push(span_candidate);
     }
@@ -1578,33 +1681,81 @@ fn build_line_bucket_diagnostics(
         )];
     };
     let mut diagnostics = Vec::new();
-    let eligible_ranks = candidates
+    let eligible_candidates = candidates
         .iter()
-        .enumerate()
-        .map(|(candidate_rank, candidate)| (candidate.line_bucket.line_id.as_str(), candidate_rank))
+        .map(|candidate| (candidate.line_bucket.line_id.as_str(), candidate))
         .collect::<BTreeMap<_, _>>();
     for line_bucket in line_buckets {
-        if let Some(candidate_rank) = eligible_ranks.get(line_bucket.line_id.as_str()).copied() {
+        if let Some(candidate) = eligible_candidates
+            .get(line_bucket.line_id.as_str())
+            .copied()
+        {
+            let candidate_rank = candidates
+                .iter()
+                .position(|entry| entry.line_bucket.line_id == line_bucket.line_id)
+                .unwrap_or_default();
+            let mut metrics = line_bucket_metrics(
+                line_bucket,
+                redaction,
+                candidates.len() as i64,
+                candidate_rank as i64,
+            );
+            metrics.insert(
+                "bucket_baseline_eligible".to_owned(),
+                DiagnosticValue::Bool(candidate.baseline_eligible),
+            );
+            metrics.insert(
+                "bucket_overlap_eligible".to_owned(),
+                DiagnosticValue::Bool(candidate.overlap_eligible),
+            );
+            metrics.insert(
+                "bucket_overlap_only".to_owned(),
+                DiagnosticValue::Bool(candidate.overlap_eligible && !candidate.baseline_eligible),
+            );
             diagnostics.push(build_diagnostic(
                 location.clone(),
                 "redaction_evidence",
                 "line_bucket_candidate_considered",
                 "considered same-line text bucket for redaction",
-                line_bucket_metrics(
-                    line_bucket,
-                    redaction,
-                    candidates.len() as i64,
-                    candidate_rank as i64,
-                ),
+                metrics.clone(),
             ));
+            if let Some(split_gap_pt) = line_bucket.split_from_previous_horizontal_gap_pt {
+                let mut split_metrics = metrics;
+                split_metrics.insert(
+                    "split_horizontal_gap_pt".to_owned(),
+                    DiagnosticValue::Float(split_gap_pt as f64),
+                );
+                diagnostics.push(build_diagnostic(
+                    location.clone(),
+                    "redaction_evidence",
+                    "line_bucket_split_horizontal_gap",
+                    "started a new same-baseline line bucket because the horizontal gap from the previous cluster was too large",
+                    split_metrics,
+                ));
+            }
         } else {
+            let metrics = line_bucket_metrics(line_bucket, redaction, candidates.len() as i64, -1);
             diagnostics.push(build_diagnostic(
                 location.clone(),
                 "redaction_evidence",
                 "line_bucket_rejected_not_same_line",
                 "line bucket was rejected because it was neither overlapping nor baseline-close",
-                line_bucket_metrics(line_bucket, redaction, candidates.len() as i64, -1),
+                metrics.clone(),
             ));
+            if let Some(split_gap_pt) = line_bucket.split_from_previous_horizontal_gap_pt {
+                let mut split_metrics = metrics;
+                split_metrics.insert(
+                    "split_horizontal_gap_pt".to_owned(),
+                    DiagnosticValue::Float(split_gap_pt as f64),
+                );
+                diagnostics.push(build_diagnostic(
+                    location.clone(),
+                    "redaction_evidence",
+                    "line_bucket_split_horizontal_gap",
+                    "started a new same-baseline line bucket because the horizontal gap from the previous cluster was too large",
+                    split_metrics,
+                ));
+            }
         }
     }
     if candidates.is_empty() {
@@ -1730,6 +1881,32 @@ fn pair_target_width_pt(pair: &AnchorPairCandidate<'_>) -> Option<f32> {
         .then_some(usable_right_edge_x_pt - usable_left_edge_x_pt)
 }
 
+fn pair_is_nonlocal_overlap_only_bucket(
+    pair: &AnchorPairCandidate<'_>,
+    redaction: &RedactionOccurrence,
+) -> bool {
+    if !pair.overlap_eligible || pair.baseline_eligible {
+        return false;
+    }
+    let Some(pair_target_width_pt) = pair_target_width_pt(pair) else {
+        return false;
+    };
+    let redaction_width_pt = redaction.bbox.width().abs();
+    if pair_target_width_pt <= redaction_width_pt {
+        return false;
+    }
+    let pair_box_delta_pt = (pair_target_width_pt - redaction_width_pt).abs();
+    let min_box_delta_pt = ANCHOR_NONLOCAL_PAIR_BOX_DELTA_PT
+        .max(redaction_width_pt * ANCHOR_NONLOCAL_PAIR_BOX_DELTA_RATIO);
+    if pair_box_delta_pt < min_box_delta_pt {
+        return false;
+    }
+    let pair_gap_max_pt = pair.left.gap_pt.max(pair.right.gap_pt);
+    let pair_gap_diff_pt = (pair.left.gap_pt - pair.right.gap_pt).abs();
+    pair_gap_max_pt > ANCHOR_NONLOCAL_PAIR_MAX_GAP_PT
+        || pair_gap_diff_pt > ANCHOR_NONLOCAL_PAIR_GAP_DIFF_PT
+}
+
 fn pair_box_metrics(
     pair: &AnchorPairCandidate<'_>,
     redaction: &RedactionOccurrence,
@@ -1737,6 +1914,30 @@ fn pair_box_metrics(
 ) -> BTreeMap<String, DiagnosticValue> {
     let mut metrics = pair_candidate_metrics(pair, line_bucket_count);
     let redaction_width_pt = redaction.bbox.width().abs();
+    metrics.insert(
+        "bucket_baseline_eligible".to_owned(),
+        DiagnosticValue::Bool(pair.baseline_eligible),
+    );
+    metrics.insert(
+        "bucket_overlap_eligible".to_owned(),
+        DiagnosticValue::Bool(pair.overlap_eligible),
+    );
+    metrics.insert(
+        "bucket_overlap_only".to_owned(),
+        DiagnosticValue::Bool(pair.overlap_eligible && !pair.baseline_eligible),
+    );
+    metrics.insert(
+        "left_candidate_count".to_owned(),
+        DiagnosticValue::Integer(pair.left_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_candidate_count".to_owned(),
+        DiagnosticValue::Integer(pair.right_candidate_count as i64),
+    );
+    metrics.insert(
+        "pair_gap_diff_pt".to_owned(),
+        DiagnosticValue::Float((pair.left.gap_pt - pair.right.gap_pt).abs() as f64),
+    );
     if let Some(pair_target_width_pt) = pair_target_width_pt(pair) {
         metrics.insert(
             "pair_target_width_pt".to_owned(),
@@ -2110,6 +2311,26 @@ fn pair_candidate_metrics(
         DiagnosticValue::Text(pair.line_bucket.line_id.clone()),
     );
     metrics.insert(
+        "bucket_baseline_eligible".to_owned(),
+        DiagnosticValue::Bool(pair.baseline_eligible),
+    );
+    metrics.insert(
+        "bucket_overlap_eligible".to_owned(),
+        DiagnosticValue::Bool(pair.overlap_eligible),
+    );
+    metrics.insert(
+        "bucket_overlap_only".to_owned(),
+        DiagnosticValue::Bool(pair.overlap_eligible && !pair.baseline_eligible),
+    );
+    metrics.insert(
+        "left_candidate_count".to_owned(),
+        DiagnosticValue::Integer(pair.left_candidate_count as i64),
+    );
+    metrics.insert(
+        "right_candidate_count".to_owned(),
+        DiagnosticValue::Integer(pair.right_candidate_count as i64),
+    );
+    metrics.insert(
         "left_candidate_id".to_owned(),
         DiagnosticValue::Text(pair.left.candidate_id.clone()),
     );
@@ -2283,6 +2504,15 @@ fn anchor_text_has_alnum(text: &str) -> bool {
         .any(char::is_alphanumeric)
 }
 
+fn anchor_text_is_boundary_punctuation(text: &str) -> bool {
+    let normalized = normalize_transport_text(text);
+    let trimmed = normalized.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_punctuation() && !ch.is_alphanumeric())
+}
+
 fn ordered_f32(value: f32) -> i32 {
     ((value as f64) * 10_000.0_f64).round() as i32
 }
@@ -2363,6 +2593,10 @@ fn line_bucket_metrics(
         DiagnosticValue::Float(bucket_right_x_pt as f64),
     );
     metrics.insert(
+        "bucket_rightmost_x1".to_owned(),
+        DiagnosticValue::Float(line_bucket.rightmost_x1 as f64),
+    );
+    metrics.insert(
         "bucket_vertical_overlap_pt".to_owned(),
         DiagnosticValue::Float(vertical_overlap_pt(
             line_bucket.y0,
@@ -2379,6 +2613,12 @@ fn line_bucket_metrics(
         "bucket_run_count".to_owned(),
         DiagnosticValue::Integer(line_bucket.runs.len() as i64),
     );
+    if let Some(split_gap_pt) = line_bucket.split_from_previous_horizontal_gap_pt {
+        metrics.insert(
+            "split_horizontal_gap_pt".to_owned(),
+            DiagnosticValue::Float(split_gap_pt as f64),
+        );
+    }
     metrics.insert(
         "bucket_text_preview".to_owned(),
         DiagnosticValue::Text(line_bucket_text_preview(line_bucket)),
