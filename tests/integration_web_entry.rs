@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use unredact::service::unredact_web_entry::{run, UnredactWebConfig, UnredactWebRequest};
-use unredact::types::guess_types::{GuessConfig, GuessReport};
+use unredact::types::guess_types::{GuessCandidate, GuessConfig, GuessReport};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 fn allowed_guess_width_pt(guess: &unredact::types::guess_types::RedactionGuess) -> f32 {
@@ -15,6 +15,10 @@ fn allowed_guess_width_pt(guess: &unredact::types::guess_types::RedactionGuess) 
         (Some("two_sided"), Some(left), Some(right)) if right > left => right - left,
         _ => guess.context.target_width_pt.max(guess.bbox.width().abs()),
     }
+}
+
+fn effective_candidate_error(candidate: &GuessCandidate) -> f32 {
+    candidate.adjusted_error_pt.unwrap_or(candidate.error_pt)
 }
 
 #[test]
@@ -93,15 +97,16 @@ fn web_entry_bytes_flow_emits_geometry_valid_efta00101126_candidates() {
                 width_pt
             );
             if let Some(previous_error) = last_error {
+                let current_error = effective_candidate_error(candidate);
                 assert!(
-                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    current_error + 0.0001_f32 >= previous_error,
                     "candidate list is not sorted by error: previous={} current={} text={}",
                     previous_error,
-                    candidate.error_pt,
+                    current_error,
                     candidate.text,
                 );
             }
-            last_error = Some(candidate.error_pt);
+            last_error = Some(effective_candidate_error(candidate));
         }
     }
 

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use unredact::types::guess_types::{GuessConfig, RedactionGuess};
+use unredact::types::guess_types::{GuessCandidate, GuessConfig, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 pub mod common;
@@ -30,6 +30,10 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
         }
     }
     out
+}
+
+fn effective_candidate_error(candidate: &GuessCandidate) -> f32 {
+    candidate.adjusted_error_pt.unwrap_or(candidate.error_pt)
 }
 
 fn horizontal_overlap_pt(left: &RedactionGuess, right: &RedactionGuess) -> f32 {
@@ -263,15 +267,16 @@ fn efta00038617_page2_served_rows_emit_geometry_valid_candidates_with_default_di
                 candidate.width_pt
             );
             if let Some(previous_error) = last_error {
+                let current_error = effective_candidate_error(candidate);
                 assert!(
-                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    current_error + 0.0001_f32 >= previous_error,
                     "candidate list is not sorted by error: previous={} current={} text={}",
                     previous_error,
-                    candidate.error_pt,
+                    current_error,
                     candidate.text
                 );
             }
-            last_error = Some(candidate.error_pt);
+            last_error = Some(effective_candidate_error(candidate));
         }
     }
 
@@ -557,12 +562,14 @@ fn candidates_are_sorted_by_error_when_present() {
 
     for (index, row) in report.guesses.iter().enumerate() {
         for pair in row.candidates.windows(2) {
+            let left_error = effective_candidate_error(&pair[0]);
+            let right_error = effective_candidate_error(&pair[1]);
             assert!(
-                pair[0].error_pt <= pair[1].error_pt + 0.0001_f32,
+                left_error <= right_error + 0.0001_f32,
                 "candidate errors not sorted at row {}: {} then {}",
                 index + 1,
-                pair[0].error_pt,
-                pair[1].error_pt
+                left_error,
+                right_error
             );
         }
     }
@@ -762,15 +769,16 @@ fn efta00101126_last_two_rows_only_emit_geometry_valid_candidates() {
                 guess.bbox
             );
             if let Some(previous_error) = last_error {
+                let current_error = effective_candidate_error(candidate);
                 assert!(
-                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    current_error + 0.0001_f32 >= previous_error,
                     "candidate list is not sorted by error: previous={} current={} text={}",
                     previous_error,
-                    candidate.error_pt,
+                    current_error,
                     candidate.text
                 );
             }
-            last_error = Some(candidate.error_pt);
+            last_error = Some(effective_candidate_error(candidate));
         }
     }
 }

@@ -1,17 +1,20 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::data::dictionary_variant_data::build_dictionary_variants;
+use crate::data::dictionary_variant_data::build_dictionary_variant_build_result;
 use crate::data::helpers::character_measurement::{
     measure_text_width, AmbiguousCodeChoice, MeasuredTextWidth, MeasurementFailure,
 };
 use crate::data::types::guess_candidate_types::{
     CollectGuessCandidatesRequest, GuessCandidateDiagnostic, GuessCandidateRow, GuessCandidateSet,
-    MeasuredCandidate,
+    MeasuredCandidate, MeasuredCandidateProvenance,
 };
 use crate::data::types::redaction_evidence_types::{
     AnchorMode, CandidateWidthModel, MeasurementFontKey,
 };
 use crate::types::diagnostic_types::DiagnosticValue;
+
+const NONCANONICAL_TEMPLATE_PENALTY_PT: f32 = 2.75_f32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CachedCandidateSupport {
@@ -27,7 +30,9 @@ type CandidateScore = (Option<f32>, Option<f32>, Option<f32>, f32);
 pub fn collect_guess_candidates(
     req: CollectGuessCandidatesRequest<'_>,
 ) -> Result<GuessCandidateSet, String> {
-    let variants = build_dictionary_variants(req.dictionary);
+    let variant_build = build_dictionary_variant_build_result(req.dictionary);
+    let variant_summary = variant_build.summary;
+    let variants = variant_build.records;
     let mut rows = Vec::<GuessCandidateRow>::with_capacity(req.evidence.rows.len());
     let mut diagnostics = Vec::<GuessCandidateDiagnostic>::new();
     let mut support_cache = BTreeMap::<
@@ -53,8 +58,20 @@ pub fn collect_guess_candidates(
             .or_default();
         let mut candidates = Vec::<MeasuredCandidate>::new();
 
+        if req.collect_diagnostics {
+            diagnostics.push(build_runtime_policy_summary_diagnostic(
+                row,
+                variant_summary.input_entry_count,
+                variant_summary.kept_variant_count,
+                variant_summary.skipped_comma_family_count,
+                variant_summary.skipped_generated_single_from_multi_raw_count,
+                &variant_summary.skipped_comma_family_examples,
+                &variant_summary.skipped_generated_single_from_multi_raw_examples,
+            ));
+        }
+
         for variant in &variants {
-            let trimmed = variant.trim();
+            let trimmed = variant.text.trim();
             if trimmed.is_empty() {
                 if req.collect_diagnostics {
                     diagnostics.push(build_candidate_diagnostic(
@@ -110,7 +127,10 @@ pub fn collect_guess_candidates(
                 }
                 continue;
             };
-            let normalized_error = error_pt / row.anchor_set.geometry.tolerance_pt.max(1.0_f32);
+            let noncanonical_penalty_pt = runtime_noncanonical_penalty_pt(&variant.template_family);
+            let adjusted_error_pt = error_pt + noncanonical_penalty_pt;
+            let adjusted_normalized_error =
+                adjusted_error_pt / row.anchor_set.geometry.tolerance_pt.max(1.0_f32);
 
             if req.collect_diagnostics {
                 diagnostics.push(build_measured_diagnostic(
@@ -119,6 +139,17 @@ pub fn collect_guess_candidates(
                     &measurement,
                     predicted_left_edge_x_pt,
                     predicted_right_edge_x_pt,
+                ));
+            }
+
+            if noncanonical_penalty_pt > 0.0_f32 && req.collect_diagnostics {
+                diagnostics.push(build_noncanonical_penalty_diagnostic(
+                    row,
+                    trimmed,
+                    &variant.template_family,
+                    error_pt,
+                    adjusted_error_pt,
+                    noncanonical_penalty_pt,
                 ));
             }
 
@@ -132,6 +163,7 @@ pub fn collect_guess_candidates(
                     diagnostics.push(build_overlap_diagnostic(
                         row,
                         trimmed,
+                        &measurement,
                         predicted_left_edge_x_pt,
                         predicted_right_edge_x_pt,
                     ));
@@ -145,32 +177,36 @@ pub fn collect_guess_candidates(
                 glyph_width_sum_pt: measurement.glyph_width_sum_pt,
                 char_spacing_total_pt: measurement.char_spacing_total_pt,
                 word_spacing_total_pt: measurement.word_spacing_total_pt,
+                adjusted_error_pt,
+                noncanonical_penalty_pt,
+                provenance: Some(MeasuredCandidateProvenance {
+                    raw_entry_index: variant.raw_entry_index,
+                    raw_entry_text: variant.raw_entry_text.clone(),
+                    raw_entry_normalized: variant.raw_entry_normalized.clone(),
+                    template_id: variant.template_id.clone(),
+                    template_family: variant.template_family.clone(),
+                    variant_family: variant.variant_family.clone(),
+                    alias_source: variant.alias_source.clone(),
+                    orthographic_source: variant.orthographic_source.clone(),
+                    case_source: variant.case_source.clone(),
+                }),
                 predicted_left_edge_x_pt,
                 predicted_right_edge_x_pt,
                 actual_right_edge_x_pt,
                 target_width_pt: row.anchor_set.geometry.target_width_pt,
                 error_pt,
-                normalized_error,
+                normalized_error: adjusted_normalized_error,
             });
         }
 
-        candidates.sort_by(|left, right| {
-            left.normalized_error
-                .partial_cmp(&right.normalized_error)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    left.error_pt
-                        .partial_cmp(&right.error_pt)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| {
-                    normalized_candidate_text(&left.text)
-                        .cmp(&normalized_candidate_text(&right.text))
-                })
-        });
+        candidates.sort_by(compare_candidates);
         candidates = dedupe_candidates_by_normalized_text(candidates);
 
         if req.collect_diagnostics {
+            diagnostics.push(build_runtime_penalty_summary_diagnostic(row, &candidates));
+            if let Some(diagnostic) = build_longer_alpha_tiebreak_diagnostic(row, &candidates) {
+                diagnostics.push(diagnostic);
+            }
             diagnostics.extend(
                 candidates
                     .iter()
@@ -204,6 +240,14 @@ pub fn collect_guess_candidates(
         rows,
         diagnostics,
     })
+}
+
+fn runtime_noncanonical_penalty_pt(template_family: &str) -> f32 {
+    if template_family == "canonical" {
+        0.0_f32
+    } else {
+        NONCANONICAL_TEMPLATE_PENALTY_PT
+    }
 }
 
 fn build_candidate_support(
@@ -480,10 +524,27 @@ fn build_measured_diagnostic(
 fn build_overlap_diagnostic(
     row: &crate::data::types::redaction_evidence_types::RedactionEvidenceRow,
     candidate_text: &str,
+    measurement: &MeasuredTextWidth,
     predicted_left_edge_x_pt: Option<f32>,
     predicted_right_edge_x_pt: Option<f32>,
 ) -> GuessCandidateDiagnostic {
     let mut metrics = base_candidate_metrics(row, candidate_text);
+    metrics.insert(
+        "glyph_width_sum_pt".to_owned(),
+        DiagnosticValue::Float(measurement.glyph_width_sum_pt as f64),
+    );
+    metrics.insert(
+        "char_spacing_total_pt".to_owned(),
+        DiagnosticValue::Float(measurement.char_spacing_total_pt as f64),
+    );
+    metrics.insert(
+        "word_spacing_total_pt".to_owned(),
+        DiagnosticValue::Float(measurement.word_spacing_total_pt as f64),
+    );
+    metrics.insert(
+        "width_pt".to_owned(),
+        DiagnosticValue::Float(measurement.width_pt as f64),
+    );
     if let Some(predicted_left_edge_x_pt) = predicted_left_edge_x_pt {
         metrics.insert(
             "predicted_left_edge_x_pt".to_owned(),
@@ -494,6 +555,26 @@ fn build_overlap_diagnostic(
         metrics.insert(
             "predicted_right_edge_x_pt".to_owned(),
             DiagnosticValue::Float(predicted_right_edge_x_pt as f64),
+        );
+    }
+    if let Some(previous) = &row.neighbor_facts.previous_same_line {
+        metrics.insert(
+            "previous_neighbor_x0".to_owned(),
+            DiagnosticValue::Float(previous.bbox.x0 as f64),
+        );
+        metrics.insert(
+            "previous_neighbor_x1".to_owned(),
+            DiagnosticValue::Float(previous.bbox.x1 as f64),
+        );
+    }
+    if let Some(next) = &row.neighbor_facts.next_same_line {
+        metrics.insert(
+            "next_neighbor_x0".to_owned(),
+            DiagnosticValue::Float(next.bbox.x0 as f64),
+        );
+        metrics.insert(
+            "next_neighbor_x1".to_owned(),
+            DiagnosticValue::Float(next.bbox.x1 as f64),
         );
     }
     build_candidate_diagnostic(
@@ -515,8 +596,22 @@ fn build_ranked_diagnostic(
         DiagnosticValue::Float(candidate.error_pt as f64),
     );
     metrics.insert(
-        "normalized_error".to_owned(),
+        "adjusted_error_pt".to_owned(),
+        DiagnosticValue::Float(candidate.adjusted_error_pt as f64),
+    );
+    metrics.insert(
+        "noncanonical_penalty_pt".to_owned(),
+        DiagnosticValue::Float(candidate.noncanonical_penalty_pt as f64),
+    );
+    metrics.insert(
+        "adjusted_normalized_error".to_owned(),
         DiagnosticValue::Float(candidate.normalized_error as f64),
+    );
+    metrics.insert(
+        "raw_normalized_error".to_owned(),
+        DiagnosticValue::Float(
+            (candidate.error_pt / row.anchor_set.geometry.tolerance_pt.max(1.0_f32)) as f64,
+        ),
     );
     metrics.insert("rank".to_owned(), DiagnosticValue::Integer(rank as i64));
     metrics.insert(
@@ -525,6 +620,201 @@ fn build_ranked_diagnostic(
     );
     metrics.insert("kept".to_owned(), DiagnosticValue::Bool(true));
     build_candidate_diagnostic(row, "candidate_ranked", "candidate ranked for row", metrics)
+}
+
+fn build_noncanonical_penalty_diagnostic(
+    row: &crate::data::types::redaction_evidence_types::RedactionEvidenceRow,
+    candidate_text: &str,
+    template_family: &str,
+    raw_error_pt: f32,
+    adjusted_error_pt: f32,
+    noncanonical_penalty_pt: f32,
+) -> GuessCandidateDiagnostic {
+    let mut metrics = base_candidate_metrics(row, candidate_text);
+    metrics.insert(
+        "template_family".to_owned(),
+        DiagnosticValue::Text(template_family.to_owned()),
+    );
+    metrics.insert(
+        "raw_error_pt".to_owned(),
+        DiagnosticValue::Float(raw_error_pt as f64),
+    );
+    metrics.insert(
+        "adjusted_error_pt".to_owned(),
+        DiagnosticValue::Float(adjusted_error_pt as f64),
+    );
+    metrics.insert(
+        "noncanonical_penalty_pt".to_owned(),
+        DiagnosticValue::Float(noncanonical_penalty_pt as f64),
+    );
+    build_candidate_diagnostic(
+        row,
+        "candidate_runtime_policy_noncanonical_penalty_applied",
+        "noncanonical template candidate received the runtime ranking penalty",
+        metrics,
+    )
+}
+
+fn build_runtime_policy_summary_diagnostic(
+    row: &crate::data::types::redaction_evidence_types::RedactionEvidenceRow,
+    input_entry_count: usize,
+    kept_variant_count: usize,
+    skipped_comma_family_count: usize,
+    skipped_generated_single_from_multi_raw_count: usize,
+    skipped_comma_family_examples: &[String],
+    skipped_generated_single_from_multi_raw_examples: &[String],
+) -> GuessCandidateDiagnostic {
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "input_entry_count".to_owned(),
+        DiagnosticValue::Integer(input_entry_count as i64),
+    );
+    metrics.insert(
+        "kept_variant_count".to_owned(),
+        DiagnosticValue::Integer(kept_variant_count as i64),
+    );
+    metrics.insert(
+        "skipped_comma_family_count".to_owned(),
+        DiagnosticValue::Integer(skipped_comma_family_count as i64),
+    );
+    metrics.insert(
+        "skipped_generated_single_from_multi_raw_count".to_owned(),
+        DiagnosticValue::Integer(skipped_generated_single_from_multi_raw_count as i64),
+    );
+    if !skipped_comma_family_examples.is_empty() {
+        metrics.insert(
+            "skipped_comma_family_examples".to_owned(),
+            DiagnosticValue::Text(skipped_comma_family_examples.join(", ")),
+        );
+    }
+    if !skipped_generated_single_from_multi_raw_examples.is_empty() {
+        metrics.insert(
+            "skipped_generated_single_from_multi_raw_examples".to_owned(),
+            DiagnosticValue::Text(skipped_generated_single_from_multi_raw_examples.join(", ")),
+        );
+    }
+    build_candidate_diagnostic(
+        row,
+        "candidate_runtime_policy_summary",
+        "runtime dictionary variant policy applied before candidate measurement",
+        metrics,
+    )
+}
+
+fn build_runtime_penalty_summary_diagnostic(
+    row: &crate::data::types::redaction_evidence_types::RedactionEvidenceRow,
+    candidates: &[MeasuredCandidate],
+) -> GuessCandidateDiagnostic {
+    let mut metrics = BTreeMap::new();
+    let penalized_count = candidates
+        .iter()
+        .filter(|candidate| candidate.noncanonical_penalty_pt > 0.0_f32)
+        .count();
+    let raw_top1 = candidates
+        .iter()
+        .min_by(|left, right| compare_candidates_by_raw_error(left, right))
+        .map(|candidate| candidate.text.clone());
+    let adjusted_top1 = candidates.first().map(|candidate| candidate.text.clone());
+    let changed_top1 = raw_top1 != adjusted_top1;
+
+    metrics.insert(
+        "noncanonical_penalty_pt".to_owned(),
+        DiagnosticValue::Float(NONCANONICAL_TEMPLATE_PENALTY_PT as f64),
+    );
+    metrics.insert(
+        "candidate_count".to_owned(),
+        DiagnosticValue::Integer(candidates.len() as i64),
+    );
+    metrics.insert(
+        "penalized_candidate_count".to_owned(),
+        DiagnosticValue::Integer(penalized_count as i64),
+    );
+    metrics.insert(
+        "top1_changed_by_penalty".to_owned(),
+        DiagnosticValue::Bool(changed_top1),
+    );
+    if let Some(raw_top1) = raw_top1 {
+        metrics.insert("raw_top1_text".to_owned(), DiagnosticValue::Text(raw_top1));
+    }
+    if let Some(adjusted_top1) = adjusted_top1 {
+        metrics.insert(
+            "adjusted_top1_text".to_owned(),
+            DiagnosticValue::Text(adjusted_top1),
+        );
+    }
+
+    build_candidate_diagnostic(
+        row,
+        "candidate_runtime_policy_penalty_summary",
+        "runtime noncanonical penalty applied after candidate measurement and before ranking",
+        metrics,
+    )
+}
+
+fn build_longer_alpha_tiebreak_diagnostic(
+    row: &crate::data::types::redaction_evidence_types::RedactionEvidenceRow,
+    candidates: &[MeasuredCandidate],
+) -> Option<GuessCandidateDiagnostic> {
+    let [winner, runner_up, ..] = candidates else {
+        return None;
+    };
+    if winner.normalized_error != runner_up.normalized_error
+        || winner.adjusted_error_pt != runner_up.adjusted_error_pt
+    {
+        return None;
+    }
+    let winner_alpha = alpha_len(&winner.text);
+    let runner_up_alpha = alpha_len(&runner_up.text);
+    let winner_tokens = candidate_token_count(&winner.text);
+    let runner_up_tokens = candidate_token_count(&runner_up.text);
+    if winner_alpha == runner_up_alpha && winner_tokens == runner_up_tokens {
+        return None;
+    }
+
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        "winner_text".to_owned(),
+        DiagnosticValue::Text(winner.text.clone()),
+    );
+    metrics.insert(
+        "runner_up_text".to_owned(),
+        DiagnosticValue::Text(runner_up.text.clone()),
+    );
+    metrics.insert(
+        "winner_alpha_len".to_owned(),
+        DiagnosticValue::Integer(winner_alpha as i64),
+    );
+    metrics.insert(
+        "runner_up_alpha_len".to_owned(),
+        DiagnosticValue::Integer(runner_up_alpha as i64),
+    );
+    metrics.insert(
+        "winner_token_count".to_owned(),
+        DiagnosticValue::Integer(winner_tokens as i64),
+    );
+    metrics.insert(
+        "runner_up_token_count".to_owned(),
+        DiagnosticValue::Integer(runner_up_tokens as i64),
+    );
+    metrics.insert(
+        "shared_normalized_error".to_owned(),
+        DiagnosticValue::Float(winner.normalized_error as f64),
+    );
+    metrics.insert(
+        "shared_adjusted_error_pt".to_owned(),
+        DiagnosticValue::Float(winner.adjusted_error_pt as f64),
+    );
+    metrics.insert(
+        "shared_raw_error_pt".to_owned(),
+        DiagnosticValue::Float(winner.error_pt as f64),
+    );
+
+    Some(build_candidate_diagnostic(
+        row,
+        "candidate_rank_tiebreak_longer_alpha_applied",
+        "candidate ordering used longer alphabetic and token length after width ties",
+        metrics,
+    ))
 }
 
 fn base_candidate_metrics(
@@ -539,6 +829,18 @@ fn base_candidate_metrics(
     metrics.insert(
         "font_key".to_owned(),
         DiagnosticValue::Text(row.font.font_key.clone()),
+    );
+    metrics.insert(
+        "h_scale_pct".to_owned(),
+        DiagnosticValue::Float(row.font.h_scale_pct as f64),
+    );
+    metrics.insert(
+        "char_spacing_pt".to_owned(),
+        DiagnosticValue::Float(row.font.char_spacing_pt as f64),
+    );
+    metrics.insert(
+        "word_spacing_pt".to_owned(),
+        DiagnosticValue::Float(row.font.word_spacing_pt as f64),
     );
     metrics.insert(
         "anchor_mode".to_owned(),
@@ -570,6 +872,53 @@ fn normalized_candidate_text(text: &str) -> String {
         .to_uppercase()
 }
 
+fn alpha_len(text: &str) -> usize {
+    text.chars().filter(|ch| ch.is_ascii_alphabetic()).count()
+}
+
+fn candidate_token_count(text: &str) -> usize {
+    text.split_whitespace()
+        .filter(|token| !token.is_empty())
+        .count()
+}
+
+fn compare_candidates(left: &MeasuredCandidate, right: &MeasuredCandidate) -> Ordering {
+    left.normalized_error
+        .partial_cmp(&right.normalized_error)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| {
+            left.adjusted_error_pt
+                .partial_cmp(&right.adjusted_error_pt)
+                .unwrap_or(Ordering::Equal)
+        })
+        .then_with(|| alpha_len(&right.text).cmp(&alpha_len(&left.text)))
+        .then_with(|| candidate_token_count(&right.text).cmp(&candidate_token_count(&left.text)))
+        .then_with(|| {
+            normalized_candidate_text(&left.text).cmp(&normalized_candidate_text(&right.text))
+        })
+}
+
+fn compare_candidates_by_raw_error(
+    left: &MeasuredCandidate,
+    right: &MeasuredCandidate,
+) -> Ordering {
+    let left_raw_normalized = left.error_pt;
+    let right_raw_normalized = right.error_pt;
+    left_raw_normalized
+        .partial_cmp(&right_raw_normalized)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| {
+            left.error_pt
+                .partial_cmp(&right.error_pt)
+                .unwrap_or(Ordering::Equal)
+        })
+        .then_with(|| alpha_len(&right.text).cmp(&alpha_len(&left.text)))
+        .then_with(|| candidate_token_count(&right.text).cmp(&candidate_token_count(&left.text)))
+        .then_with(|| {
+            normalized_candidate_text(&left.text).cmp(&normalized_candidate_text(&right.text))
+        })
+}
+
 fn dedupe_candidates_by_normalized_text(
     candidates: Vec<MeasuredCandidate>,
 ) -> Vec<MeasuredCandidate> {
@@ -587,7 +936,8 @@ fn dedupe_candidates_by_normalized_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_guess_candidates, dedupe_candidates_by_normalized_text, normalized_candidate_text,
+        collect_guess_candidates, compare_candidates, dedupe_candidates_by_normalized_text,
+        normalized_candidate_text,
     };
     use crate::data::types::guess_candidate_types::{
         CollectGuessCandidatesRequest, MeasuredCandidate,
@@ -673,6 +1023,25 @@ mod tests {
                 unicode_to_codes,
                 code_to_width_units,
             },
+        }
+    }
+
+    fn candidate(text: &str, normalized_error: f32, error_pt: f32) -> MeasuredCandidate {
+        MeasuredCandidate {
+            text: text.to_owned(),
+            width_pt: 0.0,
+            glyph_width_sum_pt: 0.0,
+            char_spacing_total_pt: 0.0,
+            word_spacing_total_pt: 0.0,
+            adjusted_error_pt: error_pt,
+            noncanonical_penalty_pt: 0.0,
+            provenance: None,
+            predicted_left_edge_x_pt: None,
+            predicted_right_edge_x_pt: None,
+            actual_right_edge_x_pt: None,
+            target_width_pt: 0.0,
+            error_pt,
+            normalized_error,
         }
     }
 
@@ -772,6 +1141,9 @@ mod tests {
                 glyph_width_sum_pt: 1.0,
                 char_spacing_total_pt: 0.0,
                 word_spacing_total_pt: 0.0,
+                adjusted_error_pt: 0.1,
+                noncanonical_penalty_pt: 0.0,
+                provenance: None,
                 predicted_left_edge_x_pt: Some(0.0),
                 predicted_right_edge_x_pt: Some(1.0),
                 actual_right_edge_x_pt: Some(1.0),
@@ -785,6 +1157,9 @@ mod tests {
                 glyph_width_sum_pt: 1.2,
                 char_spacing_total_pt: 0.0,
                 word_spacing_total_pt: 0.0,
+                adjusted_error_pt: 0.2,
+                noncanonical_penalty_pt: 0.0,
+                provenance: None,
                 predicted_left_edge_x_pt: Some(0.0),
                 predicted_right_edge_x_pt: Some(1.2),
                 actual_right_edge_x_pt: Some(1.0),
@@ -798,6 +1173,9 @@ mod tests {
                 glyph_width_sum_pt: 2.0,
                 char_spacing_total_pt: 0.0,
                 word_spacing_total_pt: 0.0,
+                adjusted_error_pt: 0.3,
+                noncanonical_penalty_pt: 0.0,
+                provenance: None,
                 predicted_left_edge_x_pt: Some(0.0),
                 predicted_right_edge_x_pt: Some(2.0),
                 actual_right_edge_x_pt: Some(2.0),
@@ -810,5 +1188,56 @@ mod tests {
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].text, "Alpha");
         assert_eq!(deduped[1].text, "Bravo");
+    }
+
+    #[test]
+    fn compare_candidates_prefers_longer_alpha_when_width_ties() {
+        let shorter = candidate("MARK", 0.5, 1.0);
+        let longer = candidate("SARAH KELLEN", 0.5, 1.0);
+
+        assert_eq!(
+            compare_candidates(&longer, &shorter),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_candidates(&shorter, &longer),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_candidates_prefers_more_tokens_when_alpha_len_ties() {
+        let one_token = candidate("ABCD", 0.5, 1.0);
+        let two_tokens = candidate("AB CD", 0.5, 1.0);
+
+        assert_eq!(
+            compare_candidates(&two_tokens, &one_token),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_candidates(&one_token, &two_tokens),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_candidates_penalizes_noncanonical_templates_before_tie_breaks() {
+        let mut canonical = candidate("ALICE BROWN", 0.2, 0.4);
+        canonical.adjusted_error_pt = 0.4;
+        canonical.normalized_error = 0.2;
+
+        let mut noncanonical = candidate("BROWN ALICE", 0.19, 0.38);
+        noncanonical.adjusted_error_pt = 3.13;
+        noncanonical.noncanonical_penalty_pt = 2.75;
+        noncanonical.normalized_error = 1.565;
+
+        assert_eq!(
+            compare_candidates(&canonical, &noncanonical),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_candidates(&noncanonical, &canonical),
+            std::cmp::Ordering::Greater
+        );
     }
 }

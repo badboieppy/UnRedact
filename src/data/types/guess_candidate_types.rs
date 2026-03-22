@@ -40,6 +40,10 @@ pub struct MeasuredCandidate {
     pub glyph_width_sum_pt: f32,
     pub char_spacing_total_pt: f32,
     pub word_spacing_total_pt: f32,
+    pub adjusted_error_pt: f32,
+    pub noncanonical_penalty_pt: f32,
+    #[serde(default)]
+    pub provenance: Option<MeasuredCandidateProvenance>,
     #[serde(default)]
     pub predicted_left_edge_x_pt: Option<f32>,
     #[serde(default)]
@@ -49,6 +53,22 @@ pub struct MeasuredCandidate {
     pub target_width_pt: f32,
     pub error_pt: f32,
     pub normalized_error: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasuredCandidateProvenance {
+    pub raw_entry_index: usize,
+    pub raw_entry_text: String,
+    pub raw_entry_normalized: String,
+    pub template_id: String,
+    pub template_family: String,
+    pub variant_family: String,
+    #[serde(default)]
+    pub alias_source: Option<String>,
+    #[serde(default)]
+    pub orthographic_source: Option<String>,
+    #[serde(default)]
+    pub case_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

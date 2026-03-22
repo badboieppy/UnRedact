@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use unredact::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use unredact::types::guess_types::{GuessConfig, GuessReport, RedactionGuess};
+use unredact::types::guess_types::{GuessCandidate, GuessConfig, GuessReport, RedactionGuess};
 use unredact::types::visualizer_config::VisualizerConfig;
 
 pub mod common;
@@ -61,6 +61,10 @@ fn ordered_guess_texts_upper(guess: &RedactionGuess) -> Vec<String> {
         }
     }
     out
+}
+
+fn effective_candidate_error(candidate: &GuessCandidate) -> f32 {
+    candidate.adjusted_error_pt.unwrap_or(candidate.error_pt)
 }
 
 fn target_tokens_upper(value: &str) -> Vec<String> {
@@ -148,15 +152,16 @@ fn alternate_dictionary_entry_formats_expand_into_geometry_valid_candidates() {
                 candidate.width_pt
             );
             if let Some(previous_error) = last_error {
+                let current_error = effective_candidate_error(candidate);
                 assert!(
-                    candidate.error_pt + 0.0001_f32 >= previous_error,
+                    current_error + 0.0001_f32 >= previous_error,
                     "candidate list is not sorted by error: previous={} current={} text={}",
                     previous_error,
-                    candidate.error_pt,
+                    current_error,
                     candidate.text
                 );
             }
-            last_error = Some(candidate.error_pt);
+            last_error = Some(effective_candidate_error(candidate));
         }
     }
 

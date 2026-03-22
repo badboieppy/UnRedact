@@ -40,26 +40,148 @@ const NAME_SURNAME_PARTICLE_TOKENS: [&str; 28] = [
     "zur",
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionaryVariantRecord {
+    pub text: String,
+    pub raw_entry_index: usize,
+    pub raw_entry_text: String,
+    pub raw_entry_normalized: String,
+    pub template_id: String,
+    pub template_family: String,
+    pub variant_family: String,
+    pub alias_source: Option<String>,
+    pub orthographic_source: Option<String>,
+    pub case_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionaryVariantBuildSummary {
+    pub input_entry_count: usize,
+    pub kept_variant_count: usize,
+    pub skipped_comma_family_count: usize,
+    pub skipped_generated_single_from_multi_raw_count: usize,
+    pub skipped_comma_family_examples: Vec<String>,
+    pub skipped_generated_single_from_multi_raw_examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionaryVariantBuildResult {
+    pub records: Vec<DictionaryVariantRecord>,
+    pub summary: DictionaryVariantBuildSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TemplateVariantRecord {
+    text: String,
+    template_id: String,
+    template_family: String,
+    alias_source: Option<String>,
+    orthographic_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TemplateContext<'a> {
+    canonical: &'a str,
+    preserve_raw_input_shape: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalVariantContext<'a> {
+    raw_entry_index: usize,
+    raw_entry_text: &'a str,
+    canonical: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DictionaryVariantPolicy {
+    allow_comma_family: bool,
+    allow_generated_single_from_multi_raw: bool,
+}
+
+impl DictionaryVariantPolicy {
+    const RUNTIME_DEFAULT: Self = Self {
+        allow_comma_family: false,
+        allow_generated_single_from_multi_raw: false,
+    };
+
+    #[cfg(test)]
+    const FULL_RESEARCH: Self = Self {
+        allow_comma_family: true,
+        allow_generated_single_from_multi_raw: true,
+    };
+}
+
+#[cfg(test)]
 #[inline]
 pub fn build_dictionary_variants(dictionary: &[String]) -> Vec<String> {
-    let mut out = Vec::<String>::new();
+    build_dictionary_variant_build_result(dictionary)
+        .records
+        .into_iter()
+        .map(|record| record.text)
+        .collect::<Vec<_>>()
+}
+
+#[inline]
+pub fn build_dictionary_variant_build_result(
+    dictionary: &[String],
+) -> DictionaryVariantBuildResult {
+    build_dictionary_variant_build_result_with_policy(
+        dictionary,
+        DictionaryVariantPolicy::RUNTIME_DEFAULT,
+    )
+}
+
+#[cfg(test)]
+#[inline]
+fn build_dictionary_variant_records_full_research(
+    dictionary: &[String],
+) -> Vec<DictionaryVariantRecord> {
+    build_dictionary_variant_build_result_with_policy(
+        dictionary,
+        DictionaryVariantPolicy::FULL_RESEARCH,
+    )
+    .records
+}
+
+fn build_dictionary_variant_build_result_with_policy(
+    dictionary: &[String],
+    policy: DictionaryVariantPolicy,
+) -> DictionaryVariantBuildResult {
+    let mut out = Vec::<DictionaryVariantRecord>::new();
     let mut seen = BTreeSet::<String>::new();
-    for entry in dictionary {
+    let mut summary = DictionaryVariantBuildSummary {
+        input_entry_count: dictionary.len(),
+        kept_variant_count: 0,
+        skipped_comma_family_count: 0,
+        skipped_generated_single_from_multi_raw_count: 0,
+        skipped_comma_family_examples: Vec::new(),
+        skipped_generated_single_from_multi_raw_examples: Vec::new(),
+    };
+    for (raw_entry_index, entry) in dictionary.iter().enumerate() {
         let canonical = normalize_dictionary_entry(entry);
         if canonical.is_empty() {
             continue;
         }
-        for variant in build_name_variants(&canonical) {
-            let trimmed = variant.trim();
+        for variant in
+            build_name_variant_records(raw_entry_index, entry, &canonical, policy, &mut summary)
+        {
+            let trimmed = variant.text.trim();
             if trimmed.is_empty() {
                 continue;
             }
             if seen.insert(trimmed.to_owned()) {
-                out.push(trimmed.to_owned());
+                out.push(DictionaryVariantRecord {
+                    text: trimmed.to_owned(),
+                    ..variant
+                });
             }
         }
     }
-    out
+    summary.kept_variant_count = out.len();
+    DictionaryVariantBuildResult {
+        records: out,
+        summary,
+    }
 }
 
 fn normalize_dictionary_entry(value: &str) -> String {
@@ -79,19 +201,31 @@ fn normalize_dictionary_entry(value: &str) -> String {
     out.trim().to_owned()
 }
 
-fn build_name_variants(canonical: &str) -> Vec<String> {
+fn build_name_variant_records(
+    raw_entry_index: usize,
+    raw_entry_text: &str,
+    canonical: &str,
+    policy: DictionaryVariantPolicy,
+    summary: &mut DictionaryVariantBuildSummary,
+) -> Vec<DictionaryVariantRecord> {
     let mut template_seen = BTreeSet::<String>::new();
-    let mut templates = Vec::<String>::new();
+    let mut templates = Vec::<TemplateVariantRecord>::new();
     let tokens = canonical
         .split_whitespace()
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
     let preserve_raw_input_shape = should_preserve_raw_input_shape(canonical, &tokens);
+    let template_context = TemplateContext {
+        canonical,
+        preserve_raw_input_shape,
+    };
     push_template_variant(
         &mut template_seen,
         &mut templates,
-        canonical,
-        preserve_raw_input_shape,
+        &template_context,
+        "canonical",
+        None,
+        None,
         canonical.to_owned(),
     );
 
@@ -109,8 +243,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "core_tokens",
+                None,
+                None,
                 core.clone(),
             );
         }
@@ -118,8 +254,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "given_first_surname",
+                None,
+                None,
                 format!("{given_first} {surname}"),
             );
         }
@@ -127,8 +265,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "surname_comma_given_first",
+                None,
+                None,
                 format!("{surname}, {given_first}"),
             );
         }
@@ -136,8 +276,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "prefix_given_first_surname",
+                None,
+                None,
                 format!("{prefix} {given_first} {surname}"),
             );
         }
@@ -145,8 +287,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "given_first_surname_suffix",
+                None,
+                None,
                 format!("{given_first} {surname} {suffix}"),
             );
         }
@@ -158,8 +302,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "prefix_given_first_surname_suffix",
+                None,
+                None,
                 format!("{prefix} {given_first} {surname} {suffix}"),
             );
         }
@@ -167,8 +313,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "given_surname",
+                None,
+                None,
                 format!("{given} {surname}"),
             );
         }
@@ -176,8 +324,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "given_surname_suffix",
+                None,
+                None,
                 format!("{given} {surname} {suffix}"),
             );
         }
@@ -185,8 +335,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "prefix_given_surname",
+                None,
+                None,
                 format!("{prefix} {given} {surname}"),
             );
         }
@@ -194,8 +346,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "prefix_given_surname_suffix",
+                None,
+                None,
                 format!("{prefix} {given} {surname} {suffix}"),
             );
         }
@@ -203,8 +357,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "given_first_only",
+                None,
+                None,
                 given_first.clone(),
             );
         }
@@ -212,8 +368,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "surname_only",
+                None,
+                None,
                 surname.clone(),
             );
         }
@@ -221,8 +379,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "surname_last_only",
+                None,
+                None,
                 surname_last,
             );
         }
@@ -230,8 +390,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "prefix_surname",
+                None,
+                None,
                 format!("{prefix} {surname}"),
             );
         }
@@ -239,8 +401,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "surname_suffix",
+                None,
+                None,
                 format!("{surname} {suffix}"),
             );
         }
@@ -251,8 +415,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
                     push_template_variant(
                         &mut template_seen,
                         &mut templates,
-                        canonical,
-                        preserve_raw_input_shape,
+                        &template_context,
+                        "last_comma_first_from_core",
+                        None,
+                        None,
                         format!("{last}, {first}"),
                     );
                 }
@@ -269,8 +435,10 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
                 push_template_variant(
                     &mut template_seen,
                     &mut templates,
-                    canonical,
-                    preserve_raw_input_shape,
+                    &template_context,
+                    "given_first_middle_initials_surname",
+                    None,
+                    None,
                     format!("{given_first} {middle_initials} {surname}"),
                 );
             }
@@ -281,31 +449,39 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
         push_template_variant(
             &mut template_seen,
             &mut templates,
-            canonical,
-            preserve_raw_input_shape,
+            &template_context,
+            "first_last",
+            None,
+            None,
             format!("{first} {last}"),
         );
         if !canonical.contains(',') {
             push_template_variant(
                 &mut template_seen,
                 &mut templates,
-                canonical,
-                preserve_raw_input_shape,
+                &template_context,
+                "last_comma_first",
+                None,
+                None,
                 format!("{last}, {first}"),
             );
         }
         push_template_variant(
             &mut template_seen,
             &mut templates,
-            canonical,
-            preserve_raw_input_shape,
+            &template_context,
+            "first_only",
+            None,
+            None,
             first.to_owned(),
         );
         push_template_variant(
             &mut template_seen,
             &mut templates,
-            canonical,
-            preserve_raw_input_shape,
+            &template_context,
+            "last_only",
+            None,
+            None,
             last.to_owned(),
         );
     }
@@ -322,7 +498,16 @@ fn build_name_variants(canonical: &str) -> Vec<String> {
         }
     }
 
-    finalize_name_variants(&templates)
+    finalize_name_variant_records(
+        &FinalVariantContext {
+            raw_entry_index,
+            raw_entry_text,
+            canonical,
+        },
+        &templates,
+        policy,
+        summary,
+    )
 }
 
 fn has_special_name_structure(canonical: &str, tokens: &[&str]) -> bool {
@@ -349,16 +534,34 @@ enum NameTokenRole {
     Surname,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoleSideVariant {
+    text: String,
+    alias_source: Option<String>,
+    orthographic_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoleTokenVariant {
+    text: String,
+    alias_source: Option<String>,
+    orthographic_source: Option<String>,
+}
+
 fn add_role_aware_alias_templates(
     canonical: &str,
     preserve_raw_input_shape: bool,
     parts: &NameParts,
     template_seen: &mut BTreeSet<String>,
-    templates: &mut Vec<String>,
+    templates: &mut Vec<TemplateVariantRecord>,
 ) {
     if parts.given_tokens.is_empty() || parts.surname_tokens.is_empty() {
         return;
     }
+    let template_context = TemplateContext {
+        canonical,
+        preserve_raw_input_shape,
+    };
     let given_side = expand_role_side_variants(&parts.given_tokens, NameTokenRole::Given);
     let surname_side = expand_role_side_variants(&parts.surname_tokens, NameTokenRole::Surname);
     if given_side.is_empty() || surname_side.is_empty() {
@@ -374,9 +577,11 @@ fn add_role_aware_alias_templates(
             push_template_variant(
                 template_seen,
                 templates,
-                canonical,
-                preserve_raw_input_shape,
-                format!("{given} {surname}"),
+                &template_context,
+                "role_alias_pair",
+                merge_sources(&given.alias_source, &surname.alias_source),
+                merge_sources(&given.orthographic_source, &surname.orthographic_source),
+                format!("{} {}", given.text, surname.text),
             );
             combo_count += 1;
             if combo_count >= MAX_ROLE_COMBINATIONS_PER_ENTRY {
@@ -385,9 +590,11 @@ fn add_role_aware_alias_templates(
             push_template_variant(
                 template_seen,
                 templates,
-                canonical,
-                preserve_raw_input_shape,
-                format!("{surname}, {given}"),
+                &template_context,
+                "role_alias_comma_pair",
+                merge_sources(&given.alias_source, &surname.alias_source),
+                merge_sources(&given.orthographic_source, &surname.orthographic_source),
+                format!("{}, {}", surname.text, given.text),
             );
             combo_count += 1;
         }
@@ -421,12 +628,12 @@ fn token_has_role_alias_signal(token: &str, role: NameTokenRole, allow_aliases: 
     allow_aliases && !aliases_for_role_token(role, token).is_empty()
 }
 
-fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<String> {
+fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<RoleSideVariant> {
     if tokens.is_empty() {
         return Vec::new();
     }
 
-    let mut per_token_variants = Vec::<Vec<String>>::with_capacity(tokens.len());
+    let mut per_token_variants = Vec::<Vec<RoleTokenVariant>>::with_capacity(tokens.len());
     for (idx, token) in tokens.iter().enumerate() {
         let allow_aliases = match role {
             NameTokenRole::Given => idx == 0_usize,
@@ -437,14 +644,18 @@ fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<Stri
             expanded.truncate(MAX_TOKEN_VARIANTS_PER_ROLE);
         }
         if expanded.is_empty() {
-            expanded.push(token.clone());
+            expanded.push(RoleTokenVariant {
+                text: token.clone(),
+                alias_source: None,
+                orthographic_source: None,
+            });
         }
         per_token_variants.push(expanded);
     }
 
-    let mut states = vec![Vec::<String>::new()];
+    let mut states = vec![Vec::<RoleTokenVariant>::new()];
     for variants in per_token_variants {
-        let mut next = Vec::<Vec<String>>::new();
+        let mut next = Vec::<Vec<RoleTokenVariant>>::new();
         for state in &states {
             for variant in &variants {
                 let mut joined = state.clone();
@@ -465,14 +676,38 @@ fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<Stri
     }
 
     let mut seen = BTreeSet::<String>::new();
-    let mut out = Vec::<String>::new();
+    let mut out = Vec::<RoleSideVariant>::new();
     for state in states {
-        let phrase = normalize_dictionary_entry(&state.join(" "));
+        let phrase = normalize_dictionary_entry(
+            &state
+                .iter()
+                .map(|variant| variant.text.clone())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         if phrase.is_empty() {
             continue;
         }
         if seen.insert(phrase.clone()) {
-            out.push(phrase);
+            let alias_sources = state
+                .iter()
+                .filter_map(|variant| variant.alias_source.clone())
+                .collect::<BTreeSet<_>>();
+            let orthographic_sources = state
+                .iter()
+                .filter_map(|variant| variant.orthographic_source.clone())
+                .collect::<BTreeSet<_>>();
+            out.push(RoleSideVariant {
+                text: phrase,
+                alias_source: (!alias_sources.is_empty())
+                    .then(|| alias_sources.into_iter().collect::<Vec<_>>().join(",")),
+                orthographic_source: (!orthographic_sources.is_empty()).then(|| {
+                    orthographic_sources
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }),
+            });
         }
         if out.len() >= MAX_ROLE_SIDE_VARIANTS {
             break;
@@ -481,7 +716,11 @@ fn expand_role_side_variants(tokens: &[String], role: NameTokenRole) -> Vec<Stri
     if out.is_empty() {
         let fallback = join_name_tokens(tokens);
         if !fallback.is_empty() {
-            out.push(fallback);
+            out.push(RoleSideVariant {
+                text: fallback,
+                alias_source: None,
+                orthographic_source: None,
+            });
         }
     }
     out
@@ -491,15 +730,22 @@ fn expand_role_token_variants(
     token: &str,
     role: NameTokenRole,
     allow_aliases: bool,
-) -> Vec<String> {
+) -> Vec<RoleTokenVariant> {
     let mut seen = BTreeSet::<String>::new();
-    let mut out = Vec::<String>::new();
-    push_unique_variant(&mut seen, &mut out, token.to_owned());
+    let mut out = Vec::<RoleTokenVariant>::new();
+    push_unique_role_token_variant(&mut seen, &mut out, token.to_owned(), None, None);
     add_orthographic_token_variants(token, &mut seen, &mut out);
 
     if allow_aliases {
         for alias in aliases_for_role_token(role, token) {
-            push_unique_variant(&mut seen, &mut out, (*alias).to_owned());
+            let alias_source = Some(alias_lookup_key(token));
+            push_unique_role_token_variant(
+                &mut seen,
+                &mut out,
+                (*alias).to_owned(),
+                alias_source.clone(),
+                None,
+            );
             add_orthographic_token_variants(alias, &mut seen, &mut out);
             if out.len() >= MAX_TOKEN_VARIANTS_PER_ROLE {
                 break;
@@ -516,7 +762,7 @@ fn expand_role_token_variants(
 fn add_orthographic_token_variants(
     token: &str,
     seen: &mut BTreeSet<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<RoleTokenVariant>,
 ) {
     let normalized = normalize_dictionary_entry(token);
     if normalized.is_empty() {
@@ -524,7 +770,13 @@ fn add_orthographic_token_variants(
     }
     let folded = fold_latin_text(&normalized);
     if folded != normalized {
-        push_unique_variant(seen, out, folded.clone());
+        push_unique_role_token_variant(
+            seen,
+            out,
+            folded.clone(),
+            None,
+            Some("latin_fold".to_owned()),
+        );
     }
 
     let candidates = [
@@ -537,8 +789,29 @@ fn add_orthographic_token_variants(
     ];
     for candidate in candidates {
         if !candidate.is_empty() {
-            push_unique_variant(seen, out, candidate);
+            let source = Some("token_shape".to_owned());
+            push_unique_role_token_variant(seen, out, candidate, None, source);
         }
+    }
+}
+
+fn push_unique_role_token_variant(
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<RoleTokenVariant>,
+    value: String,
+    alias_source: Option<String>,
+    orthographic_source: Option<String>,
+) {
+    let normalized = normalize_dictionary_entry(&value);
+    if normalized.is_empty() {
+        return;
+    }
+    if seen.insert(normalized.clone()) {
+        out.push(RoleTokenVariant {
+            text: normalized,
+            alias_source,
+            orthographic_source,
+        });
     }
 }
 
@@ -609,14 +882,39 @@ fn fold_latin_char(ch: char) -> char {
     }
 }
 
-fn finalize_name_variants(templates: &[String]) -> Vec<String> {
+fn finalize_name_variant_records(
+    context: &FinalVariantContext<'_>,
+    templates: &[TemplateVariantRecord],
+    policy: DictionaryVariantPolicy,
+    summary: &mut DictionaryVariantBuildSummary,
+) -> Vec<DictionaryVariantRecord> {
     let mut seen = BTreeSet::<String>::new();
-    let mut out = Vec::<String>::new();
+    let mut out = Vec::<DictionaryVariantRecord>::new();
     for template in templates {
-        push_unique_variant(&mut seen, &mut out, template.clone());
-        push_unique_variant(&mut seen, &mut out, template.to_uppercase());
-        push_unique_variant(&mut seen, &mut out, template.to_lowercase());
-        push_unique_variant(&mut seen, &mut out, title_case_text(template));
+        for (value, case_source) in [
+            (template.text.clone(), Some("raw".to_owned())),
+            (template.text.to_uppercase(), Some("uppercase".to_owned())),
+            (template.text.to_lowercase(), Some("lowercase".to_owned())),
+            (
+                title_case_text(&template.text),
+                Some("titlecase".to_owned()),
+            ),
+        ] {
+            let normalized = normalize_dictionary_entry(&value);
+            if normalized.is_empty()
+                || should_skip_final_variant(context, &normalized, policy, summary)
+            {
+                continue;
+            }
+            push_unique_final_variant(
+                &mut seen,
+                &mut out,
+                context,
+                template,
+                normalized,
+                case_source,
+            );
+        }
         if out.len() >= MAX_NAME_VARIANTS_PER_ENTRY {
             break;
         }
@@ -764,39 +1062,164 @@ fn is_surname_particle_token(value: &str) -> bool {
     !key.is_empty() && NAME_SURNAME_PARTICLE_TOKENS.contains(&key.as_str())
 }
 
-fn push_unique_variant(seen: &mut BTreeSet<String>, out: &mut Vec<String>, value: String) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let normalized = normalize_dictionary_entry(trimmed);
-    if normalized.is_empty() {
-        return;
-    }
-    if seen.insert(normalized.clone()) {
-        out.push(normalized);
-    }
-}
-
 fn push_template_variant(
     seen: &mut BTreeSet<String>,
-    out: &mut Vec<String>,
-    canonical: &str,
-    preserve_raw_input_shape: bool,
+    out: &mut Vec<TemplateVariantRecord>,
+    context: &TemplateContext<'_>,
+    template_family: &str,
+    alias_source: Option<String>,
+    orthographic_source: Option<String>,
     value: String,
 ) {
     let normalized = normalize_dictionary_entry(&value);
     if normalized.is_empty() {
         return;
     }
-    let canonical = normalize_dictionary_entry(canonical);
-    if !preserve_raw_input_shape && normalized == canonical {
+    let canonical = normalize_dictionary_entry(context.canonical);
+    if !context.preserve_raw_input_shape && normalized == canonical {
         return;
     }
     if canonical.contains(',') && normalized.contains(',') {
         return;
     }
-    push_unique_variant(seen, out, normalized);
+    if seen.insert(normalized.clone()) {
+        out.push(TemplateVariantRecord {
+            text: normalized,
+            template_id: template_family.to_owned(),
+            template_family: template_family.to_owned(),
+            alias_source,
+            orthographic_source,
+        });
+    }
+}
+
+fn push_unique_final_variant(
+    seen: &mut BTreeSet<String>,
+    out: &mut Vec<DictionaryVariantRecord>,
+    context: &FinalVariantContext<'_>,
+    template: &TemplateVariantRecord,
+    value: String,
+    case_source: Option<String>,
+) {
+    let normalized = normalize_dictionary_entry(&value);
+    if normalized.is_empty() {
+        return;
+    }
+    let variant_family = classify_name_family(&normalized);
+    if seen.insert(normalized.clone()) {
+        out.push(DictionaryVariantRecord {
+            text: normalized.clone(),
+            raw_entry_index: context.raw_entry_index,
+            raw_entry_text: context.raw_entry_text.to_owned(),
+            raw_entry_normalized: normalize_dictionary_entry(context.canonical),
+            template_id: template.template_id.clone(),
+            template_family: template.template_family.clone(),
+            variant_family,
+            alias_source: template.alias_source.clone(),
+            orthographic_source: template.orthographic_source.clone(),
+            case_source,
+        });
+    }
+}
+
+fn should_skip_final_variant(
+    context: &FinalVariantContext<'_>,
+    normalized: &str,
+    policy: DictionaryVariantPolicy,
+    summary: &mut DictionaryVariantBuildSummary,
+) -> bool {
+    let variant_family = classify_name_family(normalized);
+    if !policy.allow_comma_family && variant_family == "comma" {
+        summary.skipped_comma_family_count += 1;
+        push_policy_example(&mut summary.skipped_comma_family_examples, normalized);
+        return true;
+    }
+    if !policy.allow_generated_single_from_multi_raw
+        && variant_family == "single_token"
+        && raw_entry_token_count(context.canonical) >= 2
+    {
+        summary.skipped_generated_single_from_multi_raw_count += 1;
+        push_policy_example(
+            &mut summary.skipped_generated_single_from_multi_raw_examples,
+            normalized,
+        );
+        return true;
+    }
+    false
+}
+
+fn raw_entry_token_count(value: &str) -> usize {
+    value
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .count()
+}
+
+fn push_policy_example(examples: &mut Vec<String>, value: &str) {
+    if examples.len() >= 8 {
+        return;
+    }
+    if !examples.iter().any(|existing| existing == value) {
+        examples.push(value.to_owned());
+    }
+}
+
+fn merge_sources(left: &Option<String>, right: &Option<String>) -> Option<String> {
+    let mut out = BTreeSet::<String>::new();
+    if let Some(left) = left {
+        if !left.is_empty() {
+            out.insert(left.clone());
+        }
+    }
+    if let Some(right) = right {
+        if !right.is_empty() {
+            out.insert(right.clone());
+        }
+    }
+    (!out.is_empty()).then(|| out.into_iter().collect::<Vec<_>>().join(","))
+}
+
+fn classify_name_family(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "empty".to_owned();
+    }
+    if trimmed.contains(',') {
+        return "comma".to_owned();
+    }
+    let tokens = trimmed
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return "empty".to_owned();
+    }
+    let alpha_count = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count();
+    let punct_count = trimmed
+        .chars()
+        .filter(|ch| !ch.is_ascii_alphanumeric() && !ch.is_whitespace())
+        .count();
+    if punct_count > alpha_count {
+        return "punctuation_heavy".to_owned();
+    }
+    if tokens.len() == 1 {
+        let token = tokens[0];
+        let letters = token.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+        if letters <= 2 || token.ends_with('.') {
+            return "initial".to_owned();
+        }
+        return "single_token".to_owned();
+    }
+    if tokens.iter().any(|token| {
+        let letters = token.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+        letters <= 1 || token.ends_with('.')
+    }) {
+        return "initial".to_owned();
+    }
+    "plain_multi_token".to_owned()
 }
 
 fn title_case_text(value: &str) -> String {
@@ -820,12 +1243,28 @@ fn title_case_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_dictionary_variants;
+    use super::{
+        build_dictionary_variant_build_result, build_dictionary_variant_records_full_research,
+        build_dictionary_variants,
+    };
 
     #[test]
-    fn build_dictionary_variants_adds_common_name_forms() {
+    fn build_dictionary_variants_runtime_default_keeps_only_runtime_safe_forms() {
         let dictionary = vec!["Sarah Kellen".to_owned()];
         let variants = build_dictionary_variants(&dictionary);
+        assert!(variants.iter().any(|value| value == "Sarah Kellen"));
+        assert!(!variants.iter().any(|value| value == "Kellen, Sarah"));
+        assert!(!variants.iter().any(|value| value == "Sarah"));
+        assert!(!variants.iter().any(|value| value == "Kellen"));
+    }
+
+    #[test]
+    fn build_dictionary_variants_full_research_preserves_comma_and_single_forms() {
+        let dictionary = vec!["Sarah Kellen".to_owned()];
+        let variants = build_dictionary_variant_records_full_research(&dictionary)
+            .into_iter()
+            .map(|record| record.text)
+            .collect::<Vec<_>>();
         assert!(variants.iter().any(|value| value == "Sarah Kellen"));
         assert!(variants.iter().any(|value| value == "Kellen, Sarah"));
         assert!(variants.iter().any(|value| value == "Sarah"));
@@ -902,5 +1341,26 @@ mod tests {
         assert!(variants.iter().any(|value| value == "MR. WEXNER"));
         assert!(variants.iter().any(|value| value == "DR. BARNETT"));
         assert!(variants.iter().any(|value| value == "DAVID ROGERS"));
+    }
+
+    #[test]
+    fn build_dictionary_variant_build_result_reports_runtime_policy_counts() {
+        let dictionary = vec!["Sarah Kellen".to_owned()];
+        let result = build_dictionary_variant_build_result(&dictionary);
+
+        assert_eq!(result.summary.input_entry_count, 1);
+        assert!(result.summary.kept_variant_count >= 1);
+        assert!(result.summary.skipped_comma_family_count >= 1);
+        assert!(result.summary.skipped_generated_single_from_multi_raw_count >= 2);
+        assert!(result
+            .summary
+            .skipped_comma_family_examples
+            .iter()
+            .any(|value| value == "Kellen, Sarah"));
+        assert!(result
+            .summary
+            .skipped_generated_single_from_multi_raw_examples
+            .iter()
+            .any(|value| value == "Sarah"));
     }
 }

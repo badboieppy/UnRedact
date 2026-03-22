@@ -2,12 +2,17 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::benchmarks::data::accuracy_benchmark_report_data::{
-    build_best_possible_rank, build_candidate_pool_quality, build_dictionary_ablation_summary,
-    build_family_composition, build_hard_negative_full_name_dictionary,
-    build_pairwise_winner_explanations, build_perturbation_robustness, build_stability_summary,
-    build_tie_density, evaluate_dataset, filter_full_name_only, filter_no_comma_single,
-    render_definitions_markdown, render_summary_markdown, summarize_variant,
-    DatasetEvaluationInput,
+    build_anchor_locality_percentile, build_best_possible_rank, build_candidate_pool_quality,
+    build_candidate_source_provenance, build_dictionary_ablation_summary, build_family_composition,
+    build_hard_negative_full_name_dictionary, build_oracle_full_name_pool_ceiling,
+    build_overlap_recompute_geometry, build_pairwise_winner_explanations,
+    build_perturbation_robustness, build_redaction_box_trust_classifier,
+    build_row_cluster_assignment, build_stability_summary, build_tie_density,
+    build_topk_family_entropy, build_variant_template_provenance,
+    build_width_component_attribution, evaluate_dataset, filter_full_name_only,
+    filter_multi_token_only, filter_no_comma_single, filter_plain_multi_only,
+    render_definitions_markdown, render_summary_markdown, render_visual_review_pack,
+    summarize_variant, DatasetArtifacts, DatasetEvaluationInput,
 };
 use crate::benchmarks::types::accuracy_benchmark_report_types::{
     AccuracyBenchmarkReportManifest, AccuracyBenchmarkSummary, VariantSummary,
@@ -22,8 +27,11 @@ use crate::service::anchor_span_visual_benchmark_cli_entry::{
     run as run_anchor_span_visual_benchmark, AnchorSpanVisualBenchmarkRequest,
 };
 use crate::service::tooling_entry::default_name_dictionary_entries;
-use crate::service::unredact_cli_entry::{run_from_paths, UnredactServiceConfig};
-use crate::types::guess_types::{GuessConfig, GuessReport};
+use crate::service::unredact_cli_entry::{
+    run_from_paths_with_diagnostics, UnredactServiceConfig, UnredactServiceOutputs,
+};
+use crate::types::diagnostic_types::DiagnosticReport;
+use crate::types::guess_types::{AnchorReport, GuessConfig, GuessReport};
 use crate::types::visualizer_config::VisualizerConfig;
 
 const NOISE_WORDS: [&str; 24] = [
@@ -35,6 +43,8 @@ const NOISE_WORDS: [&str; 24] = [
 pub const DICTIONARY_VARIANT_BASELINE: &str = "baseline";
 pub const DICTIONARY_VARIANT_DEFAULT: &str = "default_dictionary";
 pub const DICTIONARY_VARIANT_FULL_NAME_ONLY: &str = "full_name_only";
+pub const DICTIONARY_VARIANT_MULTI_TOKEN_ONLY: &str = "multi_token_only";
+pub const DICTIONARY_VARIANT_PLAIN_MULTI_ONLY: &str = "plain_multi_only";
 pub const DICTIONARY_VARIANT_NO_COMMA_SINGLE: &str = "no_comma_single";
 pub const DICTIONARY_VARIANT_HARD_NEGATIVE_W2: &str = "hard_negative_full_name_w2";
 pub const DICTIONARY_VARIANT_HARD_NEGATIVE_W5: &str = "hard_negative_full_name_w5";
@@ -67,7 +77,33 @@ pub struct AccuracyBenchmarkReportRun {
     pub perturbation_robustness:
         crate::benchmarks::types::accuracy_benchmark_report_types::PerturbationRobustnessSummary,
     pub stability: crate::benchmarks::types::accuracy_benchmark_report_types::StabilitySummary,
+    pub candidate_source_provenance:
+        crate::benchmarks::types::accuracy_benchmark_report_types::CandidateSourceProvenanceSummary,
+    pub variant_template_provenance:
+        crate::benchmarks::types::accuracy_benchmark_report_types::VariantTemplateProvenanceSummary,
+    pub width_component_attribution:
+        crate::benchmarks::types::accuracy_benchmark_report_types::WidthComponentAttributionSummary,
+    pub overlap_recompute_geometry:
+        crate::benchmarks::types::accuracy_benchmark_report_types::OverlapRecomputeGeometrySummary,
+    pub oracle_full_name_pool_ceiling:
+        crate::benchmarks::types::accuracy_benchmark_report_types::OracleFullNamePoolCeilingSummary,
+    pub row_cluster_assignment:
+        crate::benchmarks::types::accuracy_benchmark_report_types::RowClusterAssignmentSummary,
+    pub anchor_locality_percentile:
+        crate::benchmarks::types::accuracy_benchmark_report_types::AnchorLocalityPercentileSummary,
+    pub redaction_box_trust_classifier:
+        crate::benchmarks::types::accuracy_benchmark_report_types::RedactionBoxTrustClassifierSummary,
+    pub topk_family_entropy:
+        crate::benchmarks::types::accuracy_benchmark_report_types::TopKFamilyEntropySummary,
+    pub visual_review_pack:
+        Option<crate::benchmarks::types::accuracy_benchmark_report_types::VisualReviewPackSummary>,
     pub visual_stage: Option<VisualBenchmarkStageSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct VariantRunBundle {
+    summary: VariantSummary,
+    datasets: Vec<DatasetArtifacts>,
 }
 
 type DictionaryBuilder = fn(&KnownRedactionDataset, &VariantSummary) -> Vec<String>;
@@ -91,12 +127,13 @@ pub fn run_accuracy_benchmark_report(
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let baseline_stage = baseline_repeats
+    let baseline_bundle = baseline_repeats
         .first()
         .cloned()
         .ok_or_else(|| "baseline benchmark did not produce a run".to_owned())?;
+    let baseline_stage = baseline_bundle.summary.clone();
 
-    let mut variant_runs = vec![baseline_stage.clone()];
+    let mut variant_runs = vec![baseline_bundle.clone()];
     for (variant_name, builder) in build_dictionary_variants() {
         variant_runs.push(run_variant(
             &contract,
@@ -107,16 +144,62 @@ pub fn run_accuracy_benchmark_report(
         )?);
     }
 
-    let dictionary_ablation = build_dictionary_ablation_summary(&variant_runs);
+    let variant_summaries = variant_runs
+        .iter()
+        .map(|variant| variant.summary.clone())
+        .collect::<Vec<_>>();
+    let dictionary_ablation = build_dictionary_ablation_summary(&variant_summaries);
     let candidate_pool_quality = build_candidate_pool_quality(&baseline_stage);
     let family_composition = build_family_composition(&baseline_stage);
     let best_possible_rank = build_best_possible_rank(&baseline_stage);
     let pairwise_winner_explanations = build_pairwise_winner_explanations(&baseline_stage);
     let tie_density = build_tie_density(&baseline_stage);
     let perturbation_robustness = build_perturbation_robustness(&baseline_stage);
-    let stability = build_stability_summary(&baseline_repeats)?;
+    let stability = build_stability_summary(
+        &baseline_repeats
+            .iter()
+            .map(|bundle| bundle.summary.clone())
+            .collect::<Vec<_>>(),
+    )?;
     let visual_stage = Some(run_visual_stage(
         &req.output_dir.join("stages").join("anchor_span_visual"),
+    )?);
+    let candidate_source_provenance = build_candidate_source_provenance(&baseline_stage);
+    let variant_template_provenance = build_variant_template_provenance(&baseline_stage);
+    let width_component_attribution = build_width_component_attribution(&baseline_stage);
+    let overlap_recompute_geometry =
+        build_overlap_recompute_geometry(&baseline_stage, &baseline_bundle.datasets);
+    let oracle_full_name_pool_ceiling = build_oracle_full_name_pool_ceiling(&variant_summaries)?;
+    let row_cluster_assignment = build_row_cluster_assignment(&baseline_bundle.datasets);
+    let anchor_locality_percentile = build_anchor_locality_percentile(
+        &visual_stage
+            .as_ref()
+            .ok_or_else(|| "visual benchmark stage missing".to_owned())?
+            .rows_path,
+    )?;
+    let redaction_box_trust_classifier = build_redaction_box_trust_classifier(
+        &visual_stage
+            .as_ref()
+            .ok_or_else(|| "visual benchmark stage missing".to_owned())?
+            .rows_path,
+    )?;
+    let topk_family_entropy = build_topk_family_entropy(&baseline_stage);
+    let best_variant_name = dictionary_ablation
+        .best_variant_by_mrr
+        .clone()
+        .or_else(|| dictionary_ablation.best_variant_by_mean_rank.clone())
+        .unwrap_or_else(|| DICTIONARY_VARIANT_BASELINE.to_owned());
+    let best_variant_bundle = variant_runs
+        .iter()
+        .find(|bundle| bundle.summary.name == best_variant_name)
+        .unwrap_or(&baseline_bundle);
+    let visual_review_pack = Some(render_visual_review_pack(
+        &req.output_dir.join("visual_review"),
+        &baseline_bundle.summary.name,
+        &baseline_bundle.datasets,
+        &best_variant_name,
+        &best_variant_bundle.datasets,
+        req.compact,
     )?);
 
     let manifest = AccuracyBenchmarkReportManifest {
@@ -126,7 +209,7 @@ pub fn run_accuracy_benchmark_report(
         repeats: req.repeats.max(1),
         dictionary_variants: variant_runs
             .iter()
-            .map(|variant| variant.name.clone())
+            .map(|variant| variant.summary.name.clone())
             .collect(),
         executed_stages: vec![
             "guess_baseline".to_owned(),
@@ -138,6 +221,16 @@ pub fn run_accuracy_benchmark_report(
             "tie_density".to_owned(),
             "perturbation_robustness".to_owned(),
             "stability".to_owned(),
+            "candidate_source_provenance".to_owned(),
+            "variant_template_provenance".to_owned(),
+            "width_component_attribution".to_owned(),
+            "overlap_recompute_geometry".to_owned(),
+            "oracle_full_name_pool_ceiling".to_owned(),
+            "row_cluster_assignment".to_owned(),
+            "anchor_locality_percentile".to_owned(),
+            "redaction_box_trust_classifier".to_owned(),
+            "topk_family_entropy".to_owned(),
+            "visual_review_pack".to_owned(),
             "anchor_span_visual".to_owned(),
         ],
     };
@@ -152,6 +245,16 @@ pub fn run_accuracy_benchmark_report(
         tie_density: tie_density.clone(),
         perturbation_robustness: perturbation_robustness.clone(),
         stability: stability.clone(),
+        candidate_source_provenance: candidate_source_provenance.clone(),
+        variant_template_provenance: variant_template_provenance.clone(),
+        width_component_attribution: width_component_attribution.clone(),
+        overlap_recompute_geometry: overlap_recompute_geometry.clone(),
+        oracle_full_name_pool_ceiling: oracle_full_name_pool_ceiling.clone(),
+        row_cluster_assignment: row_cluster_assignment.clone(),
+        anchor_locality_percentile: anchor_locality_percentile.clone(),
+        redaction_box_trust_classifier: redaction_box_trust_classifier.clone(),
+        topk_family_entropy: topk_family_entropy.clone(),
+        visual_review_pack: visual_review_pack.clone(),
         anchor_span_visual_summary_path: visual_stage
             .as_ref()
             .map(|stage| stage.summary_path.clone()),
@@ -173,6 +276,16 @@ pub fn run_accuracy_benchmark_report(
         tie_density,
         perturbation_robustness,
         stability,
+        candidate_source_provenance,
+        variant_template_provenance,
+        width_component_attribution,
+        overlap_recompute_geometry,
+        oracle_full_name_pool_ceiling,
+        row_cluster_assignment,
+        anchor_locality_percentile,
+        redaction_box_trust_classifier,
+        topk_family_entropy,
+        visual_review_pack,
         visual_stage,
     })
 }
@@ -196,7 +309,7 @@ fn benchmark_config() -> UnredactServiceConfig {
         include_details: false,
         enable_image_analysis: true,
         guess: GuessConfig::default(),
-        visualize: false,
+        visualize: true,
         visualizer: VisualizerConfig::default(),
     }
 }
@@ -207,10 +320,11 @@ fn run_variant(
     output_root: &Path,
     baseline: Option<&VariantSummary>,
     dictionary_builder: Option<DictionaryBuilder>,
-) -> Result<VariantSummary, String> {
+) -> Result<VariantRunBundle, String> {
     let mut datasets = Vec::<
         crate::benchmarks::types::accuracy_benchmark_report_types::VariantDatasetResult,
     >::new();
+    let mut artifacts = Vec::<DatasetArtifacts>::new();
     for dataset in &contract.datasets {
         let dictionary_entries = match (baseline, dictionary_builder) {
             (Some(baseline), Some(builder)) => Some(builder(dataset, baseline)),
@@ -221,13 +335,17 @@ fn run_variant(
                 ));
             }
         };
-        let report = run_report(dataset, output_root, variant_name, dictionary_entries)?;
+        let dataset_artifacts = run_report(dataset, output_root, variant_name, dictionary_entries)?;
         datasets.push(evaluate_dataset(DatasetEvaluationInput {
             dataset,
-            report: &report,
+            report: &dataset_artifacts.report,
         })?);
+        artifacts.push(dataset_artifacts);
     }
-    Ok(summarize_variant(variant_name, datasets))
+    Ok(VariantRunBundle {
+        summary: summarize_variant(variant_name, datasets),
+        datasets: artifacts,
+    })
 }
 
 fn run_report(
@@ -235,7 +353,7 @@ fn run_report(
     output_root: &Path,
     variant_name: &str,
     dictionary_entries: Option<Vec<String>>,
-) -> Result<GuessReport, String> {
+) -> Result<DatasetArtifacts, String> {
     let input = Path::new(&dataset.input_pdf);
     let dataset_dir = output_root.join(&dataset.name);
     std::fs::create_dir_all(&dataset_dir)
@@ -248,19 +366,51 @@ fn run_report(
     } else {
         None
     };
-    let outputs = run_from_paths(
+    let outputs = run_from_paths_with_diagnostics(
         input,
         &dataset_dir,
         dictionary_path.as_deref(),
         benchmark_config(),
+        true,
     )?;
+    load_dataset_artifacts(dataset, outputs)
+}
+
+fn load_dataset_artifacts(
+    dataset: &KnownRedactionDataset,
+    outputs: UnredactServiceOutputs,
+) -> Result<DatasetArtifacts, String> {
     let bytes = std::fs::read(&outputs.guesses_path)
         .map_err(|error| format!("failed to read {}: {error}", outputs.guesses_path.display()))?;
-    serde_json::from_slice::<GuessReport>(&bytes).map_err(|error| {
+    let report = serde_json::from_slice::<GuessReport>(&bytes).map_err(|error| {
         format!(
             "failed to parse guess report {}: {error}",
             outputs.guesses_path.display()
         )
+    })?;
+    let anchors_bytes = std::fs::read(&outputs.anchors_path)
+        .map_err(|error| format!("failed to read {}: {error}", outputs.anchors_path.display()))?;
+    let anchors = serde_json::from_slice::<AnchorReport>(&anchors_bytes).map_err(|error| {
+        format!(
+            "failed to parse anchor report {}: {error}",
+            outputs.anchors_path.display()
+        )
+    })?;
+    let diagnostics = if let Some(path) = &outputs.diagnostics_path {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        serde_json::from_slice::<DiagnosticReport>(&bytes)
+            .map_err(|error| format!("failed to parse diagnostics {}: {error}", path.display()))?
+    } else {
+        DiagnosticReport::default()
+    };
+    Ok(DatasetArtifacts {
+        dataset_name: dataset.name.clone(),
+        input_pdf: dataset.input_pdf.clone(),
+        report,
+        anchors,
+        diagnostics,
+        outputs,
     })
 }
 
@@ -281,6 +431,14 @@ fn build_dictionary_variants() -> Vec<(&'static str, DictionaryBuilder)> {
     vec![
         (DICTIONARY_VARIANT_DEFAULT, dictionary_default),
         (DICTIONARY_VARIANT_FULL_NAME_ONLY, dictionary_full_name_only),
+        (
+            DICTIONARY_VARIANT_MULTI_TOKEN_ONLY,
+            dictionary_multi_token_only,
+        ),
+        (
+            DICTIONARY_VARIANT_PLAIN_MULTI_ONLY,
+            dictionary_plain_multi_only,
+        ),
         (
             DICTIONARY_VARIANT_NO_COMMA_SINGLE,
             dictionary_no_comma_single,
@@ -322,6 +480,26 @@ fn dictionary_no_comma_single(
 ) -> Vec<String> {
     merge_with_targets(
         filter_no_comma_single(default_name_dictionary_entries()),
+        &dataset.targets,
+    )
+}
+
+fn dictionary_multi_token_only(
+    dataset: &KnownRedactionDataset,
+    _baseline: &VariantSummary,
+) -> Vec<String> {
+    merge_with_targets(
+        filter_multi_token_only(default_name_dictionary_entries()),
+        &dataset.targets,
+    )
+}
+
+fn dictionary_plain_multi_only(
+    dataset: &KnownRedactionDataset,
+    _baseline: &VariantSummary,
+) -> Vec<String> {
+    merge_with_targets(
+        filter_plain_multi_only(default_name_dictionary_entries()),
         &dataset.targets,
     )
 }

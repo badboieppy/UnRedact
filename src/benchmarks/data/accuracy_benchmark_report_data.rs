@@ -1,19 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use sha2::{Digest as _, Sha256};
 
 use crate::benchmarks::types::accuracy_benchmark_report_types::{
-    BenchmarkSummary, BestPossibleRankRow, BestPossibleRankSummary, CandidatePoolQualityRow,
-    CandidatePoolQualitySummary, CandidateSummary, DictionaryAblationSummary,
-    DictionaryVariantResult, FamilyCompositionSummary, FamilyCount, PairwiseWinnerExplanation,
+    AnchorLocalityPercentileRow, AnchorLocalityPercentileSummary, BenchmarkSummary,
+    BestPossibleRankRow, BestPossibleRankSummary, CandidatePoolQualityRow,
+    CandidatePoolQualitySummary, CandidateSourceProvenanceRow, CandidateSourceProvenanceSummary,
+    CandidateSummary, DictionaryAblationSummary, DictionaryVariantResult, FamilyCompositionSummary,
+    FamilyCount, OracleFullNamePoolCeilingRow, OracleFullNamePoolCeilingSummary,
+    OverlapRecomputeGeometryRow, OverlapRecomputeGeometrySummary, PairwiseWinnerExplanation,
     PairwiseWinnerSummary, PerturbationRobustnessRow, PerturbationRobustnessSummary,
-    QualitySummary, SelectedGuessRow, StabilityDatasetSummary, StabilitySummary, TargetResult,
-    TieDensityRow, TieDensitySummary, VariantDatasetResult, VariantSummary,
+    QualitySummary, RedactionBoxTrustClassifierRow, RedactionBoxTrustClassifierSummary,
+    RowClusterAssignmentRow, RowClusterAssignmentSummary, SelectedGuessRow,
+    StabilityDatasetSummary, StabilitySummary, TargetResult, TieDensityRow, TieDensitySummary,
+    TopKFamilyEntropyRow, TopKFamilyEntropySummary, VariantDatasetResult, VariantSummary,
+    VariantTemplateProvenanceRow, VariantTemplateProvenanceSummary, VisualReviewPackSummary,
+    WidthComponentAttributionRow, WidthComponentAttributionSummary,
 };
 use crate::benchmarks::types::known_redaction_contract::{
     KnownRedactionDataset, KnownRedactionRowSelector, KnownRedactionTargetSelector,
 };
-use crate::types::guess_types::{GuessCandidate, GuessReport, RedactionGuess};
+use crate::service::unredact_cli_entry::UnredactServiceOutputs;
+use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticReport, DiagnosticValue};
+use crate::types::guess_types::{AnchorReport, GuessCandidate, GuessReport, RedactionGuess};
 
 const TIE_THRESHOLDS_PT: [f32; 5] = [0.05_f32, 0.10_f32, 0.25_f32, 0.50_f32, 1.0_f32];
 const MISSING_RANK_SENTINEL: f64 = 10_000.0_f64;
@@ -22,6 +32,33 @@ const MISSING_RANK_SENTINEL: f64 = 10_000.0_f64;
 pub struct DatasetEvaluationInput<'a> {
     pub dataset: &'a KnownRedactionDataset,
     pub report: &'a GuessReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct DatasetArtifacts {
+    pub dataset_name: String,
+    pub input_pdf: String,
+    pub report: GuessReport,
+    pub anchors: AnchorReport,
+    pub diagnostics: DiagnosticReport,
+    pub outputs: UnredactServiceOutputs,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct VisualBenchmarkRow {
+    row_key: String,
+    input_pdf: String,
+    page_index: u32,
+    current_anchor_mode: String,
+    #[serde(default)]
+    visual_reference_kind: Option<String>,
+    redaction_box_width_pt: f32,
+    #[serde(default)]
+    visual_reference_width_pt: Option<f32>,
+    #[serde(default)]
+    selected_left_gap_pt: Option<f32>,
+    #[serde(default)]
+    selected_right_gap_pt: Option<f32>,
 }
 
 #[inline]
@@ -123,6 +160,252 @@ pub fn build_family_composition(variant: &VariantSummary) -> FamilyCompositionSu
         target_families: counts_to_sorted_vec(target_counts),
         top1_families: counts_to_sorted_vec(top1_counts),
         candidate_families: counts_to_sorted_vec(candidate_counts),
+    }
+}
+
+#[inline]
+pub fn build_candidate_source_provenance(
+    variant: &VariantSummary,
+) -> CandidateSourceProvenanceSummary {
+    let mut top1_template_counts = BTreeMap::<String, usize>::new();
+    let mut target_template_counts = BTreeMap::<String, usize>::new();
+    let mut top1_variant_counts = BTreeMap::<String, usize>::new();
+    let mut rows = Vec::<CandidateSourceProvenanceRow>::new();
+
+    for dataset in &variant.datasets {
+        for target in &dataset.targets {
+            let row = target.best_row_key.as_ref().and_then(|row_key| {
+                dataset
+                    .selected_rows
+                    .iter()
+                    .find(|selected| &selected.row_key == row_key)
+            });
+            let top1 = row.and_then(|row| row.candidates.first());
+            let target_candidate = row.and_then(|row| candidate_by_text(row, &target.target));
+            if let Some(candidate) = top1.and_then(|candidate| candidate.provenance.as_ref()) {
+                increment_count(&mut top1_template_counts, candidate.template_family.clone());
+                increment_count(&mut top1_variant_counts, candidate.variant_family.clone());
+            }
+            if let Some(candidate) =
+                target_candidate.and_then(|candidate| candidate.provenance.as_ref())
+            {
+                increment_count(
+                    &mut target_template_counts,
+                    candidate.template_family.clone(),
+                );
+            }
+            rows.push(CandidateSourceProvenanceRow {
+                dataset: target.dataset.clone(),
+                label: target.label.clone(),
+                target: target.target.clone(),
+                row_key: target.best_row_key.clone(),
+                top1_text: top1.map(|candidate| candidate.text.clone()),
+                top1_template_id: top1
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.template_id.clone()),
+                top1_template_family: top1
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.template_family.clone()),
+                top1_variant_family: top1
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.variant_family.clone()),
+                target_template_id: target_candidate
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.template_id.clone()),
+                target_template_family: target_candidate
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.template_family.clone()),
+                target_variant_family: target_candidate
+                    .and_then(|candidate| candidate.provenance.as_ref())
+                    .map(|provenance| provenance.variant_family.clone()),
+                target_present_in_row: target_candidate.is_some(),
+            });
+        }
+    }
+
+    CandidateSourceProvenanceSummary {
+        rows,
+        top1_template_families: counts_to_sorted_vec(top1_template_counts),
+        target_template_families: counts_to_sorted_vec(target_template_counts),
+        top1_variant_families: counts_to_sorted_vec(top1_variant_counts),
+    }
+}
+
+#[inline]
+pub fn build_variant_template_provenance(
+    variant: &VariantSummary,
+) -> VariantTemplateProvenanceSummary {
+    let mut rows = BTreeMap::<(String, String), VariantTemplateProvenanceRow>::new();
+    for dataset in &variant.datasets {
+        for row in &dataset.selected_rows {
+            for candidate in &row.candidates {
+                let Some(provenance) = &candidate.provenance else {
+                    continue;
+                };
+                let key = (
+                    provenance.template_id.clone(),
+                    provenance.template_family.clone(),
+                );
+                let entry = rows
+                    .entry(key.clone())
+                    .or_insert(VariantTemplateProvenanceRow {
+                        template_id: key.0,
+                        template_family: key.1,
+                        candidate_count: 0,
+                        top1_count: 0,
+                        target_count: 0,
+                        displaced_target_count: 0,
+                    });
+                entry.candidate_count += 1;
+            }
+        }
+        for target in &dataset.targets {
+            let selected_row = target.best_row_key.as_ref().and_then(|row_key| {
+                dataset
+                    .selected_rows
+                    .iter()
+                    .find(|row| &row.row_key == row_key)
+            });
+            if let Some(top1) = selected_row.and_then(|row| row.candidates.first()) {
+                if let Some(provenance) = &top1.provenance {
+                    let key = (
+                        provenance.template_id.clone(),
+                        provenance.template_family.clone(),
+                    );
+                    let entry = rows
+                        .entry(key.clone())
+                        .or_insert(VariantTemplateProvenanceRow {
+                            template_id: key.0,
+                            template_family: key.1,
+                            candidate_count: 0,
+                            top1_count: 0,
+                            target_count: 0,
+                            displaced_target_count: 0,
+                        });
+                    entry.top1_count += 1;
+                    if top1.text != target.target {
+                        entry.displaced_target_count += 1;
+                    }
+                }
+            }
+            if let Some(candidate) =
+                selected_row.and_then(|row| candidate_by_text(row, &target.target))
+            {
+                if let Some(provenance) = &candidate.provenance {
+                    let key = (
+                        provenance.template_id.clone(),
+                        provenance.template_family.clone(),
+                    );
+                    let entry = rows
+                        .entry(key.clone())
+                        .or_insert(VariantTemplateProvenanceRow {
+                            template_id: key.0,
+                            template_family: key.1,
+                            candidate_count: 0,
+                            top1_count: 0,
+                            target_count: 0,
+                            displaced_target_count: 0,
+                        });
+                    entry.target_count += 1;
+                }
+            }
+        }
+    }
+    VariantTemplateProvenanceSummary {
+        rows: rows.into_values().collect::<Vec<_>>(),
+    }
+}
+
+#[inline]
+pub fn build_width_component_attribution(
+    variant: &VariantSummary,
+) -> WidthComponentAttributionSummary {
+    let mut dominant_counts = BTreeMap::<String, usize>::new();
+    let mut rows = Vec::<WidthComponentAttributionRow>::new();
+
+    for dataset in &variant.datasets {
+        for target in &dataset.targets {
+            let selected_row = target.best_row_key.as_ref().and_then(|row_key| {
+                dataset
+                    .selected_rows
+                    .iter()
+                    .find(|row| &row.row_key == row_key)
+            });
+            let top1 = selected_row.and_then(|row| row.candidates.first());
+            let target_candidate =
+                selected_row.and_then(|row| candidate_by_text(row, &target.target));
+            let dominant_component = match (top1, target_candidate) {
+                (Some(top1), Some(target_candidate)) => {
+                    let components = [
+                        (
+                            "glyph_width_sum_pt",
+                            (top1.glyph_width_sum_pt - target_candidate.glyph_width_sum_pt).abs(),
+                        ),
+                        (
+                            "char_spacing_total_pt",
+                            (top1.char_spacing_total_pt - target_candidate.char_spacing_total_pt)
+                                .abs(),
+                        ),
+                        (
+                            "word_spacing_total_pt",
+                            (top1.word_spacing_total_pt - target_candidate.word_spacing_total_pt)
+                                .abs(),
+                        ),
+                    ];
+                    components
+                        .into_iter()
+                        .max_by(|left, right| {
+                            left.1
+                                .partial_cmp(&right.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(name, _)| name.to_owned())
+                }
+                _ => None,
+            };
+            if let Some(component) = &dominant_component {
+                increment_count(&mut dominant_counts, component.clone());
+            }
+            rows.push(WidthComponentAttributionRow {
+                dataset: target.dataset.clone(),
+                label: target.label.clone(),
+                target: target.target.clone(),
+                row_key: target.best_row_key.clone(),
+                top1_text: top1.map(|candidate| candidate.text.clone()),
+                target_total_pt: target_candidate.map(|candidate| candidate.width_pt),
+                top1_total_pt: top1.map(|candidate| candidate.width_pt),
+                glyph_delta_pt: match (top1, target_candidate) {
+                    (Some(top1), Some(target_candidate)) => {
+                        Some(top1.glyph_width_sum_pt - target_candidate.glyph_width_sum_pt)
+                    }
+                    _ => None,
+                },
+                char_spacing_delta_pt: match (top1, target_candidate) {
+                    (Some(top1), Some(target_candidate)) => {
+                        Some(top1.char_spacing_total_pt - target_candidate.char_spacing_total_pt)
+                    }
+                    _ => None,
+                },
+                word_spacing_delta_pt: match (top1, target_candidate) {
+                    (Some(top1), Some(target_candidate)) => {
+                        Some(top1.word_spacing_total_pt - target_candidate.word_spacing_total_pt)
+                    }
+                    _ => None,
+                },
+                total_delta_pt: match (top1, target_candidate) {
+                    (Some(top1), Some(target_candidate)) => {
+                        Some(top1.width_pt - target_candidate.width_pt)
+                    }
+                    _ => None,
+                },
+                dominant_component,
+            });
+        }
+    }
+
+    WidthComponentAttributionSummary {
+        rows,
+        dominant_components: counts_to_sorted_vec(dominant_counts),
     }
 }
 
@@ -270,6 +553,618 @@ pub fn build_perturbation_robustness(variant: &VariantSummary) -> PerturbationRo
 }
 
 #[inline]
+pub fn build_overlap_recompute_geometry(
+    variant: &VariantSummary,
+    datasets: &[DatasetArtifacts],
+) -> OverlapRecomputeGeometrySummary {
+    let dataset_map = datasets
+        .iter()
+        .map(|dataset| (dataset.dataset_name.clone(), dataset))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = Vec::<OverlapRecomputeGeometryRow>::new();
+
+    for dataset in &variant.datasets {
+        let diagnostics = dataset_map
+            .get(&dataset.name)
+            .map(|artifacts| &artifacts.diagnostics.items);
+        for target in &dataset.targets {
+            let selected_row = target.best_row_key.as_ref().and_then(|row_key| {
+                dataset
+                    .selected_rows
+                    .iter()
+                    .find(|row| &row.row_key == row_key)
+            });
+            let row_key = target.best_row_key.clone();
+            let overlap_rows = diagnostics
+                .map(|items| overlap_rows_for_key(items, row_key.as_deref()))
+                .unwrap_or_default();
+            let top1 = selected_row.and_then(|row| row.candidates.first());
+            let target_candidate =
+                selected_row.and_then(|row| candidate_by_text(row, &target.target));
+            let top1_overlap_row = top1
+                .and_then(|candidate| overlap_row_for_candidate(&overlap_rows, &candidate.text));
+            let target_overlap_row = target_candidate
+                .and_then(|candidate| overlap_row_for_candidate(&overlap_rows, &candidate.text));
+            rows.push(OverlapRecomputeGeometryRow {
+                dataset: target.dataset.clone(),
+                label: target.label.clone(),
+                target: target.target.clone(),
+                row_key: target.best_row_key.clone(),
+                top1_text: top1.map(|candidate| candidate.text.clone()),
+                overlap_rejection_count: overlap_rows.len(),
+                top1_current_overlap: Some(top1_overlap_row.is_some()),
+                target_current_overlap: Some(target_overlap_row.is_some()),
+                supports_no_h_scale_recompute: top1_overlap_row.is_some()
+                    || target_overlap_row.is_some(),
+                top1_overlap_without_h_scale: top1_overlap_row
+                    .and_then(recompute_overlap_without_h_scale),
+                target_overlap_without_h_scale: target_overlap_row
+                    .and_then(recompute_overlap_without_h_scale),
+            });
+        }
+    }
+
+    OverlapRecomputeGeometrySummary { rows }
+}
+
+#[inline]
+pub fn build_oracle_full_name_pool_ceiling(
+    variants: &[VariantSummary],
+) -> Result<OracleFullNamePoolCeilingSummary, String> {
+    let mut by_name = BTreeMap::<String, &VariantSummary>::new();
+    for variant in variants {
+        by_name.insert(variant.name.clone(), variant);
+    }
+    let baseline = by_name
+        .get("baseline")
+        .ok_or_else(|| "baseline variant missing for oracle full-name pool ceiling".to_owned())?;
+    let full_name_only = by_name.get("full_name_only").copied();
+    let multi_token_only = by_name.get("multi_token_only").copied().or(full_name_only);
+    let plain_multi_only = by_name.get("plain_multi_only").copied().or(full_name_only);
+    let hard_negative_w2 = by_name.get("hard_negative_full_name_w2").copied();
+    let hard_negative_w5 = by_name.get("hard_negative_full_name_w5").copied();
+
+    let mut rows = Vec::<OracleFullNamePoolCeilingRow>::new();
+    let mut improvable_by_full_name_only = 0_usize;
+    let mut improvable_by_hard_negative_w2 = 0_usize;
+    let mut improvable_by_hard_negative_w5 = 0_usize;
+
+    for dataset in &baseline.datasets {
+        let full_name_dataset =
+            full_name_only.and_then(|variant| find_dataset(variant, &dataset.name));
+        let multi_token_dataset =
+            multi_token_only.and_then(|variant| find_dataset(variant, &dataset.name));
+        let plain_multi_dataset =
+            plain_multi_only.and_then(|variant| find_dataset(variant, &dataset.name));
+        let hard_w2_dataset =
+            hard_negative_w2.and_then(|variant| find_dataset(variant, &dataset.name));
+        let hard_w5_dataset =
+            hard_negative_w5.and_then(|variant| find_dataset(variant, &dataset.name));
+        for target in &dataset.targets {
+            let full_name_rank =
+                full_name_dataset.and_then(|data| find_target_rank(data, &target.label));
+            let hard_w2_rank =
+                hard_w2_dataset.and_then(|data| find_target_rank(data, &target.label));
+            let hard_w5_rank =
+                hard_w5_dataset.and_then(|data| find_target_rank(data, &target.label));
+            if improves_rank(target.best_rank, full_name_rank) {
+                improvable_by_full_name_only += 1;
+            }
+            if improves_rank(target.best_rank, hard_w2_rank) {
+                improvable_by_hard_negative_w2 += 1;
+            }
+            if improves_rank(target.best_rank, hard_w5_rank) {
+                improvable_by_hard_negative_w5 += 1;
+            }
+            rows.push(OracleFullNamePoolCeilingRow {
+                dataset: target.dataset.clone(),
+                label: target.label.clone(),
+                target: target.target.clone(),
+                current_rank: target.best_rank,
+                full_name_only_rank: full_name_rank,
+                multi_token_only_rank: multi_token_dataset
+                    .and_then(|data| find_target_rank(data, &target.label)),
+                plain_multi_only_rank: plain_multi_dataset
+                    .and_then(|data| find_target_rank(data, &target.label)),
+                hard_negative_w2_rank: hard_w2_rank,
+                hard_negative_w5_rank: hard_w5_rank,
+            });
+        }
+    }
+
+    Ok(OracleFullNamePoolCeilingSummary {
+        rows,
+        improvable_by_full_name_only,
+        improvable_by_hard_negative_w2,
+        improvable_by_hard_negative_w5,
+    })
+}
+
+#[inline]
+pub fn build_row_cluster_assignment(datasets: &[DatasetArtifacts]) -> RowClusterAssignmentSummary {
+    let mut rows = Vec::<RowClusterAssignmentRow>::new();
+    let mut multi_row_clusters = 0_usize;
+    let mut improvable_clusters = 0_usize;
+
+    for dataset in datasets {
+        let guesses_by_redaction = dataset
+            .report
+            .guesses
+            .iter()
+            .enumerate()
+            .map(|(index, guess)| {
+                (
+                    format!("page{}_redaction{index:03}", guess.page_index),
+                    guess,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut cluster_map = BTreeMap::<
+            (u32, String),
+            Vec<(String, &crate::types::guess_types::RedactionGuess)>,
+        >::new();
+        for decision in &dataset.anchors.decisions {
+            let Some(line_id) = &decision.selected_line_id else {
+                continue;
+            };
+            let row_key = format!(
+                "{}:page{}_{}",
+                dataset.dataset_name, decision.page_index, decision.anchor_row_id
+            );
+            if let Some(guess) =
+                guesses_by_redaction.get(&decision.redaction_id.clone().unwrap_or_default())
+            {
+                cluster_map
+                    .entry((decision.page_index, line_id.clone()))
+                    .or_default()
+                    .push((row_key, *guess));
+            }
+        }
+        for ((page_index, line_id), cluster_rows) in cluster_map {
+            if cluster_rows.len() <= 1 {
+                continue;
+            }
+            multi_row_clusters += 1;
+            let independent_unique = cluster_rows
+                .iter()
+                .filter_map(|(_, guess)| {
+                    guess
+                        .candidates
+                        .first()
+                        .map(|candidate| normalized_candidate_text_local(&candidate.text))
+                })
+                .collect::<BTreeSet<_>>()
+                .len();
+            let greedy_unique = greedy_unique_top1_count(&cluster_rows);
+            if greedy_unique > independent_unique {
+                improvable_clusters += 1;
+            }
+            let cluster_size = cluster_rows.len();
+            let row_keys = cluster_rows
+                .iter()
+                .map(|(row_key, _)| row_key.clone())
+                .collect::<Vec<_>>();
+            rows.push(RowClusterAssignmentRow {
+                cluster_id: format!("{}:{}:{}", dataset.dataset_name, page_index, line_id),
+                dataset: dataset.dataset_name.clone(),
+                page_index,
+                row_keys,
+                cluster_size,
+                independent_unique_top1_count: independent_unique,
+                greedy_unique_top1_count: greedy_unique,
+                improved_row_count: greedy_unique.saturating_sub(independent_unique),
+            });
+        }
+    }
+
+    RowClusterAssignmentSummary {
+        rows,
+        multi_row_clusters,
+        improvable_clusters,
+    }
+}
+
+#[inline]
+pub fn build_anchor_locality_percentile(
+    rows_path: &Path,
+) -> Result<AnchorLocalityPercentileSummary, String> {
+    let rows = load_visual_rows(rows_path)?;
+    let left_values = rows
+        .iter()
+        .filter_map(|row| row.selected_left_gap_pt.map(f64::from))
+        .collect::<Vec<_>>();
+    let right_values = rows
+        .iter()
+        .filter_map(|row| row.selected_right_gap_pt.map(f64::from))
+        .collect::<Vec<_>>();
+    let max_values = rows
+        .iter()
+        .filter_map(|row| max_selected_gap(row.selected_left_gap_pt, row.selected_right_gap_pt))
+        .map(f64::from)
+        .collect::<Vec<_>>();
+    Ok(AnchorLocalityPercentileSummary {
+        rows: rows
+            .into_iter()
+            .map(|row| AnchorLocalityPercentileRow {
+                row_key: row.row_key.clone(),
+                input_pdf: row.input_pdf.clone(),
+                page_index: row.page_index,
+                anchor_mode: row.current_anchor_mode.clone(),
+                selected_line_id: None,
+                selected_left_gap_pt: row.selected_left_gap_pt,
+                selected_right_gap_pt: row.selected_right_gap_pt,
+                left_gap_percentile: row
+                    .selected_left_gap_pt
+                    .map(|value| percentile_of_value(&left_values, f64::from(value))),
+                right_gap_percentile: row
+                    .selected_right_gap_pt
+                    .map(|value| percentile_of_value(&right_values, f64::from(value))),
+                max_gap_percentile: max_selected_gap(
+                    row.selected_left_gap_pt,
+                    row.selected_right_gap_pt,
+                )
+                .map(|value| percentile_of_value(&max_values, f64::from(value))),
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[inline]
+pub fn build_redaction_box_trust_classifier(
+    rows_path: &Path,
+) -> Result<RedactionBoxTrustClassifierSummary, String> {
+    let rows = load_visual_rows(rows_path)?;
+    let mut counts = BTreeMap::<String, usize>::new();
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let (trust_class, absolute_delta_pt) =
+                if let Some(visual_width) = row.visual_reference_width_pt {
+                    let delta = (row.redaction_box_width_pt - visual_width).abs();
+                    let trusted = delta <= alignment_threshold(visual_width);
+                    (
+                        if trusted { "trusted" } else { "untrusted" }.to_owned(),
+                        Some(delta),
+                    )
+                } else {
+                    ("unknown".to_owned(), None)
+                };
+            increment_count(&mut counts, trust_class.clone());
+            RedactionBoxTrustClassifierRow {
+                row_key: row.row_key,
+                input_pdf: row.input_pdf,
+                visual_reference_kind: row
+                    .visual_reference_kind
+                    .unwrap_or_else(|| "missing".to_owned()),
+                redaction_box_width_pt: row.redaction_box_width_pt,
+                visual_reference_width_pt: row.visual_reference_width_pt,
+                absolute_delta_pt,
+                trust_class,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(RedactionBoxTrustClassifierSummary {
+        rows,
+        trust_counts: counts_to_sorted_vec(counts),
+    })
+}
+
+#[inline]
+pub fn build_topk_family_entropy(variant: &VariantSummary) -> TopKFamilyEntropySummary {
+    let mut rows = Vec::<TopKFamilyEntropyRow>::new();
+    let mut top5 = Vec::<f64>::new();
+    let mut top10 = Vec::<f64>::new();
+    let mut top20 = Vec::<f64>::new();
+
+    for dataset in &variant.datasets {
+        for target in &dataset.targets {
+            let row = target.best_row_key.as_ref().and_then(|row_key| {
+                dataset
+                    .selected_rows
+                    .iter()
+                    .find(|row| &row.row_key == row_key)
+            });
+            let entropy_top5 = row.map(|row| family_entropy(&row.candidates, 5));
+            let entropy_top10 = row.map(|row| family_entropy(&row.candidates, 10));
+            let entropy_top20 = row.map(|row| family_entropy(&row.candidates, 20));
+            if let Some(value) = entropy_top5 {
+                top5.push(value);
+            }
+            if let Some(value) = entropy_top10 {
+                top10.push(value);
+            }
+            if let Some(value) = entropy_top20 {
+                top20.push(value);
+            }
+            let dominant = row.and_then(|row| dominant_family_share(&row.candidates, 5));
+            rows.push(TopKFamilyEntropyRow {
+                dataset: target.dataset.clone(),
+                label: target.label.clone(),
+                target: target.target.clone(),
+                row_key: target.best_row_key.clone(),
+                entropy_top5,
+                entropy_top10,
+                entropy_top20,
+                dominant_family_top5: dominant.as_ref().map(|(family, _)| family.clone()),
+                dominant_family_share_top5: dominant.map(|(_, share)| share),
+                target_family: Some(classify_name_family(&target.target)),
+            });
+        }
+    }
+
+    TopKFamilyEntropySummary {
+        rows,
+        mean_entropy_top5: mean(&top5),
+        mean_entropy_top10: mean(&top10),
+        mean_entropy_top20: mean(&top20),
+    }
+}
+
+#[inline]
+pub fn render_visual_review_pack(
+    output_dir: &Path,
+    baseline_name: &str,
+    baseline_datasets: &[DatasetArtifacts],
+    best_variant_name: &str,
+    best_variant_datasets: &[DatasetArtifacts],
+    compact: bool,
+) -> Result<VisualReviewPackSummary, String> {
+    let mut manifest = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for dataset in baseline_datasets {
+        manifest
+            .entry(dataset.dataset_name.clone())
+            .or_default()
+            .insert(
+                format!("{baseline_name}_pdf"),
+                dataset
+                    .outputs
+                    .visualized_pdf_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            );
+    }
+    for dataset in best_variant_datasets {
+        manifest
+            .entry(dataset.dataset_name.clone())
+            .or_default()
+            .insert(
+                format!("{best_variant_name}_pdf"),
+                dataset
+                    .outputs
+                    .visualized_pdf_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
+            );
+    }
+    let bytes = if compact {
+        serde_json::to_vec(&manifest)
+            .map_err(|error| format!("failed to encode visual review manifest: {error}"))?
+    } else {
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("failed to encode visual review manifest: {error}"))?
+    };
+    std::fs::create_dir_all(output_dir)
+        .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
+    let manifest_path = output_dir.join("manifest.json");
+    std::fs::write(&manifest_path, bytes)
+        .map_err(|error| format!("failed to write {}: {error}", manifest_path.display()))?;
+    Ok(VisualReviewPackSummary {
+        manifest_path,
+        item_count: manifest.len(),
+    })
+}
+
+fn candidate_by_text<'a>(row: &'a SelectedGuessRow, target: &str) -> Option<&'a GuessCandidate> {
+    let normalized_target = normalized_candidate_text_local(target);
+    row.candidates
+        .iter()
+        .find(|candidate| normalized_candidate_text_local(&candidate.text) == normalized_target)
+}
+
+fn normalized_candidate_text_local(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_uppercase()
+}
+
+fn overlap_rows_for_key<'a>(
+    items: &'a [DiagnosticRecord],
+    row_key: Option<&str>,
+) -> Vec<&'a DiagnosticRecord> {
+    let Some(row_key) = row_key else {
+        return Vec::new();
+    };
+    let row_id = row_id_from_row_key(row_key);
+    items
+        .iter()
+        .filter(|item| {
+            item.stage == "guess_candidate_data"
+                && item.code == "candidate_neighbor_overlap_rejected"
+                && item.row_id.as_deref() == Some(row_id.as_str())
+        })
+        .collect::<Vec<_>>()
+}
+
+fn row_id_from_row_key(row_key: &str) -> String {
+    let without_label = row_key.split('#').next().unwrap_or(row_key);
+    without_label
+        .split_once(':')
+        .map(|(_, suffix)| suffix.to_owned())
+        .unwrap_or_else(|| without_label.to_owned())
+}
+
+fn diagnostic_metric_f32(record: &DiagnosticRecord, key: &str) -> Option<f32> {
+    record.metrics.get(key).and_then(|value| match value {
+        DiagnosticValue::Float(number) => Some(*number as f32),
+        DiagnosticValue::Integer(number) => Some(*number as f32),
+        _ => None,
+    })
+}
+
+fn diagnostic_metric_text(record: &DiagnosticRecord, key: &str) -> Option<String> {
+    record.metrics.get(key).and_then(|value| match value {
+        DiagnosticValue::Text(text) => Some(text.clone()),
+        _ => None,
+    })
+}
+
+fn overlap_row_for_candidate<'a>(
+    rows: &[&'a DiagnosticRecord],
+    candidate_text: &str,
+) -> Option<&'a DiagnosticRecord> {
+    let normalized = normalized_candidate_text_local(candidate_text);
+    rows.iter().copied().find(|record| {
+        diagnostic_metric_text(record, "candidate_text")
+            .map(|value| normalized_candidate_text_local(&value) == normalized)
+            .unwrap_or(false)
+    })
+}
+
+fn recompute_overlap_without_h_scale(record: &DiagnosticRecord) -> Option<bool> {
+    let current_left = diagnostic_metric_f32(record, "predicted_left_edge_x_pt")?;
+    let current_right = diagnostic_metric_f32(record, "predicted_right_edge_x_pt")?;
+    let width_pt = diagnostic_metric_f32(record, "width_pt")?;
+    let glyph_width_sum_pt = diagnostic_metric_f32(record, "glyph_width_sum_pt")?;
+    let char_spacing_total_pt = diagnostic_metric_f32(record, "char_spacing_total_pt")?;
+    let word_spacing_total_pt = diagnostic_metric_f32(record, "word_spacing_total_pt")?;
+    let h_scale_pct = diagnostic_metric_f32(record, "h_scale_pct")?;
+    let tolerance_pt = diagnostic_metric_f32(record, "tolerance_pt").unwrap_or(0.0_f32);
+    let anchor_mode = diagnostic_metric_text(record, "anchor_mode").unwrap_or_default();
+    let scale = (h_scale_pct / 100.0_f32).max(0.01_f32);
+    let glyph_without_h_scale = glyph_width_sum_pt / scale;
+    let width_without_h_scale =
+        glyph_without_h_scale + char_spacing_total_pt + word_spacing_total_pt;
+
+    let (left_edge, right_edge) = match anchor_mode.as_str() {
+        "right_only" => (current_right - width_without_h_scale, current_right),
+        _ => (current_left, current_left + width_without_h_scale),
+    };
+
+    let previous_overlap = diagnostic_metric_f32(record, "previous_neighbor_x1")
+        .map(|previous_right| previous_right - left_edge > tolerance_pt)
+        .unwrap_or(false);
+    let next_overlap = diagnostic_metric_f32(record, "next_neighbor_x0")
+        .map(|next_left| right_edge - next_left > tolerance_pt)
+        .unwrap_or(false);
+
+    if width_pt <= 0.0_f32 {
+        None
+    } else {
+        Some(previous_overlap || next_overlap)
+    }
+}
+
+fn find_dataset<'a>(
+    variant: &'a VariantSummary,
+    dataset_name: &str,
+) -> Option<&'a VariantDatasetResult> {
+    variant
+        .datasets
+        .iter()
+        .find(|dataset| dataset.name == dataset_name)
+}
+
+fn find_target_rank(dataset: &VariantDatasetResult, label: &str) -> Option<usize> {
+    dataset
+        .targets
+        .iter()
+        .find(|target| target.label == label)
+        .and_then(|target| target.best_rank)
+}
+
+fn greedy_unique_top1_count(
+    cluster_rows: &[(String, &crate::types::guess_types::RedactionGuess)],
+) -> usize {
+    let mut seen = BTreeSet::<String>::new();
+    let mut count = 0_usize;
+    for (_, guess) in cluster_rows {
+        if guess
+            .candidates
+            .iter()
+            .take(20)
+            .any(|candidate| seen.insert(normalized_candidate_text_local(&candidate.text)))
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn max_selected_gap(left: Option<f32>, right: Option<f32>) -> Option<f32> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn load_visual_rows(rows_path: &Path) -> Result<Vec<VisualBenchmarkRow>, String> {
+    let bytes = std::fs::read(rows_path)
+        .map_err(|error| format!("failed to read {}: {error}", rows_path.display()))?;
+    serde_json::from_slice::<Vec<VisualBenchmarkRow>>(&bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", rows_path.display()))
+}
+
+fn alignment_threshold(width_pt: f32) -> f32 {
+    (width_pt.abs() * 0.10_f32).max(5.0_f32)
+}
+
+fn percentile_of_value(values: &[f64], value: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0_f64;
+    }
+    let less_or_equal = values
+        .iter()
+        .filter(|candidate| **candidate <= value)
+        .count();
+    less_or_equal as f64 / values.len() as f64
+}
+
+fn family_entropy(candidates: &[GuessCandidate], limit: usize) -> f64 {
+    let slice = candidates.iter().take(limit).collect::<Vec<_>>();
+    if slice.is_empty() {
+        return 0.0_f64;
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    for candidate in slice {
+        increment_count(&mut counts, classify_name_family(&candidate.text));
+    }
+    let total = counts.values().sum::<usize>().max(1) as f64;
+    counts
+        .values()
+        .map(|count| {
+            let probability = *count as f64 / total;
+            if probability <= 0.0_f64 {
+                0.0_f64
+            } else {
+                -probability * probability.log2()
+            }
+        })
+        .sum::<f64>()
+}
+
+fn dominant_family_share(candidates: &[GuessCandidate], limit: usize) -> Option<(String, f64)> {
+    let slice = candidates.iter().take(limit).collect::<Vec<_>>();
+    if slice.is_empty() {
+        return None;
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    for candidate in slice {
+        increment_count(&mut counts, classify_name_family(&candidate.text));
+    }
+    let total = counts.values().sum::<usize>().max(1) as f64;
+    counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
+        .map(|(family, count)| (family, count as f64 / total))
+}
+
+#[inline]
 pub fn build_dictionary_ablation_summary(variants: &[VariantSummary]) -> DictionaryAblationSummary {
     let best_variant_by_mrr = variants
         .iter()
@@ -406,6 +1301,31 @@ pub fn filter_full_name_only(entries: &[&str]) -> Vec<String> {
 }
 
 #[inline]
+pub fn filter_multi_token_only(entries: &[&str]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| {
+            entry
+                .split_whitespace()
+                .filter(|token| !token.is_empty())
+                .count()
+                >= 2
+        })
+        .filter(|entry| classify_name_family(entry) != "punctuation_heavy")
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+#[inline]
+pub fn filter_plain_multi_only(entries: &[&str]) -> Vec<String> {
+    filter_full_name_only(entries)
+}
+
+#[inline]
 pub fn filter_no_comma_single(entries: &[&str]) -> Vec<String> {
     entries
         .iter()
@@ -444,13 +1364,14 @@ pub fn build_hard_negative_full_name_dictionary(
                 if classify_name_family(text) != "plain_multi_token" {
                     continue;
                 }
-                if candidate.error_pt > error_limit_pt {
+                let effective_error_pt = candidate_effective_error_pt(candidate);
+                if effective_error_pt > error_limit_pt {
                     continue;
                 }
                 let key = text.to_ascii_uppercase();
                 let existing = scored.get(&key).copied().unwrap_or(f32::MAX);
-                if candidate.error_pt < existing {
-                    scored.insert(key, candidate.error_pt);
+                if effective_error_pt < existing {
+                    scored.insert(key, effective_error_pt);
                 }
             }
         }
@@ -527,6 +1448,22 @@ pub fn render_summary_markdown(
         summary.best_possible_rank.improvable_by_same_family,
         summary.best_possible_rank.improvable_by_no_comma_single
     ));
+    out.push_str(&format!(
+        "- Top1 template families tracked: {}\n- Template rows tracked: {}\n- Full-name oracle improvements: {}\n",
+        summary.candidate_source_provenance.top1_template_families.len(),
+        summary.variant_template_provenance.rows.len(),
+        summary.oracle_full_name_pool_ceiling.improvable_by_full_name_only
+    ));
+    out.push_str(&format!(
+        "- Overlap recompute rows: {}\n- Multi-row clusters: {}\n- Box trust rows: {}\n",
+        summary.overlap_recompute_geometry.rows.len(),
+        summary.row_cluster_assignment.multi_row_clusters,
+        summary.redaction_box_trust_classifier.rows.len()
+    ));
+    out.push_str(&format!(
+        "- Mean top-5 family entropy: {}\n",
+        render_opt_f64(summary.topk_family_entropy.mean_entropy_top5)
+    ));
     out.push_str("\n## Stability\n\n");
     out.push_str(&format!(
         "- Repeats: {}\n- All hashes identical: {}\n",
@@ -544,6 +1481,14 @@ pub fn render_summary_markdown(
     if let Some(path) = &summary.anchor_span_visual_summary_path {
         out.push_str("\n## Visual Span Benchmark\n\n");
         out.push_str(&format!("- Summary: `{}`\n", path.display()));
+    }
+    if let Some(pack) = &summary.visual_review_pack {
+        out.push_str("\n## Visual Review Pack\n\n");
+        out.push_str(&format!(
+            "- Manifest: `{}`\n- Items: {}\n",
+            pack.manifest_path.display(),
+            pack.item_count
+        ));
     }
     out
 }
@@ -577,6 +1522,16 @@ pub fn render_definitions_markdown() -> String {
     out.push_str("- `tie_density`: Counts how many candidates sit within fixed error thresholds of the target and top-1 (`0.05`, `0.10`, `0.25`, `0.50`, `1.00` pt). High tie density means ranking is fragile.\n");
     out.push_str("- `perturbation_robustness`: Re-scores the final pool after small target-width perturbations (`±0.25`, `±0.50`, `±1.00` pt). If top-1 flips easily, the ranker is unstable even if aggregate metrics look good.\n");
     out.push_str("- `stability`: Repeats the exact same benchmark run and checks whether hashes, top-1 answers, and per-target ranks are stable. If this is unstable, benchmark conclusions are weak.\n\n");
+    out.push_str("- `candidate_source_provenance`: Records where winning and target candidates came from in dictionary expansion terms: raw entry, template id/family, variant family, alias source, orthographic source, and case source. This closes the provenance gap for pool-overfitting questions.\n");
+    out.push_str("- `variant_template_provenance`: Aggregates candidate, top-1, target, and target-displacement counts by template id/family. This shows which expansion templates are actually causing misses.\n");
+    out.push_str("- `width_component_attribution`: Compares winner versus target width components per row. This makes it explicit whether losses are being driven more by glyph width sums or spacing totals.\n");
+    out.push_str("- `overlap_recompute_geometry`: Reuses candidate-overlap diagnostics with neighbor geometry and width components to show whether winner/target overlap state can be recomputed exactly under `no_h_scale` style counterfactuals.\n");
+    out.push_str("- `oracle_full_name_pool_ceiling`: Reports current rank versus stricter full-name pool ceilings and hard-negative full-name stages. This quantifies how much headroom comes from pool quality versus pure ranking.\n");
+    out.push_str("- `row_cluster_assignment`: Groups rows by page and selected line id, then compares independent top-1 uniqueness versus a simple greedy unique assignment. This flags where repeated nearby rows may need joint solving.\n");
+    out.push_str("- `anchor_locality_percentile`: Uses the visual benchmark rows to place current anchor gaps on a batch percentile scale. This shows whether a chosen anchor is unusually nonlocal even when absolute gaps look small in isolation.\n");
+    out.push_str("- `redaction_box_trust_classifier`: Uses the visual benchmark reference widths to classify whether the redaction box is trustworthy on each row. This is a benchmark-only trust signal, not a runtime decision rule.\n");
+    out.push_str("- `topk_family_entropy`: Measures how family-diverse the top of the ranking is. Low entropy means the top-K is dominated by one family; high entropy means many families are competing.\n");
+    out.push_str("- `visual_review_pack`: A persisted manifest linking the benchmark review surfaces for baseline and best benchmark variant outputs so visual checks are part of review, not an afterthought.\n\n");
 
     out.push_str("## Interpretation Rules\n\n");
     out.push_str("- A gain in `baseline` is the strongest signal.\n");
@@ -584,6 +1539,10 @@ pub fn render_definitions_markdown() -> String {
     out.push_str("- A gain on normal baseline but not on `hard_negative_full_name_w2` or `w5` is a warning sign for overfitting to easy dictionary composition.\n");
     out.push_str("- If `candidate_pool_quality` shows the target missing, fix generation before tuning ranking.\n");
     out.push_str("- If targets are present but `pairwise_winner_explanations` and `tie_density` show dense near-ties, fix ranking rather than generation.\n");
+    out.push_str("- If `candidate_source_provenance` and `variant_template_provenance` point to one template family dominating losses, prefer a benchmark-only template policy experiment before changing runtime behavior.\n");
+    out.push_str("- If `oracle_full_name_pool_ceiling` improves sharply but `hard_negative_full_name_w2` stays weak, treat any full-name pruning win as overfitting risk until provenance data shows a safer narrower policy.\n");
+    out.push_str("- If `width_component_attribution` shows glyph deltas dominating and spacing deltas are flat, spacing tweaks are unlikely to be the next lever.\n");
+    out.push_str("- If `row_cluster_assignment` shows many improvable clusters, row-local ranking is probably leaving document-level signal on the table.\n");
     out.push_str("- If guess metrics are bad while `anchor_span_visual` is also bad, geometry may still be contaminating guess evaluation.\n");
     out.push_str("- If `perturbation_robustness` is weak, small measurement noise can flip winners; treat marginal gains carefully.\n");
     out.push_str("- If `stability` is not deterministic, do not trust small benchmark deltas.\n\n");
@@ -591,6 +1550,7 @@ pub fn render_definitions_markdown() -> String {
     out.push_str("## Caveats\n\n");
     out.push_str("- These signals are computed from the final visible guess pools unless explicitly noted otherwise. They do not fully explain candidates that were never generated or were removed before final output.\n");
     out.push_str("- Family labels are heuristic text-shape labels, not exact provenance from dictionary expansion.\n");
+    out.push_str("- The new provenance and review signals are benchmark-only observability; they do not change runtime guess ranking by themselves.\n");
     out.push_str("- Counterfactual signals show possible ranking headroom, not guaranteed safe runtime changes.\n");
     out.push_str("- Adversarial dictionary stages are intended to flag overfitting, not to replace the canonical benchmark.\n");
     out
@@ -789,8 +1749,8 @@ fn target_result_from_row(
                 .find(|candidate| normalized_text(&candidate.text) == target_upper);
             let top1 = row.candidates.first();
             (
-                target_candidate.map(|candidate| candidate.error_pt),
-                top1.map(|candidate| candidate.error_pt),
+                target_candidate.map(candidate_effective_error_pt),
+                top1.map(candidate_effective_error_pt),
                 top1.map(|candidate| candidate.text.clone()),
                 top1.map(|candidate| classify_name_family(&candidate.text)),
             )
@@ -932,9 +1892,18 @@ fn build_pairwise_reason(
                     )
                 }
                 (Some(top1), Some(target_candidate)) => {
-                    let delta = target_candidate.error_pt - top1.error_pt;
+                    let delta = candidate_effective_error_pt(target_candidate)
+                        - candidate_effective_error_pt(top1);
+                    let top1_alpha = alpha_len(&top1.text);
+                    let target_alpha = alpha_len(&target.target);
+                    let top1_tokens = token_count(&top1.text);
+                    let target_tokens = token_count(&target.target);
                     let reason = if delta > 0.0001_f32 {
                         "top1_lower_width_error"
+                    } else if (delta).abs() <= 0.0001_f32
+                        && (top1_alpha != target_alpha || top1_tokens != target_tokens)
+                    {
+                        "longer_alpha_tiebreak"
                     } else if (delta).abs() <= 0.0001_f32
                         && normalized_text(&top1.text) < normalized_text(&target.target)
                     {
@@ -990,52 +1959,52 @@ fn build_tie_density_row(target: &TargetResult, row: Option<&SelectedGuessRow>) 
         row_key: target.best_row_key.clone(),
         within_target_005: count_within_threshold(
             row,
-            target_candidate.map(|candidate| candidate.error_pt),
+            target_candidate.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[0],
         ),
         within_target_010: count_within_threshold(
             row,
-            target_candidate.map(|candidate| candidate.error_pt),
+            target_candidate.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[1],
         ),
         within_target_025: count_within_threshold(
             row,
-            target_candidate.map(|candidate| candidate.error_pt),
+            target_candidate.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[2],
         ),
         within_target_050: count_within_threshold(
             row,
-            target_candidate.map(|candidate| candidate.error_pt),
+            target_candidate.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[3],
         ),
         within_target_100: count_within_threshold(
             row,
-            target_candidate.map(|candidate| candidate.error_pt),
+            target_candidate.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[4],
         ),
         within_top1_005: count_within_threshold(
             row,
-            top1.map(|candidate| candidate.error_pt),
+            top1.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[0],
         ),
         within_top1_010: count_within_threshold(
             row,
-            top1.map(|candidate| candidate.error_pt),
+            top1.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[1],
         ),
         within_top1_025: count_within_threshold(
             row,
-            top1.map(|candidate| candidate.error_pt),
+            top1.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[2],
         ),
         within_top1_050: count_within_threshold(
             row,
-            top1.map(|candidate| candidate.error_pt),
+            top1.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[3],
         ),
         within_top1_100: count_within_threshold(
             row,
-            top1.map(|candidate| candidate.error_pt),
+            top1.map(candidate_effective_error_pt),
             TIE_THRESHOLDS_PT[4],
         ),
     }
@@ -1074,11 +2043,15 @@ fn perturbed_top1(row: &SelectedGuessRow, delta: f32) -> Option<String> {
     let perturbed_target = row.target_width_pt + delta;
     let mut candidates = row.candidates.iter().collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
-        let left_error = (left.width_pt - perturbed_target).abs();
-        let right_error = (right.width_pt - perturbed_target).abs();
+        let left_error =
+            (left.width_pt - perturbed_target).abs() + candidate_noncanonical_penalty_pt(left);
+        let right_error =
+            (right.width_pt - perturbed_target).abs() + candidate_noncanonical_penalty_pt(right);
         left_error
             .partial_cmp(&right_error)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| alpha_len(&right.text).cmp(&alpha_len(&left.text)))
+            .then_with(|| token_count(&right.text).cmp(&token_count(&left.text)))
             .then_with(|| normalized_text(&left.text).cmp(&normalized_text(&right.text)))
     });
     candidates.first().map(|candidate| candidate.text.clone())
@@ -1105,6 +2078,25 @@ fn normalized_text(value: &str) -> String {
     value.trim().to_ascii_uppercase()
 }
 
+fn alpha_len(value: &str) -> usize {
+    value.chars().filter(|ch| ch.is_ascii_alphabetic()).count()
+}
+
+fn token_count(value: &str) -> usize {
+    value
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .count()
+}
+
+fn candidate_effective_error_pt(candidate: &GuessCandidate) -> f32 {
+    candidate.adjusted_error_pt.unwrap_or(candidate.error_pt)
+}
+
+fn candidate_noncanonical_penalty_pt(candidate: &GuessCandidate) -> f32 {
+    candidate.noncanonical_penalty_pt.unwrap_or(0.0_f32)
+}
+
 fn count_within_threshold(
     row: Option<&SelectedGuessRow>,
     baseline_error: Option<f32>,
@@ -1115,7 +2107,9 @@ fn count_within_threshold(
     Some(
         row.candidates
             .iter()
-            .filter(|candidate| (candidate.error_pt - baseline).abs() <= threshold)
+            .filter(|candidate| {
+                (candidate_effective_error_pt(candidate) - baseline).abs() <= threshold
+            })
             .count(),
     )
 }
@@ -1223,6 +2217,9 @@ mod tests {
                         glyph_width_sum_pt: 10.0,
                         char_spacing_total_pt: 0.0,
                         word_spacing_total_pt: 0.0,
+                        adjusted_error_pt: Some(*error_pt),
+                        noncanonical_penalty_pt: Some(0.0),
+                        provenance: None,
                         predicted_left_edge_x_pt: None,
                         predicted_right_edge_x_pt: None,
                         actual_right_edge_x_pt: None,

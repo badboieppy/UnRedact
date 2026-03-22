@@ -12,8 +12,8 @@ use crate::data::types::redaction_evidence_types::{
 use crate::types::diagnostic_types::{DiagnosticRecord, DiagnosticValue};
 use crate::types::file_types::FontRunReport;
 use crate::types::guess_types::{
-    AnchorDecisionRecord, AnchorSideDecision, AnchorType, GuessCandidate, GuessConfig,
-    GuessContext, GuessReport, RedactionGuess,
+    AnchorDecisionRecord, AnchorSideDecision, AnchorType, GuessCandidate, GuessCandidateProvenance,
+    GuessConfig, GuessContext, GuessReport, RedactionGuess,
 };
 use crate::types::redaction_types::{RedactionOccurrence, RedactionReport};
 use crate::types::time::Instant;
@@ -235,6 +235,22 @@ fn build_guess_candidate(candidate: &MeasuredCandidate) -> GuessCandidate {
         glyph_width_sum_pt: candidate.glyph_width_sum_pt,
         char_spacing_total_pt: candidate.char_spacing_total_pt,
         word_spacing_total_pt: candidate.word_spacing_total_pt,
+        adjusted_error_pt: Some(candidate.adjusted_error_pt),
+        noncanonical_penalty_pt: Some(candidate.noncanonical_penalty_pt),
+        provenance: candidate
+            .provenance
+            .as_ref()
+            .map(|provenance| GuessCandidateProvenance {
+                raw_entry_index: provenance.raw_entry_index,
+                raw_entry_text: provenance.raw_entry_text.clone(),
+                raw_entry_normalized: provenance.raw_entry_normalized.clone(),
+                template_id: provenance.template_id.clone(),
+                template_family: provenance.template_family.clone(),
+                variant_family: provenance.variant_family.clone(),
+                alias_source: provenance.alias_source.clone(),
+                orthographic_source: provenance.orthographic_source.clone(),
+                case_source: provenance.case_source.clone(),
+            }),
         predicted_left_edge_x_pt: candidate.predicted_left_edge_x_pt,
         predicted_right_edge_x_pt: candidate.predicted_right_edge_x_pt,
         actual_right_edge_x_pt: candidate.actual_right_edge_x_pt,

@@ -55,6 +55,12 @@ pub struct GuessCandidate {
     pub char_spacing_total_pt: f32,
     pub word_spacing_total_pt: f32,
     #[serde(default)]
+    pub adjusted_error_pt: Option<f32>,
+    #[serde(default)]
+    pub noncanonical_penalty_pt: Option<f32>,
+    #[serde(default)]
+    pub provenance: Option<GuessCandidateProvenance>,
+    #[serde(default)]
     pub predicted_left_edge_x_pt: Option<f32>,
     #[serde(default)]
     pub predicted_right_edge_x_pt: Option<f32>,
@@ -64,6 +70,22 @@ pub struct GuessCandidate {
     pub error_pt: f32,
     #[serde(default)]
     pub normalized_error: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuessCandidateProvenance {
+    pub raw_entry_index: usize,
+    pub raw_entry_text: String,
+    pub raw_entry_normalized: String,
+    pub template_id: String,
+    pub template_family: String,
+    pub variant_family: String,
+    #[serde(default)]
+    pub alias_source: Option<String>,
+    #[serde(default)]
+    pub orthographic_source: Option<String>,
+    #[serde(default)]
+    pub case_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
