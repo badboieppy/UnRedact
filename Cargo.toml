@@ -106,3 +106,8 @@ required-features = ["cli-entry"]
 name = "anchor_span_visual_benchmark"
 path = "src/bin/anchor_span_visual_benchmark.rs"
 required-features = ["cli-entry"]
+
+[[bin]]
+name = "accuracy_benchmark_report"
+path = "src/bin/accuracy_benchmark_report.rs"
+required-features = ["cli-entry"]
